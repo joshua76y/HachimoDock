@@ -9,6 +9,10 @@
  */
 #include "pet_p4_wifi_bsp.h"
 
+#include <time.h>
+
+#include "esp_sntp.h"
+
 #include <stdio.h>
 #include <string.h>
 
@@ -81,6 +85,21 @@ static esp_err_t ensure_nvs(void) {
   return err;
 }
 
+/* 侧栏时钟兜底：联网后走 SNTP 校时，不依赖 PC 心跳也能显示日期时间。
+ * 只用 UTC 秒（epoch），时区换算交给 panel_chrome 的 UTC+8 逻辑。 */
+static void sntp_start_once(void) {
+  static bool started;
+  if (started) return;
+  started = true;
+  setenv("TZ", "CST-8", 1);
+  tzset();
+  esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
+  esp_sntp_setservername(0, "ntp.aliyun.com");
+  esp_sntp_setservername(1, "pool.ntp.org");
+  esp_sntp_init();
+  ESP_LOGI(TAG, "SNTP 校时已启动（ntp.aliyun.com / pool.ntp.org）");
+}
+
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
   (void) arg;
   if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
@@ -96,6 +115,7 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     snprintf(s_ip, sizeof(s_ip), IPSTR, IP2STR(&ev->ip_info.ip));
     s_connected = true;
     if (wifi_failcnt_load()) wifi_failcnt_save(0);  /* 成功一次即清零熔断计数 */
+    sntp_start_once();
     ESP_LOGI(TAG, "已联网 hostname=%s IP=%s", PET_P4_WIFI_HOSTNAME, s_ip);
   }
 }

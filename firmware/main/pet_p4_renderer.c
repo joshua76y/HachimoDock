@@ -1542,9 +1542,15 @@ static int glyph_width(uint32_t codepoint, uint32_t next_codepoint) {
 /* Native32 changes ink only. Layout continues to use glyph_width/font16. */
 static inline bool scaled_glyph_dsc(uint32_t cp,uint32_t next,lv_font_glyph_dsc_t *glyph,int *scale){
 #if PET_FONT_NATIVE_32
-  if(*scale==2&&pet_p4_font_native32_has_glyph(cp)
+  /* scale>=2 一律优先用 32px 原生字库：过去的实现只有 scale==2 才用，
+   * scale>=3 时退回 16px 点阵再整数放大 3~5 倍，屏幕上就是马赛克。
+   * native32 的原生尺寸等价 scale=2，剩余倍率按整数取整（3→2, 4→2, 5→2；
+   * 宁可略小于 16px 放大后的尺寸，也要保证笔画清晰）。 */
+  if(*scale>=2&&pet_p4_font_native32_has_glyph(cp)
       &&lv_font_get_glyph_dsc(&pet_p4_font_cn_32,glyph,cp,next)){
-    *scale=1;return true;
+    int ratio=*scale/2;
+    if(ratio<1)ratio=1;
+    *scale=ratio;return true;
   }
 #else
   (void)scale;
@@ -1650,6 +1656,41 @@ static int utf8_text_width(const char *text, int byte_limit, int scale) {
   return width;
 }
 
+/* 字形放大改成定点双线性插值：旧实现把一个源像素复制成 scale×scale 的实心块，
+ * 16px 点阵放大 2~3 倍时笔画边缘全是台阶（就是"像素不对应"的观感）。
+ * 这里按目标像素反查源坐标做 4 邻域加权，边缘得到灰度过渡。 */
+static inline uint8_t glyph_alpha_bilinear(
+  const uint8_t *bitmap,
+  const lv_font_glyph_dsc_t *glyph,
+  int ox,
+  int oy,
+  int scale
+) {
+  const int w = glyph->box_w;
+  const int h = glyph->box_h;
+  if (w <= 0 || h <= 0) return 0;
+  int fx = ((ox << 8) + (scale << 7)) / scale - 128;
+  int fy = ((oy << 8) + (scale << 7)) / scale - 128;
+  int x0 = fx >> 8;
+  int y0 = fy >> 8;
+  int wx = fx & 0xFF;
+  int wy = fy & 0xFF;
+  if (x0 < 0) { x0 = 0; wx = 0; }
+  if (y0 < 0) { y0 = 0; wy = 0; }
+  if (x0 > w - 1) x0 = w - 1;
+  if (y0 > h - 1) y0 = h - 1;
+  int x1 = x0 + 1 < w ? x0 + 1 : x0;
+  int y1 = y0 + 1 < h ? y0 + 1 : y0;
+  if (wx == 0 && wy == 0) return glyph_alpha_at(bitmap, glyph, x0, y0);
+  const uint32_t a00 = glyph_alpha_at(bitmap, glyph, x0, y0);
+  const uint32_t a10 = glyph_alpha_at(bitmap, glyph, x1, y0);
+  const uint32_t a01 = glyph_alpha_at(bitmap, glyph, x0, y1);
+  const uint32_t a11 = glyph_alpha_at(bitmap, glyph, x1, y1);
+  const uint32_t top = a00 * (uint32_t) (256 - wx) + a10 * (uint32_t) wx;
+  const uint32_t bottom = a01 * (uint32_t) (256 - wx) + a11 * (uint32_t) wx;
+  return (uint8_t) ((top * (uint32_t) (256 - wy) + bottom * (uint32_t) wy) >> 16);
+}
+
 static void draw_lvgl_glyph(uint32_t codepoint, uint32_t next_codepoint, int x, int y, uint16_t color, int scale) {
   lv_font_glyph_dsc_t glyph = {0};
   if (codepoint == 0xFE0F || codepoint == 0x200D) return;
@@ -1681,16 +1722,12 @@ static void draw_lvgl_glyph(uint32_t codepoint, uint32_t next_codepoint, int x, 
   uint8_t r = (uint8_t) (((color >> 11) & 0x1F) * 255 / 31);
   uint8_t g = (uint8_t) (((color >> 5) & 0x3F) * 255 / 63);
   uint8_t b = (uint8_t) ((color & 0x1F) * 255 / 31);
-  for (int gy = 0; gy < glyph.box_h; gy += 1) {
-    for (int gx = 0; gx < glyph.box_w; gx += 1) {
-      uint8_t alpha = glyph_alpha_at(bitmap, &glyph, gx, gy);
-      if (alpha) {
-        for (int sy = 0; sy < scale; sy += 1) {
-          for (int sx = 0; sx < scale; sx += 1) {
-            blend_px(gx0 + gx * scale + sx, gy0 + gy * scale + sy, r, g, b, alpha);
-          }
-        }
-      }
+  const int out_w = glyph.box_w * scale;
+  const int out_h = glyph.box_h * scale;
+  for (int oy = 0; oy < out_h; oy += 1) {
+    for (int ox = 0; ox < out_w; ox += 1) {
+      uint8_t alpha = glyph_alpha_bilinear(bitmap, &glyph, ox, oy, scale);
+      if (alpha) blend_px(gx0 + ox, gy0 + oy, r, g, b, alpha);
     }
   }
   lv_font_glyph_release_draw_data(&glyph);
@@ -1787,6 +1824,66 @@ static int utf8_text_width_medium(const char *text) {
   return width;
 }
 
+/* 宠物界面正文的 1.5 倍字号：优先用 32px 原生字库做 3:4 盒式降采样到 24px。
+ * 旧实现是 16px 点阵按 dx*2/3 最近邻重采样，笔画宽窄不均（几像素粗几像素细），
+ * 屏幕上就是"像素不对应"。盒式平均把它变成灰度平滑的 24px，
+ * 且 24px 与 16px×1.5 尺寸完全一致，布局/基线不用改。 */
+static bool draw_native32_as_24(
+  uint32_t codepoint,
+  uint32_t next_codepoint,
+  int x,
+  int y,
+  uint16_t color
+) {
+#if PET_FONT_NATIVE_32
+  lv_font_glyph_dsc_t glyph = {0};
+  if (!pet_p4_font_native32_has_glyph(codepoint)) return false;
+  if (!lv_font_get_glyph_dsc(&pet_p4_font_cn_32, &glyph, codepoint, next_codepoint)) return false;
+  glyph.req_raw_bitmap = 1;
+  const uint8_t *bitmap = (const uint8_t *) glyph.resolved_font->get_glyph_bitmap(&glyph, NULL);
+  if (!bitmap) {
+    lv_font_glyph_release_draw_data(&glyph);
+    return false;
+  }
+  const int baseline = y + ((pet_p4_font_cn_16.line_height - pet_p4_font_cn_16.base_line) * 3 + 1) / 2;
+  const int gx0 = x + glyph.ofs_x * 3 / 4;
+  const int gy0 = baseline - (glyph.box_h * 3 + 2) / 4 - glyph.ofs_y * 3 / 4;
+  const int dw = (glyph.box_w * 3 + 2) / 4;
+  const int dh = (glyph.box_h * 3 + 2) / 4;
+  const uint8_t r = (uint8_t) (((color >> 11) & 0x1F) * 255 / 31);
+  const uint8_t g = (uint8_t) (((color >> 5) & 0x3F) * 255 / 63);
+  const uint8_t b = (uint8_t) ((color & 0x1F) * 255 / 31);
+  for (int dy = 0; dy < dh; dy += 1) {
+    int sy0 = dy * 4 / 3;
+    int sy1 = (dy + 1) * 4 / 3;
+    if (sy1 <= sy0) sy1 = sy0 + 1;
+    if (sy1 > glyph.box_h) sy1 = glyph.box_h;
+    for (int dx = 0; dx < dw; dx += 1) {
+      int sx0 = dx * 4 / 3;
+      int sx1 = (dx + 1) * 4 / 3;
+      if (sx1 <= sx0) sx1 = sx0 + 1;
+      if (sx1 > glyph.box_w) sx1 = glyph.box_w;
+      unsigned sum = 0;
+      unsigned count = 0;
+      for (int sy = sy0; sy < sy1; sy += 1) {
+        for (int sx = sx0; sx < sx1; sx += 1) {
+          sum += glyph_alpha_at(bitmap, &glyph, sx, sy);
+          count += 1;
+        }
+      }
+      if (count && sum) {
+        blend_px(gx0 + dx, gy0 + dy, r, g, b, (uint8_t) (sum / count));
+      }
+    }
+  }
+  lv_font_glyph_release_draw_data(&glyph);
+  return true;
+#else
+  (void) codepoint; (void) next_codepoint; (void) x; (void) y; (void) color;
+  return false;
+#endif
+}
+
 static void draw_lvgl_glyph_medium(
   uint32_t codepoint,
   uint32_t next_codepoint,
@@ -1794,6 +1891,7 @@ static void draw_lvgl_glyph_medium(
   int y,
   uint16_t color
 ) {
+  if (draw_native32_as_24(codepoint, next_codepoint, x, y, color)) return;
   lv_font_glyph_dsc_t glyph = {0};
   if (codepoint == 0xFE0F || codepoint == 0x200D) return;
   if (!lv_font_get_glyph_dsc(&pet_p4_font_cn_16, &glyph, codepoint, next_codepoint)) {
@@ -1822,13 +1920,11 @@ static void draw_lvgl_glyph_medium(
   uint8_t r = (uint8_t) (((color >> 11) & 0x1F) * 255 / 31);
   uint8_t g = (uint8_t) (((color >> 5) & 0x3F) * 255 / 63);
   uint8_t b = (uint8_t) ((color & 0x1F) * 255 / 31);
+  /* 1.5 倍同样走定点双线性（等价 scale=3 的目标网格再取 1/2 尺寸）：
+   * ox/oy 以 1.5 倍坐标映射回 16px 源，用 scale=3 的插值核采样。 */
   for (int dy = 0; dy < scaled_h; dy += 1) {
-    int source_y = dy * 2 / 3;
-    if (source_y >= glyph.box_h) source_y = glyph.box_h - 1;
     for (int dx = 0; dx < scaled_w; dx += 1) {
-      int source_x = dx * 2 / 3;
-      if (source_x >= glyph.box_w) source_x = glyph.box_w - 1;
-      uint8_t alpha = glyph_alpha_at(bitmap, &glyph, source_x, source_y);
+      uint8_t alpha = glyph_alpha_bilinear(bitmap, &glyph, dx, dy, 3);
       if (alpha) blend_px(gx0 + dx, gy0 + dy, r, g, b, alpha);
     }
   }

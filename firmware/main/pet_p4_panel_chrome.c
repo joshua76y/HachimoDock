@@ -9,6 +9,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -54,6 +55,7 @@ static struct {
   char page[12];
   int batt;
   int bars;
+  int host;            /* 主机（PC）在线 0/1 */
   unsigned int keys;   /* 按键实时电平位图：bit i = 第 i 个键按下（低电平有效） */
 } s_shown = {.batt = -999, .bars = -1, .keys = 0xFFFFFFFFu};
 
@@ -264,37 +266,41 @@ static const char *page_word(const pet_p4_runtime_state_t *st) {
 
 static void redraw(const char *clock, const char *date, const char *net,
                    const char *state, const char *page, int batt, int bars,
-                   unsigned int keys) {
+                   int host_online, unsigned int keys) {
   fill(0, 0, W, H, C_BG);
 
-  text_center(clock, W / 2, 10, C_TEXT, 2);
-  text_center(date, W / 2, 48, C_DIM, 1);
-  fill(14, 70, W - 28, 1, C_LINE);
+  text_center(clock, W / 2, 8, C_TEXT, 2);
+  text_center(date, W / 2, 44, C_DIM, 1);
+  fill(14, 66, W - 28, 1, C_LINE);
 
-  draw_bars(16, 78, bars);
-  text(net, 44, 76, C_TEXT, 1);
+  draw_bars(16, 74, bars);
+  text(net, 44, 72, C_TEXT, 1);
 
-  text("状态", 14, 104, C_DIM, 1);
-  text(state, 14, 124, C_ACCENT, 1);
+  /* 主机（PC）连接状态：谁在跟设备说话 */
+  text("主机", 14, 96, C_DIM, 1);
+  text(host_online ? "连接" : "断开", 14, 114, host_online ? C_OK : C_DIM, 1);
 
-  text("页面", 14, 150, C_DIM, 1);
-  text(page, 14, 170, C_TEXT, 1);
+  text("状态", 14, 136, C_DIM, 1);
+  text(state, 14, 154, C_ACCENT, 1);
 
-  fill(14, 194, W - 28, 1, C_LINE);
+  text("页面", 14, 176, C_DIM, 1);
+  text(page, 14, 194, C_TEXT, 1);
 
-  text("电量", 14, 202, C_DIM, 1);
-  draw_battery(14, 222, batt);
+  fill(14, 212, W - 28, 1, C_LINE);
+
+  text("电量", 14, 218, C_DIM, 1);
+  draw_battery(14, 238, batt);
   if (batt >= 0) {
     char buf[8];
     snprintf(buf, sizeof(buf), "%d%%", batt);
-    text(buf, 50, 221, C_TEXT, 1);
+    text(buf, 50, 237, C_TEXT, 1);
   } else {
-    text("--", 50, 221, C_DIM, 1);
+    text("USB", 50, 237, C_TEXT, 1);   /* 未接电池：当前由 USB 供电 */
   }
 
-  fill(14, 252, W - 28, 1, C_LINE);
+  fill(14, 262, W - 28, 1, C_LINE);
 
-  text("按键", 14, 260, C_DIM, 1);
+  text("按键", 14, 268, C_DIM, 1);
   /* 接线自检视图（物理命名）：方框填键色 —— 1红 2黄 3蓝 4绿，K=摇杆按下
    * （中性灰），B=BOOT（中性灰）。框内键名、右侧用途 + 实际 GPIO 号，
    * 按下时方框反白。 */
@@ -305,7 +311,7 @@ static void redraw(const char *clock, const char *date, const char *net,
     C_KEY_RED, C_KEY_YELLOW, C_KEY_BLUE, C_KEY_GREEN, C_KEY_NEUTRAL, C_KEY_NEUTRAL
   };
   for (int i = 0; i < 6; i += 1) {
-    draw_key_row(14, 282 + i * 24, labels[i], names[i], gpios[i], colors[i],
+    draw_key_row(14, 288 + i * 22, labels[i], names[i], gpios[i], colors[i],
                  (keys & (1u << i)) != 0);
   }
 
@@ -340,18 +346,27 @@ void pet_p4_panel_chrome_tick(const pet_p4_runtime_state_t *state, unsigned long
   if (!s_ready && pet_p4_panel_chrome_init() != ESP_OK) return;
 
   char clock[8], date[16];
-  split_local_time(pet_p4_host_wall_clock_ms(now_ms), clock, sizeof(clock), date, sizeof(date));
+  /* 时间来源优先级：PC 心跳锚点 → SNTP/系统时钟 → 占位 */
+  unsigned long long wall_ms = pet_p4_host_wall_clock_ms(now_ms);
+  if (!wall_ms) {
+    time_t sys_now = time(NULL);
+    if (sys_now > 1700000000) wall_ms = (unsigned long long) sys_now * 1000ULL;
+  }
+  split_local_time(wall_ms, clock, sizeof(clock), date, sizeof(date));
 
   const bool connected = state->host_last_seen_ms > 0 &&
                          now_ms >= state->host_last_seen_ms &&
                          now_ms - state->host_last_seen_ms < 5000ULL;
+  const bool wifi_up = pet_p4_wifi_is_connected();
   char wifi_label[20];
   pet_p4_wifi_describe(wifi_label, sizeof(wifi_label));
   const char *net = wifi_label[0] ? wifi_label : (connected ? "USB" : "断开");
-  const int bars = pet_p4_wifi_is_connected() ? 3 : (connected ? 3 : 0);
+  const int bars = wifi_up ? 3 : (connected ? 3 : 0);
   const char *word = state_word(state, connected);
+  if (!connected) word = wifi_up ? "等待" : "断开";
   const char *page = page_word(state);
   const int batt = battery_percent(pet_p4_battery_millivolts());
+  const int host_online = connected ? 1 : 0;
 
   /* 按键实时电平（自检用）：低位=按下，打包成位图，变化才重绘 */
   int levels[6] = {0};
@@ -364,7 +379,7 @@ void pet_p4_panel_chrome_tick(const pet_p4_runtime_state_t *state, unsigned long
   if (strcmp(s_shown.clock, clock) == 0 && strcmp(s_shown.date, date) == 0 &&
       strcmp(s_shown.net, net) == 0 && strcmp(s_shown.state, word) == 0 &&
       strcmp(s_shown.page, page) == 0 && s_shown.batt == batt && s_shown.bars == bars &&
-      s_shown.keys == keys) {
+      s_shown.host == host_online && s_shown.keys == keys) {
     return;
   }
 
@@ -375,9 +390,10 @@ void pet_p4_panel_chrome_tick(const pet_p4_runtime_state_t *state, unsigned long
   snprintf(s_shown.page, sizeof(s_shown.page), "%s", page);
   s_shown.batt = batt;
   s_shown.bars = bars;
+  s_shown.host = host_online;
   s_shown.keys = keys;
 
-  redraw(clock, date, net, word, page, batt, bars, keys);
+  redraw(clock, date, net, word, page, batt, bars, host_online, keys);
   s_dirty = true;
 }
 

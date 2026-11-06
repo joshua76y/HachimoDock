@@ -18,6 +18,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_app_desc.h"
 #include "esp_chip_info.h"
@@ -83,7 +84,7 @@ static esp_err_t status_get(httpd_req_t *req) {
     "\"buttons\":{\"k1\":%d,\"k2\":%d,\"k3\":%d,\"k4\":%d,\"joyK\":%d,\"bootB\":%d},"
     "\"joystick\":{\"ready\":%s,\"x\":%d,\"y\":%d,\"cx\":%d,\"cy\":%d,"
     "\"minx\":%d,\"maxx\":%d,\"miny\":%d,\"maxy\":%d},"
-    "\"transport\":\"wifi-http-route-b\"}",
+    "\"now\":%lld,\"transport\":\"wifi-http-route-b\"}",
     PET_P4_WIFI_HOSTNAME,
     app ? app->version : "unknown",
     chip.revision / 100, chip.revision % 100, chip.cores,
@@ -96,7 +97,8 @@ static esp_err_t status_get(httpd_req_t *req) {
     key_levels[3], key_levels[4], key_levels[5],
     joy.ready ? "true" : "false",
     joy.current_x, joy.current_y, joy.center_x, joy.center_y,
-    joy.minimum_x, joy.maximum_x, joy.minimum_y, joy.maximum_y);
+    joy.minimum_x, joy.maximum_x, joy.minimum_y, joy.maximum_y,
+    (long long) time(NULL));
   if (n >= sizeof(body)) n = sizeof(body) - 1;
   return json_reply(req, NULL, body);
 }
