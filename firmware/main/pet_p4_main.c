@@ -42,6 +42,7 @@
 #include "pet_p4_wifi_bsp.h"
 #include "pet_p4_http_bsp.h"
 #include "pet_p4_voice_ptt.h"
+#include "pet_p4_tcp_bsp.h"
 
 #include "pet_p4_storage_policy.h"
 #include "mbedtls/base64.h"
@@ -134,6 +135,7 @@ typedef enum {
   PET_P4_TRANSPORT_BROADCAST = 0,
   PET_P4_TRANSPORT_UART,
   PET_P4_TRANSPORT_USB_SERIAL_JTAG,
+  PET_P4_TRANSPORT_TCP,          /* 路线 A：JSON Lines 套 TCP（:3333） */
 } pet_p4_transport_route_t;
 
 typedef struct {
@@ -150,6 +152,7 @@ typedef struct {
 
 static const pet_p4_transport_route_t g_uart_route = PET_P4_TRANSPORT_UART;
 static const pet_p4_transport_route_t g_usb_serial_jtag_route = PET_P4_TRANSPORT_USB_SERIAL_JTAG;
+static const pet_p4_transport_route_t g_tcp_route = PET_P4_TRANSPORT_TCP;
 #if PET_P4_SERIAL_CONTROL_NEGOTIATED
 static bool usb_protocol_seen(void);
 #endif
@@ -720,6 +723,8 @@ static void transport_send_line_impl(const char *line, void *ctx, bool drain) {
     pet_p4_native_usb_send_json_line(line, NULL);
     if (observing) transport_audit_observe(audit,line, PET_TRANSPORT_AUDIT_NATIVE_USB, audited_bytes,
       fingerprint, hash_available, NULL, NULL);
+    /* 路线 A：BROADCAST 行同步转发到 TCP 客户端（有连接才写） */
+    pet_p4_tcp_broadcast_line(line);
   }
   if(observing_reply){
     g_transport_reply_observed=g_transport_reply_audit.seen!=0;
@@ -1329,6 +1334,15 @@ static void net_discard_send_line(const char *line, void *ctx) {
 
 static bool net_submit_line(const char *line) {
   return enqueue_protocol_line(line, net_discard_send_line, NULL, NULL);
+}
+
+/* 路线 A：TCP 客户端接入时的 hello 提供函数 */
+static void tcp_hello_provider(pet_p4_send_line_fn send_line, void *ctx) {
+#if PET_P4_HELLO_ASYNC
+  pet_p4_send_hello_for_board(g_hello_board_id, send_line, ctx);
+#else
+  pet_p4_send_hello_for_board(g_state.board_device_id, send_line, ctx);
+#endif
 }
 
 #if defined(__GNUC__) && !defined(__clang__)
@@ -2076,6 +2090,11 @@ void app_main(void) {
    * 松键 POST WAV 到 PC 本地 ASR，识别文字回屏。识别端点 NVS 可配。 */
   pet_p4_voice_ptt_init(net_submit_line);
   pet_p4_voice_ptt_start_task();
+  /* 路线 A：USB JSON Lines 协议套 TCP（:3333）。单客户端，
+   * 带真实 send_line，恢复双向应答；BROADCAST 行同步转发。 */
+  pet_p4_tcp_set_route((const void *) &g_tcp_route);
+  pet_p4_tcp_init(enqueue_protocol_line, tcp_hello_provider);
+  pet_p4_tcp_start_listener();
   esp_err_t native_usb_err = pet_p4_native_usb_init(
     &g_state,
     g_state_mutex,
