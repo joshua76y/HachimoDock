@@ -41,6 +41,7 @@
 #include "pet_p4_app_store.h"
 #include "pet_p4_wifi_bsp.h"
 #include "pet_p4_http_bsp.h"
+#include "pet_p4_voice_ptt.h"
 
 #include "pet_p4_storage_policy.h"
 #include "mbedtls/base64.h"
@@ -2071,6 +2072,10 @@ void app_main(void) {
   if (http_err != ESP_OK) {
     ESP_LOGW(TAG, "HTTP server unavailable: %s", esp_err_to_name(http_err));
   }
+  /* 设备侧 PTT 语音闭环（路线 B）：WiFi 在线时 K1 按住录音本地缓冲，
+   * 松键 POST WAV 到 PC 本地 ASR，识别文字回屏。识别端点 NVS 可配。 */
+  pet_p4_voice_ptt_init(net_submit_line);
+  pet_p4_voice_ptt_start_task();
   esp_err_t native_usb_err = pet_p4_native_usb_init(
     &g_state,
     g_state_mutex,

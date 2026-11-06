@@ -1,5 +1,6 @@
 #include "pet_p4_audio_patch.h"
 #include "pet_p4_audio.h"
+#include "pet_p4_voice_ptt.h"
 #include "pet_p4_audio_volume.h"
 #include "pet_p4_fs_activity.h"
 #include "pet_p4_instrument_core.h"
@@ -445,6 +446,12 @@ static bool send_audio_chunk(
   bool speech,
   const char *conversation_session
 ) {
+  /* 本地 PTT 会话（WiFi 路线 B）：PCM 写 PSRAM 缓冲，不上行 USB。
+   * 只在 voice_ptt 绑定的本地会话区间生效，不影响 conversation。 */
+  if (pet_p4_voice_ptt_capturing()) {
+    pet_p4_voice_ptt_feed(pcm, pcm_len);
+    return true;
+  }
   char encoded[((PET_P4_AUDIO_FRAME_BYTES + 2) / 3) * 4 + 1];
   char checksum_hex[17];
   size_t encoded_len = 0;
@@ -480,6 +487,8 @@ static void send_audio_end(
   char checksum_hex[17];
   uint64_t bytes_per_second = PET_P4_AUDIO_SAMPLE_RATE * PET_P4_AUDIO_CHANNELS
     * (PET_P4_AUDIO_BITS_PER_SAMPLE / 8);
+  /* 本地 PTT：此刻缓冲已收完整，交给 PTT 模块提交（内部判断 capturing） */
+  pet_p4_voice_ptt_notify_end();
   snprintf(checksum_hex, sizeof(checksum_hex), "%016llx", (unsigned long long) checksum);
   cJSON *payload = cJSON_CreateObject();
   cJSON_AddStringToObject(payload, "sessionId", session_id);

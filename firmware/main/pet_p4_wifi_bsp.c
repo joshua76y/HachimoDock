@@ -36,6 +36,30 @@ static char s_ip[32];
 static bool s_started;            /* esp_wifi_init 只能调一次 */
 static bool s_has_credentials;    /* NVS 里存过凭据 */
 
+/* 🔴 连续失败熔断：esp_hosted_init / esp_wifi_remote_init 内部是 ESP_ERROR_CHECK，
+ * 硬件异常（C6 掉线 / SDIO 接触不良）时会直接 abort() 重启，USB 也活不成。
+ * 失败计数持久化到 NVS；连续 3 次启动失败后开机自动连直接跳过（保 USB 可用），
+ * 拿到 IP 即清零；PC 重新下发 apply-wifi 也会清零（重新给机会）。 */
+#define WIFI_FAIL_LIMIT 3
+#define WIFI_FAIL_KEY "failcnt"
+
+static uint8_t wifi_failcnt_load(void) {
+  nvs_handle_t h;
+  uint8_t v = 0;
+  if (nvs_open(WIFI_NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+    (void) nvs_get_u8(h, WIFI_FAIL_KEY, &v);
+    nvs_close(h);
+  }
+  return v;
+}
+
+static void wifi_failcnt_save(uint8_t v) {
+  nvs_handle_t h;
+  if (nvs_open(WIFI_NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return;
+  if (nvs_set_u8(h, WIFI_FAIL_KEY, v) == ESP_OK) (void) nvs_commit(h);
+  nvs_close(h);
+}
+
 /* 已存在 != 失败。事件循环/netif 是全局单例，重复创建返回 INVALID_STATE。 */
 static esp_err_t ensure_event_loop(void) {
   esp_err_t err = esp_event_loop_create_default();
@@ -71,6 +95,7 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     ip_event_got_ip_t *ev = (ip_event_got_ip_t *) data;
     snprintf(s_ip, sizeof(s_ip), IPSTR, IP2STR(&ev->ip_info.ip));
     s_connected = true;
+    if (wifi_failcnt_load()) wifi_failcnt_save(0);  /* 成功一次即清零熔断计数 */
     ESP_LOGI(TAG, "已联网 hostname=%s IP=%s", PET_P4_WIFI_HOSTNAME, s_ip);
   }
 }
@@ -201,6 +226,7 @@ esp_err_t pet_p4_wifi_apply(const char *ssid, const char *password) {
   }
   ESP_RETURN_ON_ERROR(wifi_save_credentials(ssid, password), TAG, "保存 WiFi 凭据失败");
   s_has_credentials = true;
+  wifi_failcnt_save(0);   /* 用户重新配网 = 重新给机会 */
   if (!s_started) return pet_p4_wifi_init(ssid, password);
 
   /* 已经 esp_wifi_init 过：只换配置重连，不能重复 init。
@@ -222,8 +248,18 @@ esp_err_t pet_p4_wifi_start_from_nvs(void) {
     return ESP_ERR_NOT_FOUND;   /* 没配过网，静默跳过，不拖累启动 */
   }
   s_has_credentials = true;
-  ESP_LOGI(TAG, "从 NVS 读到 WiFi 凭据，SSID=\"%s\"", ssid);
-  return pet_p4_wifi_init(ssid, pass);
+  uint8_t failcnt = wifi_failcnt_load();
+  if (failcnt >= WIFI_FAIL_LIMIT) {
+    ESP_LOGE(TAG, "WiFi 连续失败 %u 次，本次开机跳过自动连（保 USB）。"
+             "重新配网或断电换 USB 环境后可恢复", (unsigned) failcnt);
+    return ESP_ERR_INVALID_STATE;
+  }
+  ESP_LOGI(TAG, "从 NVS 读到 WiFi 凭据，SSID=\"%s\"（历史失败 %u 次）", ssid, (unsigned) failcnt);
+  err = pet_p4_wifi_init(ssid, pass);
+  if (err != ESP_OK) {
+    wifi_failcnt_save(failcnt + 1);   /* 下次开机再放弃（计数持久化跨重启） */
+  }
+  return err;
 }
 
 void pet_p4_wifi_describe(char *buf, size_t len) {

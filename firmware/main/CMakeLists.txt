@@ -10,6 +10,7 @@ idf_component_register(
     "pet_p4_panel_chrome.c"
     "pet_p4_wifi_bsp.c"
     "pet_p4_http_bsp.c"
+    "pet_p4_voice_ptt.c"
     "pet_p4_assets.c"
     "pet_p4_audio.c"
     "pet_p4_audio_patch.c"

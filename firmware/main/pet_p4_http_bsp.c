@@ -81,7 +81,7 @@ static esp_err_t status_get(httpd_req_t *req) {
     chip.revision / 100, chip.revision % 100, chip.cores,
     (unsigned long long) (esp_timer_get_time() / 1000000ULL),
     connected ? "true" : "false", ip,
-    (unsigned) esp_get_free_heap_size(),
+    (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
     (unsigned) heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
     (unsigned) s_post_count);
   if (n >= sizeof(body)) n = sizeof(body) - 1;

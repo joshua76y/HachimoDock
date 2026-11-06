@@ -22,6 +22,7 @@
 #include "pet_p4_conversation.h"
 #include "pet_p4_audio.h"
 #include "pet_p4_audio_patch.h"
+#include "pet_p4_voice_ptt.h"
 #include "pet_p4_system_cues.h"
 #include "esp_attr.h"
 #include "pet_p4_transport_config.h"
@@ -539,6 +540,7 @@ static bool topic_is_known_but_unsupported(const char *topic) {
   if (!topic) return false;
   return strcmp(topic, "button_config") == 0
     || strcmp(topic, "control/apply-wifi") == 0
+    || strcmp(topic, "control/apply-voice-url") == 0
     || strncmp(topic, "input/", 6) == 0
     || strncmp(topic, "voice/", 6) == 0
     || strncmp(topic, "audio/", 6) == 0
@@ -4347,6 +4349,18 @@ bool pet_p4_handle_line_with_reply(
       char detail[64];
       snprintf(detail, sizeof(detail), "wifi apply failed: %d", (int) wifi_err);
       send_protocol_ack(send_line, ctx, topic, payload, false, "wifi_apply_failed", detail);
+    }
+  } else if (strcmp(topic, "control/apply-voice-url") == 0) {
+    /* 本地 PTT 的识别端点（tools/voice/bridge.py 的 /voice）。
+     * 持久化到 NVS("pet_voice"/"url")，立即生效。 */
+    const char *voice_url = json_string(payload, "url");
+    esp_err_t url_err = pet_p4_voice_ptt_apply_url(voice_url);
+    if (url_err == ESP_OK) {
+      send_protocol_ack_if_requested(send_line, ctx, topic, payload);
+    } else {
+      char detail[64];
+      snprintf(detail, sizeof(detail), "voice url apply failed: %d", (int) url_err);
+      send_protocol_ack(send_line, ctx, topic, payload, false, "voice_url_apply_failed", detail);
     }
   } else if (pet_p4_diagnostics_handle_topic_with_reply(topic, payload, state, send_line, ctx, reply)) {
     state->last_update_ms += 1;

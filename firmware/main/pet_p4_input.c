@@ -21,6 +21,7 @@
 
 #include "pet_p4_input.h"
 #include "pet_p4_audio.h"
+#include "pet_p4_voice_ptt.h"
 #include "pet_p4_conversation.h"
 
 #include <stdio.h>
@@ -1504,10 +1505,17 @@ static void dispatch_binding_event(
   if (binding && strcmp(binding->action, "voice_ptt") == 0) {
     if (strcmp(gesture, "hold_end") == 0) {
       if (state) state->session_voice_active = false;
+      /* capture_stop 会让 audio_task 走到 send_audio_end，
+       * 那里 pet_p4_voice_ptt_notify_end() 自动提交本地缓冲（若本会话是本地 PTT） */
       handled_locally = pet_p4_audio_capture_stop() == ESP_OK;
     } else if (!handled_locally && strcmp(gesture, "hold_start") == 0) {
       if (state) state->session_voice_active = true;
-      handled_locally = pet_p4_audio_capture_start(state && state->session_queue_count == 0) == ESP_OK;
+      /* WiFi 在线优先本地闭环：录音落 PSRAM，松键 POST 到 PC 本地 ASR */
+      if (pet_p4_voice_ptt_begin(state && state->session_queue_count == 0)) {
+        handled_locally = true;
+      } else {
+        handled_locally = pet_p4_audio_capture_start(state && state->session_queue_count == 0) == ESP_OK;
+      }
     }
   }
   send_input_event(
