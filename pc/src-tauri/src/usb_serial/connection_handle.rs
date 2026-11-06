@@ -133,3 +133,33 @@ pub(super) fn open_serial_pair_with_retry(port_name: &str, baud: u32) -> SerialP
         "failed to open {port_name} at {baud} baud: {last_open_error}"
     ))
 }
+
+// --- TCP transport (route A: the same JSON Lines protocol over TCP :3333) ---
+
+pub(super) fn open_tcp_pair(
+    host: &str,
+    port: u16,
+    timeout: Duration,
+) -> Result<(std::net::TcpStream, std::net::TcpStream), String> {
+    let addr = format!("{host}:{port}");
+    let stream = std::net::TcpStream::connect_timeout(
+        &addr
+            .parse()
+            .map_err(|error| format!("invalid tcp address {addr}: {error}"))?,
+        timeout,
+    )
+    .map_err(|error| format!("tcp connect {addr} failed: {error}"))?;
+    let _ = stream.set_nodelay(true);
+    // Reader timeouts keep the connected loop cancellable and let transient
+    // TCP stalls recover through the same TimedOut policy as serial reads.
+    stream
+        .set_read_timeout(Some(SERIAL_IO_TIMEOUT))
+        .map_err(|error| format!("tcp read timeout failed: {error}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(4)))
+        .map_err(|error| format!("tcp write timeout failed: {error}"))?;
+    let reader = stream
+        .try_clone()
+        .map_err(|error| format!("tcp stream clone failed: {error}"))?;
+    Ok((stream, reader))
+}

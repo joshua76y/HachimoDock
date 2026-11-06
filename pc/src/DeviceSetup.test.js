@@ -48,8 +48,20 @@ test("verified USB identity is persisted before entering the dashboard", () => {
   assert.match(source, /invoke\("get_or_create_desktop_device_id"\)/);
   assert.match(source, /invoke\("save_device_binding"/);
   assert.match(source, /boardDeviceId: status\.boardDeviceId/);
-  assert.match(source, /wifiSsid: `USB\(/);
+  // Route A (TCP) shares the same persistence; the transport label reflects
+  // the actual port name prefix instead of a hardcoded USB tag.
+  assert.match(source, /transportLabel/);
+  assert.match(source, /wifiSsid: `\$\{transportLabel\}\(/);
   assert.match(source, /await finish\(\)/);
+});
+
+test("setup falls back to Wi-Fi TCP when the board is not on USB", () => {
+  const source = readSource("DeviceSetup.jsx");
+
+  assert.match(source, /invoke\("usb_connect_tcp", \{ host, port: DEFAULT_TCP_PORT \}\)/);
+  assert.match(source, /TCP_HOST_STORAGE_KEY/);
+  assert.match(source, /rememberTcpHost/);
+  assert.match(source, /WiFi 连接/);
 });
 
 test("setup exposes one bounded manual recovery action", () => {

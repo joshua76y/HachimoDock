@@ -6059,6 +6059,60 @@ select:focus-visible {
   color: var(--success);
 }
 
+.usb-setup-tcp {
+  width: 100%;
+  margin: 0 0 24px;
+  padding: 18px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-lg);
+  background: var(--bg-soft);
+  text-align: left;
+  display: grid;
+  gap: 12px;
+}
+
+.usb-setup-tcp__label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-soft);
+  font-size: 13px;
+}
+
+.usb-setup-tcp__label svg {
+  flex: 0 0 auto;
+  color: var(--success);
+}
+
+.usb-setup-tcp__row {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+}
+
+.usb-setup-tcp__row input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md, 10px);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.usb-setup-tcp__row input:focus {
+  outline: none;
+  border-color: var(--primary, var(--text));
+}
+
+.usb-setup-tcp__action {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .usb-setup-device {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -7468,6 +7468,21 @@ async fn usb_connect(
 }
 
 #[tauri::command]
+async fn usb_connect_tcp(
+    app_handle: tauri::AppHandle,
+    usb_manager: tauri::State<'_, usb_serial::UsbSerialManager>,
+    host: String,
+    port: Option<u16>,
+) -> Result<usb_serial::UsbConnectionStatus, String> {
+    let emitter = app_handle.clone();
+    usb_manager.connect_tcp(&host, port, move |topic, payload| {
+        handle_incoming_usb_message(&emitter, topic, payload);
+    })?;
+    program_autostart::native::connected(usb_manager.inner());
+    Ok(usb_manager.status())
+}
+
+#[tauri::command]
 async fn usb_disconnect(
     usb_manager: tauri::State<'_, usb_serial::UsbSerialManager>,
 ) -> Result<(), String> {
@@ -11653,6 +11668,7 @@ pub fn run() {
             open_external_url,
             usb_scan_devices,
             usb_connect,
+            usb_connect_tcp,
             usb_disconnect,
             usb_send_state,
             usb_send_speech,

@@ -14,9 +14,30 @@ import {
   Loader2,
   RefreshCw,
   Usb,
+  Wifi,
 } from "lucide-react";
 
 const AUTO_SCAN_INTERVAL_MS = 3000;
+const TCP_HOST_STORAGE_KEY = "pet-manager:tcp-host";
+const DEFAULT_TCP_HOST = "192.168.1.97";
+const DEFAULT_TCP_PORT = 3333;
+
+function rememberedTcpHost() {
+  try {
+    const stored = window.localStorage.getItem(TCP_HOST_STORAGE_KEY);
+    return String(stored || "").trim() || DEFAULT_TCP_HOST;
+  } catch {
+    return DEFAULT_TCP_HOST;
+  }
+}
+
+function rememberTcpHost(host) {
+  try {
+    window.localStorage.setItem(TCP_HOST_STORAGE_KEY, String(host || "").trim());
+  } catch {
+    // Storage may be unavailable; the default host still applies.
+  }
+}
 
 function hasTauriRuntime() {
   return typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__);
@@ -41,6 +62,8 @@ export default function DeviceSetup({ onComplete } = {}) {
   const [phase, setPhase] = useState("scanning");
   const [message, setMessage] = useState("正在自动查找已连接的桌宠…");
   const [device, setDevice] = useState(null);
+  const [tcpHost, setTcpHost] = useState(rememberedTcpHost);
+  const [tcpPending, setTcpPending] = useState(false);
   const scanInFlightRef = useRef(null);
   const completedRef = useRef(false);
   const mountedRef = useRef(true);
@@ -58,11 +81,12 @@ export default function DeviceSetup({ onComplete } = {}) {
     }
 
     const desktopDeviceId = await invoke("get_or_create_desktop_device_id");
+    const transportLabel = String(status.portName || "").startsWith("tcp://") ? "TCP" : "USB";
     await invoke("save_device_binding", {
       binding: {
         boardDeviceId: status.boardDeviceId,
         desktopDeviceId,
-        wifiSsid: `USB(${status.portName || "direct"})`,
+        wifiSsid: `${transportLabel}(${status.portName || "direct"})`,
         boundAt: Date.now(),
       },
     });
@@ -74,6 +98,27 @@ export default function DeviceSetup({ onComplete } = {}) {
     setMessage("设备已连接，正在进入管理页面…");
     await finish();
   }, [finish]);
+
+  // Route A fallback: the board serves the same verified protocol over TCP
+  // (:3333) whenever it is on Wi-Fi, so a device that no longer shows up as a
+  // USB serial port can still complete setup over the network.
+  const connectTcp = useCallback(async ({ quiet = false } = {}) => {
+    if (completedRef.current) return;
+    const host = String(tcpHost || "").trim();
+    if (!host) throw new Error("请输入设备的 IP 地址");
+    if (!quiet && mountedRef.current) {
+      setPhase("scanning");
+      setMessage(`正在通过 WiFi 连接 ${host}:${DEFAULT_TCP_PORT}…`);
+    }
+    rememberTcpHost(host);
+    const status = normalizedUsbStatus(
+      await invoke("usb_connect_tcp", { host, port: DEFAULT_TCP_PORT }),
+    );
+    if (!status.connected || !status.boardDeviceId) {
+      throw new Error("TCP 已连接，但设备没有返回有效身份");
+    }
+    await persistConnectedDevice(status);
+  }, [tcpHost, persistConnectedDevice]);
 
   const scan = useCallback(async ({ quiet = false } = {}) => {
     if (completedRef.current) return;
@@ -199,6 +244,42 @@ export default function DeviceSetup({ onComplete } = {}) {
             <span><CheckCircle2 size={18} /> 保持设备开机，Pet Manager 会自动识别</span>
           </div>
         )}
+
+        {!device && !busy ? (
+          <div className="usb-setup-tcp">
+            <span className="usb-setup-tcp__label"><Wifi size={16} /> 设备在同一 WiFi 时可免 USB 直连</span>
+            <div className="usb-setup-tcp__row">
+              <input
+                type="text"
+                value={tcpHost}
+                onChange={(event) => setTcpHost(event.target.value)}
+                placeholder="设备 IP，例如 192.168.1.97"
+                aria-label="设备 TCP 地址"
+              />
+              <button
+                className="btn-primary usb-setup-tcp__action"
+                type="button"
+                disabled={tcpPending || !String(tcpHost || "").trim()}
+                onClick={() => {
+                  setTcpPending(true);
+                  connectTcp()
+                    .catch((error) => {
+                      if (mountedRef.current) {
+                        setPhase("waiting");
+                        setMessage(error?.message || String(error));
+                      }
+                    })
+                    .finally(() => {
+                      if (mountedRef.current) setTcpPending(false);
+                    });
+                }}
+              >
+                {tcpPending ? <Loader2 size={16} className="spin" /> : <Wifi size={16} />}
+                WiFi 连接
+              </button>
+            </div>
+          </div>
+        ) : null}
 
         <button
           className="btn-primary usb-setup-card__action"

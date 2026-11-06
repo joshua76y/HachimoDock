@@ -343,6 +343,26 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
         lastError = error;
       }
     }
+    // Route A fallback: the bound board may be reachable over Wi-Fi TCP
+    // (:3333) while no USB serial port is present (e.g. running on battery).
+    if (!connectedStatus) {
+      try {
+        const rememberedHost = String(
+          window.localStorage.getItem("pet-manager:tcp-host") || "",
+        ).trim();
+        if (rememberedHost) {
+          const tcpStatus = normalizeUsbStatusPayload(
+            await invoke("usb_connect_tcp", { host: rememberedHost, port: 3333 }),
+          );
+          if (tcpStatus.connected) {
+            connectedStatus = tcpStatus;
+            lastError = null;
+          }
+        }
+      } catch (tcpError) {
+        if (!lastError) lastError = tcpError;
+      }
+    }
     const nextUsb = connectedStatus || normalizeUsbStatusPayload(await invoke("usb_get_status"));
     setUsb(nextUsb);
     if (!nextUsb.connected && lastError) throw lastError;

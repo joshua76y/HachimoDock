@@ -119,7 +119,7 @@ use appearance_transaction::{
 };
 #[cfg(test)]
 use connection_handle::serial_open_error_is_transient;
-use connection_handle::{open_serial_pair_with_retry, ProbedSerialPort, UsbConnection};
+use connection_handle::{open_serial_pair_with_retry, open_tcp_pair, ProbedSerialPort, UsbConnection};
 use firmware_transaction::{
     evaluate_firmware_validation, firmware_chunk_error_is_retryable, firmware_base64_rejection_unapplied,
     firmware_corruption_fallback_size, firmware_recovery_chunk_size, initial_firmware_chunk_size,
@@ -1110,6 +1110,68 @@ fn probe_serial_port(
     Err(format!(
         "{port_name} did not identify as a supported Pet Manager device ({})",
         failures.join("; ")
+    ))
+}
+
+pub(super) const TCP_TRANSPORT_PREFIX: &str = "tcp://";
+const TCP_DEFAULT_PORT: u16 = 3333;
+
+pub(super) fn is_tcp_port(port_name: &str) -> bool {
+    port_name.starts_with(TCP_TRANSPORT_PREFIX)
+}
+
+fn tcp_display_name(host: &str, port: u16) -> String {
+    format!("{TCP_TRANSPORT_PREFIX}{host}:{port}")
+}
+
+// Route A probe: connect to the board's TCP listener (:3333). The firmware
+// pushes its hello immediately after accept, so no probe handshake/nonce is
+// sent — identity validation uses the same validate_hello_message gate as the
+// serial path. Returns generic stream handles; the reader/UsbConnection
+// plumbing downstream is transport-agnostic.
+fn probe_tcp_endpoint(
+    host: &str,
+    port: u16,
+    timeout: Duration,
+) -> Result<ProbedSerialPort<std::net::TcpStream, std::net::TcpStream>, String> {
+    let (writer, reader) = open_tcp_pair(host, port, timeout)?;
+    let started = Instant::now();
+    let mut reader = BufReader::new(reader);
+    let mut line_buffer = Vec::with_capacity(32 * 1024);
+    let mut rejections = receive_diagnostics::Rejections::default();
+    let display = tcp_display_name(host, port);
+    while started.elapsed() < timeout {
+        let frame = match read_serial_frame(&mut reader, &mut line_buffer) {
+            Ok(Some(line)) => line,
+            Ok(None) => return Err(format!("{display}: connection closed before hello")),
+            Err(error) if serial_read_recovery_delay(&error).is_some() => {
+                let delay = serial_read_recovery_delay(&error).unwrap();
+                if !delay.is_zero() { thread::sleep(delay); }
+                continue;
+            }
+            Err(error) => return Err(format!("{display}: read failed: {error}")),
+        };
+        let line = &frame.text;
+        let Some(mut message) = parse_serial_frame(&frame) else {
+            log_rejected_serial_line(line, &mut rejections, "probe-tcp", 0, port as u32);
+            continue;
+        };
+        if message.topic != "hello" {
+            continue;
+        }
+        if let Err(error) = validate_hello_message(&mut message) {
+            return Err(format!("{display} rejected hello: {error}"));
+        }
+        return Ok(ProbedSerialPort::from_verified_reader(
+            writer,
+            reader,
+            port as u32,
+            message,
+        ));
+    }
+    Err(format!(
+        "{display} did not send a valid protocol hello within {}ms",
+        timeout.as_millis()
     ))
 }
 
@@ -2375,6 +2437,130 @@ impl UsbSerialManager {
         let reader_owner=self.clone();
         thread::spawn(move || reader_owner.read_connected(reader_port,connection_id,reader_baud,
             cancel_reader,capture_active,negotiated_control_integrity,negotiated_control_nonce,on_message));
+
+        Ok(())
+    }
+
+    /// Route A: connect to a board serving the USB JSON Lines protocol over
+    /// TCP (esp-p4 firmware listener on :3333). The full reader/writer,
+    /// waiter, status and lifecycle plumbing is shared with the serial path;
+    /// only the probe and open step differ. `host` may be an IP or hostname.
+    pub fn connect_tcp<F>(&self, host: &str, port: Option<u16>, on_message: F) -> Result<(), String>
+    where
+        F: Fn(String, serde_json::Value) + Send + 'static,
+    {
+        let host = host.trim();
+        if host.is_empty() {
+            return Err("TCP 主机地址不能为空".to_string());
+        }
+        let port = port.unwrap_or(TCP_DEFAULT_PORT);
+        let port_name = tcp_display_name(host, port);
+
+        // Serialize connect/disconnect operations like the serial path.
+        let _guard = self.connect_guard.lock().map_err(|e| e.to_string())?;
+        {
+            let conn = self.connection.lock().map_err(|e| e.to_string())?;
+            if let Some(existing) = conn.as_ref() {
+                if existing.connected && existing.port_name == port_name
+                    && self.inbound_owner.is_current(existing.connection_id) {
+                    return Ok(());
+                }
+            }
+        }
+        {
+            let (_dispatch, mut conn) = self.inbound_owner.connection(&self.connection)?;
+            if let Some(existing) = conn.as_mut() {
+                existing.cancel_reader.store(true, Ordering::SeqCst);
+                self.inbound_owner.retire(existing.connection_id);
+            }
+            *conn = None;
+            cache_usb_status(&self.status_snapshot, None);
+        }
+
+        let probed = probe_tcp_endpoint(host, port, SERIAL_PROBE_TIMEOUT);
+        let probed = match probed {
+            Ok(probed) => probed,
+            Err(error) => {
+                transfer_log::record(
+                    "connection",
+                    "failed",
+                    serde_json::json!({"port": port_name, "error": error}),
+                );
+                return Err(error);
+            }
+        };
+        transfer_log::record(
+            "connection",
+            "verified",
+            serde_json::json!({
+                "port": port_name,
+                "transport": "tcp",
+                "firmware": first_json_string(&probed.hello.payload, &["fw", "firmware", "version"]),
+            }),
+        );
+        eprintln!(
+            "[usb_serial] verified {port_name} as runtime={} board={} firmware={}",
+            runtime_from_hello_payload(&probed.hello.payload),
+            first_json_string(&probed.hello.payload, &["boardDeviceId", "localDeviceId", "deviceId"]),
+            first_json_string(&probed.hello.payload, &["fw", "firmware", "version"])
+        );
+
+        let connection_id = self.next_connection_id.fetch_add(1, Ordering::SeqCst) + 1;
+        let cancel_reader = Arc::new(AtomicBool::new(false));
+        let capture_active = Arc::new(AtomicBool::new(false));
+
+        let mut connection = UsbConnection {
+            connection_id,
+            port_name: port_name.clone(),
+            // No baud on TCP. Leaving it at 0 also disables CH343 write pacing,
+            // which is meaningless on a stream transport.
+            baud_rate: 0,
+            writer: Box::new(probed.writer),
+            board_device_id: String::new(),
+            runtime: String::new(),
+            device_model: String::new(),
+            firmware: String::new(),
+            build_id: String::new(),
+            git_sha: String::new(),
+            build_dirty: false,
+            protocol_schema: 0,
+            wire_protocol: String::new(),
+            capabilities: serde_json::Value::Null,
+            connected: true,
+            cancel_reader: Arc::clone(&cancel_reader),
+            capture_active: Arc::clone(&capture_active),
+        };
+        apply_hello_payload_to_connection(&mut connection, &probed.hello.payload);
+        let initial_hello = probed.hello.clone();
+        // TCP hello is pushed by the board without a probe nonce; the legacy
+        // unframed contract applies (serialControlIntegrity not offered).
+        let negotiated_control_integrity = false;
+        let negotiated_control_nonce = None;
+        let reader_port = probed.reader;
+
+        {
+            let (_dispatch, mut conn) = self.inbound_owner.connection(&self.connection)?;
+            *conn = Some(connection);
+            self.inbound_owner.publish(connection_id);
+            cache_usb_status(&self.status_snapshot, conn.as_ref());
+            drop(conn);
+            // No connection/waiter/physical-wire mutex is held during callback.
+            on_message(initial_hello.topic, initial_hello.payload);
+        }
+
+        let reader_owner = self.clone();
+        thread::spawn(move || {
+            reader_owner.read_connected(
+                reader_port,
+                connection_id,
+                0,
+                cancel_reader,
+                capture_active,
+                negotiated_control_integrity,
+                negotiated_control_nonce,
+                on_message,
+            )
+        });
 
         Ok(())
     }
@@ -6186,7 +6372,7 @@ fn usb_connection_status(connection: &UsbConnection) -> UsbConnectionStatus {
         port_name: connection.port_name.clone(),
         baud_rate: connection.baud_rate,
         board_device_id: connection.board_device_id.clone(),
-        transport: "usb".to_string(),
+        transport: if is_tcp_port(&connection.port_name) { "tcp".to_string() } else { "usb".to_string() },
         runtime: connection.runtime.clone(),
         device_model: connection.device_model.clone(),
         firmware: connection.firmware.clone(),
@@ -7673,6 +7859,65 @@ fn canonical_binding_for_control(control: &str) -> Option<(&'static str, &'stati
 
 #[cfg(test)]
 mod tests {
+    // Live-board route A probe check. Opt-in: PET_MANAGER_TCP_TEST_HOST=192.168.1.x
+    // Skips silently when the variable is absent so CI stays hermetic.
+    #[test]
+    fn tcp_probe_reaches_live_board_when_present() {
+        let Ok(host) = std::env::var("PET_MANAGER_TCP_TEST_HOST") else { return; };
+        if host.trim().is_empty() { return; }
+        let probed = super::probe_tcp_endpoint(
+            host.trim(),
+            super::TCP_DEFAULT_PORT,
+            std::time::Duration::from_secs(6),
+        ).expect("tcp probe against the live board should verify a hello");
+        let runtime = super::runtime_from_hello_payload(&probed.hello.payload);
+        assert!(matches!(runtime.as_str(), "esp-p4" | "linux"), "unexpected runtime {runtime}");
+        let board = super::first_json_string(
+            &probed.hello.payload,
+            &["boardDeviceId", "localDeviceId", "deviceId"],
+        );
+        assert!(!board.is_empty(), "hello must carry a board device id");
+        eprintln!("tcp probe verified board={board} runtime={runtime}");
+    }
+    // Live-board route A end-to-end: connect_tcp -> hello callback ->
+    // outbound send -> status snapshot. Opt-in via PET_MANAGER_TCP_TEST_HOST.
+    #[test]
+    fn tcp_connect_round_trip_reaches_live_board_when_present() {
+        use std::sync::Mutex as SyncMutex;
+        let Ok(host) = std::env::var("PET_MANAGER_TCP_TEST_HOST") else { return; };
+        let host = host.trim().to_string();
+        if host.is_empty() { return; }
+        let manager = super::UsbSerialManager::new();
+        let received: Arc<SyncMutex<Vec<(String, serde_json::Value)>>> = Arc::default();
+        let sink = Arc::clone(&received);
+        manager.connect_tcp(&host, None, move |topic, payload| {
+            if let Ok(mut slot) = sink.lock() { slot.push((topic, payload)); }
+        }).expect("connect_tcp should verify the board hello");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        let mut saw_hello = false;
+        while std::time::Instant::now() < deadline {
+            saw_hello = received.lock().map(|slot|
+                slot.iter().any(|(topic, _)| topic == "hello")).unwrap_or(false);
+            if saw_hello { break; }
+            thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(saw_hello, "hello callback must fire after connect_tcp");
+        let status = manager.status();
+        assert!(status.connected, "status must report connected");
+        assert_eq!(status.transport, "tcp");
+        assert_eq!(status.port_name, format!("tcp://{host}:{}", super::TCP_DEFAULT_PORT));
+        assert!(!status.board_device_id.is_empty(), "board identity must be published");
+        // Outbound write through the shared writer path must not error.
+        manager.send("speech/text", &serde_json::json!({
+            "displayTitle": "RouteA",
+            "displayContent": "PC TCP 双向链路自检",
+            "status": "done",
+            "statusText": "tcp-test",
+            "tsMs": 1,
+        })).expect("send over the TCP connection should succeed");
+        manager.disconnect();
+        assert!(!manager.status().connected, "disconnect must clear the snapshot");
+    }
     #[test]
     fn component_sync_ended_music_retains_lease_until_owner_releases_it(){
         for state in ["playing","buffering","preparing","paused","ended"]{assert!(super::component_sync_media_blocks(state),"{state}");}
