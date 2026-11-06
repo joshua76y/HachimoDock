@@ -1247,8 +1247,25 @@ cannot accidentally starve the health window or mark a bad image healthy.
 ## Hardware Input Configuration
 
 Inputs are sampled every 5ms. Buttons are active-low with internal pull-ups,
-25ms debounce and a 700ms long-press threshold. On current hardware the
-joystick X/Y axes use ADC1 GPIO21/GPIO20. The runtime calibrates their neutral
+25ms debounce and a 700ms long-press threshold. On current hardware
+(ESP32-P4-WIFI6-Touch-LCD-4.3, v10 physical-key naming) the wired controls are
+
+| Control | Event prefix | GPIO | Wire (J3) |
+| --- | --- | --- | --- |
+| `1` red (top) | `button.1` | GPIO29 | pin20 |
+| `2` yellow (left) | `button.2` | GPIO30 | pin22 |
+| `3` blue (bottom) | `button.3` | GPIO25 | pin23 |
+| `4` green (right) | `button.4` | GPIO24 | pin21 |
+| `K` joystick press | `button.k` | GPIO28 | pin16 |
+| `B` BOOT (board) | `button.b` | GPIO35 | onboard |
+| joystick X / Y | `joystick.*`, `knob.rotate_*` | GPIO21 / GPIO22 | pin15 / pin17 |
+
+`P` (POWER) is a power-management key (long-press 2s powers off) and `R`
+(RESET) drives EN: neither is capturable in software. GPIO24/GPIO25 are the
+ESP32-P4 USB full-speed PHY pair, usable as GPIO only while no USB-OTG or
+USB-Serial-JTAG transport is active.
+
+The joystick X/Y axes use ADC1 GPIO21/GPIO22. The runtime calibrates their neutral
 center at boot, derives activation/release hysteresis independently from the
 available travel in each direction, resolves diagonals by normalized dominant
 axis, and repeats a held direction after a bounded delay. This accepts
@@ -1264,20 +1281,20 @@ PC to board:
   "topic": "input/config",
   "payload": {
     "requestId": "input-42",
-    "version": 9,
+    "version": 10,
     "bindings": [
-      {"event":"button.sw1.short_press","action":"page_enter","value":""},
-      {"event":"button.sw1.long_press","action":"disabled","value":""},
-      {"event":"button.sw1.hold","action":"voice_ptt","value":""},
-      {"event":"button.sw2.short_press","action":"component_center","value":""},
-      {"event":"button.sw2.long_press","action":"disabled","value":""},
-      {"event":"button.sw2.hold","action":"disabled","value":""},
-      {"event":"button.sw3.short_press","action":"page_back","value":""},
-      {"event":"button.sw3.long_press","action":"disabled","value":""},
-      {"event":"button.sw3.hold","action":"disabled","value":""},
-      {"event":"button.encoder.short_press","action":"page_enter","value":""},
-      {"event":"button.encoder.long_press","action":"disabled","value":""},
-      {"event":"button.encoder.hold","action":"disabled","value":""},
+      {"event":"button.1.short_press","action":"page_enter","value":""},
+      {"event":"button.1.long_press","action":"disabled","value":""},
+      {"event":"button.1.hold","action":"voice_ptt","value":""},
+      {"event":"button.2.short_press","action":"component_center","value":""},
+      {"event":"button.2.long_press","action":"realtime_chat","value":""},
+      {"event":"button.2.hold","action":"disabled","value":""},
+      {"event":"button.3.short_press","action":"page_back","value":""},
+      {"event":"button.3.long_press","action":"disabled","value":""},
+      {"event":"button.3.hold","action":"disabled","value":""},
+      {"event":"button.k.short_press","action":"page_enter","value":""},
+      {"event":"button.k.long_press","action":"disabled","value":""},
+      {"event":"button.k.hold","action":"disabled","value":""},
       {"event":"knob.rotate_ccw","action":"session_previous","value":""},
       {"event":"knob.rotate_cw","action":"session_next","value":""},
       {"event":"joystick.up","action":"session_previous","value":""},
@@ -1292,11 +1309,16 @@ Allowed actions are `disabled`, `voice_ptt`, `agent_enter`, `agent_prompt`,
 `miniapp_screen_long_press`, `component_center`, `miniapp_action`,
 `page_toggle`, `page_enter`, `page_back`, `page_main`, and `page_app`.
 The firmware keeps this full set for stored-config and component compatibility.
+Version 10 renamed the button events to the physical layout (`button.1..4`,
+`button.k`, `button.b`). Stored v9 configs are migrated by rewriting the event
+identifiers, and the legacy `button.sw1`~`button.sw3`/`button.encoder` names stay
+resolvable for the shipped component packages (alias lookup), so older packages
+keep working without changes.
 Pet Manager's P4 button menu exposes only custom prompt, voice input,
 previous/next item, clear sessions, pet/component page toggle, confirm, back/cancel,
 and unbound.
 
-SW1 short press and joystick center short press both default to `page_enter`:
+`1` red short press and joystick press `K` short press both default to `page_enter`:
 they activate the selection and open `app` only from `components`; they do not
 open the catalog from `main`. SW3 short press defaults to the global
 `page_back` path. Center long press defaults to `disabled`; joystick Up/Down
