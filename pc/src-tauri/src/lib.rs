@@ -153,6 +153,7 @@ mod device_voice_lifecycle;
 mod usb_serial;
 mod appearance_recovery_ipc;
 mod voice_chat_settings;
+mod local_asr;
 mod volcengine_asr;
 
 use serde::{Deserialize, Serialize};
