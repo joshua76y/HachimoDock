@@ -47,7 +47,8 @@ static struct {
   char page[12];
   int batt;
   int bars;
-} s_shown = {.batt = -999, .bars = -1};
+  unsigned int keys;   /* 按键实时电平位图：bit i = 第 i 个键按下（低电平有效） */
+} s_shown = {.batt = -999, .bars = -1, .keys = 0xFFFFFFFFu};
 
 /* ── 基础绘制 ─────────────────────────────────────────────────────── */
 
@@ -162,10 +163,19 @@ static void draw_bars(int x, int y, int bars) {
   }
 }
 
-static void draw_key(int x, int y, const char *label, const char *name) {
-  frame(x, y, 15, 15, C_DIM);
-  text_center(label, x + 7, y + 0, C_DIM, 1);
-  text(name, x + 21, y, C_DIM, 1);
+/* 按键行：按下时整行高亮（绿底深字 + 亮框），并显示对应 GPIO 号。
+ * 这是接线自检视图：按哪个键看哪行亮，不亮就是那根线没通。 */
+static void draw_key_row(int x, int y, const char *label, const char *name,
+                         const char *gpio, bool pressed) {
+  if (pressed) {
+    fill(x - 3, y - 3, W - 2 * (x - 3), 22, C_OK);
+    frame(x - 3, y - 3, W - 2 * (x - 3), 22, C_TEXT);
+  }
+  const uint16_t fg = pressed ? C_BG : C_DIM;
+  frame(x, y, 15, 15, pressed ? C_BG : C_DIM);
+  text_center(label, x + 7, y, fg, 1);
+  text(name, x + 21, y, fg, 1);
+  text(gpio, x + 92, y, pressed ? C_BG : C_LINE, 1);
 }
 
 /* ── 数据换算 ─────────────────────────────────────────────────────── */
@@ -239,7 +249,8 @@ static const char *page_word(const pet_p4_runtime_state_t *st) {
 /* ── 整幅重绘 ─────────────────────────────────────────────────────── */
 
 static void redraw(const char *clock, const char *date, const char *net,
-                   const char *state, const char *page, int batt, int bars) {
+                   const char *state, const char *page, int batt, int bars,
+                   unsigned int keys) {
   fill(0, 0, W, H, C_BG);
 
   text_center(clock, W / 2, 10, C_TEXT, 2);
@@ -270,10 +281,14 @@ static void redraw(const char *clock, const char *date, const char *net,
   fill(14, 252, W - 28, 1, C_LINE);
 
   text("按键", 14, 260, C_DIM, 1);
-  static const char *const labels[] = {"1", "2", "3", "4", "5"};
-  static const char *const names[] = {"确认", "切页", "返回", "确认", "确认"};
-  for (int i = 0; i < 5; i += 1) {
-    draw_key(14, 282 + i * 24, labels[i], names[i]);
+  /* 接线自检视图（物理命名）：1红(上) 2黄(左) 3蓝(下) 4绿(右) K=摇杆按下 B=BOOT。
+   * 每行右侧是实际 GPIO 号，按下时整行绿底高亮——按哪个亮哪个才通。 */
+  static const char *const labels[] = {"1", "2", "3", "4", "K", "B"};
+  static const char *const names[] = {"确认", "组件", "返回", "—", "确认", "—"};
+  static const char *const gpios[] = {"29", "30", "25", "24", "28", "35"};
+  for (int i = 0; i < 6; i += 1) {
+    draw_key_row(14, 282 + i * 24, labels[i], names[i], gpios[i],
+                 (keys & (1u << i)) != 0);
   }
 
   fill(0, H - 1, W, 1, C_LINE);
@@ -320,9 +335,18 @@ void pet_p4_panel_chrome_tick(const pet_p4_runtime_state_t *state, unsigned long
   const char *page = page_word(state);
   const int batt = battery_percent(pet_p4_battery_millivolts());
 
+  /* 按键实时电平（自检用）：低位=按下，打包成位图，变化才重绘 */
+  int levels[6] = {0};
+  pet_p4_input_gpio_levels(levels);
+  unsigned int keys = 0;
+  for (int i = 0; i < 6; i += 1) {
+    if (levels[i] == 0) keys |= 1u << i;
+  }
+
   if (strcmp(s_shown.clock, clock) == 0 && strcmp(s_shown.date, date) == 0 &&
       strcmp(s_shown.net, net) == 0 && strcmp(s_shown.state, word) == 0 &&
-      strcmp(s_shown.page, page) == 0 && s_shown.batt == batt && s_shown.bars == bars) {
+      strcmp(s_shown.page, page) == 0 && s_shown.batt == batt && s_shown.bars == bars &&
+      s_shown.keys == keys) {
     return;
   }
 
@@ -333,8 +357,9 @@ void pet_p4_panel_chrome_tick(const pet_p4_runtime_state_t *state, unsigned long
   snprintf(s_shown.page, sizeof(s_shown.page), "%s", page);
   s_shown.batt = batt;
   s_shown.bars = bars;
+  s_shown.keys = keys;
 
-  redraw(clock, date, net, word, page, batt, bars);
+  redraw(clock, date, net, word, page, batt, bars, keys);
   s_dirty = true;
 }
 

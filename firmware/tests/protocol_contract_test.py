@@ -2320,11 +2320,12 @@ def test_p4_hardware_inputs_are_debounced_persistent_and_configurable():
     # 接线全部收在 J3 的 pin15~24（见 PORTING-PLAN §五）。
     # GPIO20 在这块板上是 BAT_ADC（VBAT/3，200K/100K 分压），不在排针上，
     # 所以摇杆 Y 必须改到 GPIO22 / ADC1_CH6，不能用原板的 GPIO20。
-    assert "PET_P4_INPUT_SW1_GPIO GPIO_NUM_28" in input_source
-    assert "PET_P4_INPUT_SW2_GPIO GPIO_NUM_29" in input_source
-    assert "PET_P4_INPUT_SW3_GPIO GPIO_NUM_24" in input_source
-    assert "PET_P4_INPUT_ENCODER_PRESS_GPIO GPIO_NUM_30" in input_source
-    assert "PET_P4_INPUT_SW4_GPIO GPIO_NUM_25" in input_source   # 第 5 键
+    assert "PET_P4_INPUT_KEY1_GPIO GPIO_NUM_29" in input_source        # 1 红
+    assert "PET_P4_INPUT_KEY2_GPIO GPIO_NUM_30" in input_source        # 2 黄
+    assert "PET_P4_INPUT_KEY3_GPIO GPIO_NUM_25" in input_source        # 3 蓝
+    assert "PET_P4_INPUT_KEY4_GPIO GPIO_NUM_24" in input_source        # 4 绿
+    assert "PET_P4_INPUT_JOY_PRESS_GPIO GPIO_NUM_28" in input_source   # 摇杆按下 K
+    assert "PET_P4_INPUT_BOOT_GPIO GPIO_NUM_35" in input_source        # 板载 BOOT B
     assert "PET_P4_INPUT_ENCODER_B_GPIO GPIO_NUM_3" in input_source
     assert "PET_P4_INPUT_ENCODER_A_GPIO GPIO_NUM_2" in input_source
     assert "PET_P4_INPUT_JOYSTICK_X_GPIO GPIO_NUM_21" in input_source
@@ -2342,14 +2343,14 @@ def test_p4_hardware_inputs_are_debounced_persistent_and_configurable():
     assert "events |= PET_P4_BUTTON_EVENT_LONG_RELEASE" in core
     assert "PET_P4_INPUT_GESTURE_HOLD_START" in input_source
     assert "PET_P4_INPUT_GESTURE_HOLD_END" in input_source
-    assert '"button.sw1.hold", "voice_ptt"' in input_source
-    assert '"button.sw2.short_press", "component_center"' in input_source
-    assert '"button.sw1.short_press", "page_enter"' in input_source
-    assert '"button.sw3.short_press", "page_back"' in input_source
-    assert '"button.sw3.long_press", "disabled"' in input_source
-    assert '"button.encoder.short_press", "page_enter"' in input_source
-    assert '"button.encoder.long_press", "disabled"' in input_source
-    assert '"button.encoder.hold", "disabled"' in input_source
+    assert '"button.1.hold", "voice_ptt"' in input_source
+    assert '"button.2.short_press", "component_center"' in input_source
+    assert '"button.1.short_press", "page_enter"' in input_source
+    assert '"button.3.short_press", "page_back"' in input_source
+    assert '"button.3.long_press", "disabled"' in input_source
+    assert '"button.k.short_press", "page_enter"' in input_source
+    assert '"button.k.long_press", "disabled"' in input_source
+    assert '"button.k.hold", "disabled"' in input_source
     assert '"knob.rotate_cw", "session_next"' in input_source
     assert '"knob.rotate_ccw", "session_previous"' in input_source
     assert '"joystick.up", "session_previous"' in input_source
@@ -2370,7 +2371,7 @@ def test_p4_hardware_inputs_are_debounced_persistent_and_configurable():
     assert "migrate_v7_config" in input_source
     assert "migrate_v8_config" in input_source
     assert "migrate_input_config" in input_source
-    assert "PET_P4_INPUT_CONFIG_VERSION 9" in read_required("main/pet_p4_input.h")
+    assert "PET_P4_INPUT_CONFIG_VERSION 10" in read_required("main/pet_p4_input.h")
     assert "center_binding" not in input_source
     assert '"page_toggle"' in input_source
     assert '"page_enter"' in input_source

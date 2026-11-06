@@ -30,6 +30,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "pet_p4_wifi_bsp.h"
+#include "pet_p4_input.h"
 
 static const char *TAG = "pet-p4-http";
 
@@ -65,7 +66,9 @@ static esp_err_t status_get(httpd_req_t *req) {
   esp_chip_info_t chip;
   esp_chip_info(&chip);
 
-  char body[768];
+  char body[896];
+  int key_levels[6] = {0};
+  pet_p4_input_gpio_levels(key_levels);
   size_t n = (size_t) snprintf(body, sizeof(body),
     "{\"ok\":true,"
     "\"device\":\"%s\","
@@ -75,6 +78,7 @@ static esp_err_t status_get(httpd_req_t *req) {
     "\"wifi\":{\"connected\":%s,\"ip\":\"%s\"},"
     "\"heap\":{\"internal\":%u,\"psram\":%u},"
     "\"state_posts\":%u,"
+    "\"buttons\":{\"k1\":%d,\"k2\":%d,\"k3\":%d,\"k4\":%d,\"joyK\":%d,\"bootB\":%d},"
     "\"transport\":\"wifi-http-route-b\"}",
     PET_P4_WIFI_HOSTNAME,
     app ? app->version : "unknown",
@@ -83,7 +87,9 @@ static esp_err_t status_get(httpd_req_t *req) {
     connected ? "true" : "false", ip,
     (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
     (unsigned) heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
-    (unsigned) s_post_count);
+    (unsigned) s_post_count,
+    key_levels[0], key_levels[1], key_levels[2],
+    key_levels[3], key_levels[4], key_levels[5]);
   if (n >= sizeof(body)) n = sizeof(body) - 1;
   return json_reply(req, NULL, body);
 }

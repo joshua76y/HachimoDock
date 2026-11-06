@@ -48,15 +48,33 @@
 #include "pet_p4_media.h"
 
 /* 微雪 ESP32-P4-WIFI6-Touch-LCD-4.3 + 用户外接「模拟摇杆 + 5 键」模块。
- * 接线全部收在 J3 的 pin15~24（偶数脚左列、奇数脚右列），见 PORTING-PLAN §五。
+ * 接线全部收在 J3 的 pin15~23（偶数脚左列、奇数脚右列），见 PORTING-PLAN §五。
+ *
+ * ✅ 实机确认的最终映射（2026-11-07，用户逐个按键核对）：
+ *   K  摇杆按下 = GPIO28 (pin16 / 线标 K1)
+ *   1  红(上)   = GPIO29 (pin20 / 线标 K2)
+ *   2  黄(左)   = GPIO30 (pin22 / 线标 K4)
+ *   3  蓝(下)   = GPIO25 (pin23 / 线标 K5)
+ *   4  绿(右)   = GPIO24 (pin21 / 线标 K3)
+ *   B  BOOT     = GPIO35 (pin30 引出，板载键)
+ *   摇杆 X = GPIO21 (pin15 / ADC1_CH5)，摇杆 Y = GPIO22 (pin17 / ADC1_CH6)
+ *
+ * ⚠️ GPIO24/25 是 ESP32-P4 的 USB 全速 PHY 差分对（USB-Serial-JTAG 的 D-/D+，
+ *    FS_PHY1）。微雪官方：不作 USB 用途时仍可当普通 GPIO —— 所以按键可用；
+ *    但**插 OTG 线或启用 USB-Serial-JTAG 传输时这两个键会失效/冲突**，
+ *    后续要走 USB 路线 A 时必须换脚或放弃这两个键。
+ *
+ * 板载按键：B=BOOT(GPIO35，运行期可读)；P=POWER(电源管理电路，长按2s关机，
+ *   非 GPIO，软件不可捕获)；R=RESET(EN 硬复位，按下即重启)。
  *
  * ⚠️ 原固件把摇杆 Y 放在 GPIO20 —— 这块板上 GPIO20 是电池检测 BAT_ADC（VBAT/3），
  *    既不在排针上也读不到摇杆，必须换到 GPIO22。 */
-#define PET_P4_INPUT_SW1_GPIO GPIO_NUM_28   /* K1 · pin16 · 确认/录音 */
-#define PET_P4_INPUT_SW2_GPIO GPIO_NUM_29   /* K2 · pin20 · 切页/实时对话 */
-#define PET_P4_INPUT_SW3_GPIO GPIO_NUM_24   /* K3 · pin21 · 返回/取消 */
-#define PET_P4_INPUT_ENCODER_PRESS_GPIO GPIO_NUM_30  /* K4 · pin22 · 确认 */
-#define PET_P4_INPUT_SW4_GPIO GPIO_NUM_25   /* K5 · pin23 · 暂映射为第二个确认键 */
+#define PET_P4_INPUT_KEY1_GPIO GPIO_NUM_29        /* 键 1（红 · 上） */
+#define PET_P4_INPUT_KEY2_GPIO GPIO_NUM_30        /* 键 2（黄 · 左） */
+#define PET_P4_INPUT_KEY3_GPIO GPIO_NUM_25        /* 键 3（蓝 · 下） */
+#define PET_P4_INPUT_KEY4_GPIO GPIO_NUM_24        /* 键 4（绿 · 右） */
+#define PET_P4_INPUT_JOY_PRESS_GPIO GPIO_NUM_28   /* 摇杆按下键 K */
+#define PET_P4_INPUT_BOOT_GPIO GPIO_NUM_35        /* 板载 BOOT 键 B */
 /* 模块没有旋转编码器，A/B 保持未接（内部上拉，无沿即无事件） */
 #define PET_P4_INPUT_ENCODER_B_GPIO GPIO_NUM_3
 #define PET_P4_INPUT_ENCODER_A_GPIO GPIO_NUM_2
@@ -92,10 +110,12 @@ typedef struct {
 } pet_p4_input_config_t;
 
 typedef enum {
-  PET_P4_INPUT_CONTROL_SW1,
-  PET_P4_INPUT_CONTROL_SW2,
-  PET_P4_INPUT_CONTROL_SW3,
-  PET_P4_INPUT_CONTROL_ENCODER_PRESS,
+  PET_P4_INPUT_CONTROL_KEY1,
+  PET_P4_INPUT_CONTROL_KEY2,
+  PET_P4_INPUT_CONTROL_KEY3,
+  PET_P4_INPUT_CONTROL_KEY4,
+  PET_P4_INPUT_CONTROL_JOY_PRESS,
+  PET_P4_INPUT_CONTROL_BOOT,
   PET_P4_INPUT_CONTROL_ENCODER,
   PET_P4_INPUT_CONTROL_JOYSTICK,
 } pet_p4_input_control_t;
@@ -167,6 +187,29 @@ static const char *json_string(const cJSON *object, const char *key) {
 
 static bool event_is_allowed(const char *event) {
   static const char *const allowed[] = {
+    "button.1.short_press",
+    "button.1.long_press",
+    "button.1.hold",
+    "button.2.short_press",
+    "button.2.long_press",
+    "button.2.hold",
+    "button.3.short_press",
+    "button.3.long_press",
+    "button.3.hold",
+    "button.4.short_press",
+    "button.4.long_press",
+    "button.4.hold",
+    "button.k.short_press",
+    "button.k.long_press",
+    "button.k.hold",
+    "button.b.short_press",
+    "button.b.long_press",
+    "button.b.hold",
+    "knob.rotate_cw",
+    "knob.rotate_ccw",
+    "joystick.up",
+    "joystick.down",
+    /* 旧命名（sw1~sw3/encoder，v9 及更早配置）：仅为迁移链校验保留 */
     "button.sw1.short_press",
     "button.sw1.long_press",
     "button.sw1.hold",
@@ -179,10 +222,6 @@ static bool event_is_allowed(const char *event) {
     "button.encoder.short_press",
     "button.encoder.long_press",
     "button.encoder.hold",
-    "knob.rotate_cw",
-    "knob.rotate_ccw",
-    "joystick.up",
-    "joystick.down",
   };
   for (size_t i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i += 1) {
     if (strcmp(event, allowed[i]) == 0) return true;
@@ -245,18 +284,20 @@ static void add_default_binding(
 static void load_default_config(pet_p4_input_config_t *config) {
   memset(config, 0, sizeof(*config));
   config->version = PET_P4_INPUT_CONFIG_VERSION;
-  add_default_binding(config, "button.sw1.short_press", "page_enter", "");
-  add_default_binding(config, "button.sw1.long_press", "disabled", "");
-  add_default_binding(config, "button.sw1.hold", "voice_ptt", "");
-  add_default_binding(config, "button.sw2.short_press", "component_center", "");
-  add_default_binding(config, "button.sw2.long_press", "realtime_chat", "");
-  add_default_binding(config, "button.sw2.hold", "disabled", "");
-  add_default_binding(config, "button.sw3.short_press", "page_back", "");
-  add_default_binding(config, "button.sw3.long_press", "disabled", "");
-  add_default_binding(config, "button.sw3.hold", "disabled", "");
-  add_default_binding(config, "button.encoder.short_press", "page_enter", "");
-  add_default_binding(config, "button.encoder.long_press", "disabled", "");
-  add_default_binding(config, "button.encoder.hold", "disabled", "");
+  /* 物理 → 角色：1红=确认/PTT按住，2黄=组件中心/长按实时对话，3蓝=返回，
+   * K=摇杆按下确认；4绿与 B(BOOT) 默认不绑，留 PC 组件中心自定义。 */
+  add_default_binding(config, "button.1.short_press", "page_enter", "");
+  add_default_binding(config, "button.1.long_press", "disabled", "");
+  add_default_binding(config, "button.1.hold", "voice_ptt", "");
+  add_default_binding(config, "button.2.short_press", "component_center", "");
+  add_default_binding(config, "button.2.long_press", "realtime_chat", "");
+  add_default_binding(config, "button.2.hold", "disabled", "");
+  add_default_binding(config, "button.3.short_press", "page_back", "");
+  add_default_binding(config, "button.3.long_press", "disabled", "");
+  add_default_binding(config, "button.3.hold", "disabled", "");
+  add_default_binding(config, "button.k.short_press", "page_enter", "");
+  add_default_binding(config, "button.k.long_press", "disabled", "");
+  add_default_binding(config, "button.k.hold", "disabled", "");
   add_default_binding(config, "knob.rotate_cw", "session_next", "");
   add_default_binding(config, "knob.rotate_ccw", "session_previous", "");
   add_default_binding(config, "joystick.up", "session_previous", "");
@@ -466,6 +507,50 @@ static bool migrate_v8_config(pet_p4_input_config_t *config) {
     "session_next",
     ""
   );
+  /* 注意：这里必须硬编码 9 而不是 PET_P4_INPUT_CONFIG_VERSION——
+   * v10 的改名迁移（migrate_v9_config）依赖版本号停在 9。 */
+  config->version = 9;
+  return true;
+}
+
+/* 事件名迁移：旧名 → 新名，action/value 原样保留。 */
+static void rename_binding_event(
+  pet_p4_input_config_t *config,
+  const char *old_event,
+  const char *new_event
+) {
+  if (!config) return;
+  for (uint32_t i = 0; i < config->binding_count; i += 1) {
+    pet_p4_input_binding_t *binding = &config->bindings[i];
+    if (strcmp(binding->event, old_event) == 0) {
+      copy_text(binding->event, sizeof(binding->event), new_event);
+    }
+  }
+}
+
+static bool migrate_v9_config(pet_p4_input_config_t *config) {
+  if (!config || config->version != 9) return false;
+
+  // Version 10 unifies button naming with the physical layout: sw1~sw3 map
+  // to the colored keys 1~3, encoder press maps to joystick press K. Actions
+  // and values are preserved verbatim; only event identifiers are rewritten.
+  static const struct { const char *old_name; const char *new_name; } renames[] = {
+    {"button.sw1", "button.1"},
+    {"button.sw2", "button.2"},
+    {"button.sw3", "button.3"},
+    {"button.encoder", "button.k"},
+  };
+  for (size_t i = 0; i < sizeof(renames) / sizeof(renames[0]); i += 1) {
+    char old_name[PET_P4_INPUT_EVENT_MAX];
+    char new_name[PET_P4_INPUT_EVENT_MAX];
+    static const char *const gestures[] = {"short_press", "long_press", "hold"};
+    for (size_t g = 0; g < sizeof(gestures) / sizeof(gestures[0]); g += 1) {
+      snprintf(old_name, sizeof(old_name), "%s.%s", renames[i].old_name, gestures[g]);
+      snprintf(new_name, sizeof(new_name), "%s.%s", renames[i].new_name, gestures[g]);
+      rename_binding_event(config, old_name, new_name);
+    }
+  }
+  if (!config_bindings_are_valid(config)) return false;
   config->version = PET_P4_INPUT_CONFIG_VERSION;
   return true;
 }
@@ -478,7 +563,8 @@ static bool migrate_input_config(pet_p4_input_config_t *config) {
   if (config->version == 5 && !migrate_v5_config(config)) return false;
   if (config->version == 6 && !migrate_v6_config(config)) return false;
   if (config->version == 7 && !migrate_v7_config(config)) return false;
-  return config->version == 8 && migrate_v8_config(config);
+  if (config->version == 8 && !migrate_v8_config(config)) return false;
+  return config->version == 9 && migrate_v9_config(config);
 }
 
 static esp_err_t persist_config(const pet_p4_input_config_t *config) {
@@ -734,10 +820,12 @@ bool pet_p4_input_send_config_state(
 
 static const char *control_name(pet_p4_input_control_t control) {
   switch (control) {
-    case PET_P4_INPUT_CONTROL_SW1: return "key.1";
-    case PET_P4_INPUT_CONTROL_SW2: return "key.2";
-    case PET_P4_INPUT_CONTROL_SW3: return "key.3";
-    case PET_P4_INPUT_CONTROL_ENCODER_PRESS: return "encoder.press";
+    case PET_P4_INPUT_CONTROL_KEY1: return "key.1(red)";
+    case PET_P4_INPUT_CONTROL_KEY2: return "key.2(yellow)";
+    case PET_P4_INPUT_CONTROL_KEY3: return "key.3(blue)";
+    case PET_P4_INPUT_CONTROL_KEY4: return "key.4(green)";
+    case PET_P4_INPUT_CONTROL_JOY_PRESS: return "joy.press";
+    case PET_P4_INPUT_CONTROL_BOOT: return "boot";
     case PET_P4_INPUT_CONTROL_ENCODER: return "encoder";
     case PET_P4_INPUT_CONTROL_JOYSTICK: return "joystick";
     default: return "unknown";
@@ -746,11 +834,52 @@ static const char *control_name(pet_p4_input_control_t control) {
 
 static const char *button_event_prefix(pet_p4_input_control_t control) {
   switch (control) {
-    case PET_P4_INPUT_CONTROL_SW1: return "button.sw1";
-    case PET_P4_INPUT_CONTROL_SW2: return "button.sw2";
-    case PET_P4_INPUT_CONTROL_SW3: return "button.sw3";
-    case PET_P4_INPUT_CONTROL_ENCODER_PRESS: return "button.encoder";
+    case PET_P4_INPUT_CONTROL_KEY1: return "button.1";
+    case PET_P4_INPUT_CONTROL_KEY2: return "button.2";
+    case PET_P4_INPUT_CONTROL_KEY3: return "button.3";
+    case PET_P4_INPUT_CONTROL_KEY4: return "button.4";
+    case PET_P4_INPUT_CONTROL_JOY_PRESS: return "button.k";
+    case PET_P4_INPUT_CONTROL_BOOT: return "button.b";
     default: return "";
+  }
+}
+
+bool pet_p4_input_legacy_alias(const char *event_name, char *out, size_t out_size) {
+  static const struct {
+    const char *canonical;
+    const char *legacy;
+  } map[] = {
+    {"button.1.", "button.sw1."},
+    {"button.2.", "button.sw2."},
+    {"button.3.", "button.sw3."},
+    {"button.k.", "button.encoder."},
+  };
+  if (!event_name || !out || out_size == 0) return false;
+  for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i += 1) {
+    const size_t prefix_len = strlen(map[i].canonical);
+    if (strncmp(event_name, map[i].canonical, prefix_len) != 0) continue;
+    const size_t legacy_len = strlen(map[i].legacy);
+    const size_t rest_len = strlen(event_name) - prefix_len;
+    if (legacy_len + rest_len + 1 > out_size) return false;
+    memcpy(out, map[i].legacy, legacy_len);
+    memcpy(out + legacy_len, event_name + prefix_len, rest_len + 1);
+    return true;
+  }
+  return false;
+}
+
+void pet_p4_input_gpio_levels(int levels[6]) {
+  static const gpio_num_t pins[6] = {
+    PET_P4_INPUT_KEY1_GPIO,
+    PET_P4_INPUT_KEY2_GPIO,
+    PET_P4_INPUT_KEY3_GPIO,
+    PET_P4_INPUT_KEY4_GPIO,
+    PET_P4_INPUT_JOY_PRESS_GPIO,
+    PET_P4_INPUT_BOOT_GPIO,
+  };
+  if (!levels) return;
+  for (size_t i = 0; i < sizeof(pins) / sizeof(pins[0]); i += 1) {
+    levels[i] = gpio_get_level(pins[i]);
   }
 }
 
@@ -816,13 +945,12 @@ static bool calibrate_joystick_center(int *center_x, int *center_y) {
 static void input_task(void *arg) {
   (void) arg;
   pet_p4_input_button_t buttons[] = {
-    {.gpio = PET_P4_INPUT_SW1_GPIO, .control = PET_P4_INPUT_CONTROL_SW1},
-    {.gpio = PET_P4_INPUT_SW2_GPIO, .control = PET_P4_INPUT_CONTROL_SW2},
-    {.gpio = PET_P4_INPUT_SW3_GPIO, .control = PET_P4_INPUT_CONTROL_SW3},
-    {.gpio = PET_P4_INPUT_ENCODER_PRESS_GPIO, .control = PET_P4_INPUT_CONTROL_ENCODER_PRESS},
-    /* 第 5 键：暂时复用 SW1。要给它独立功能需新增 control 并把输入配置版本升到 10，
-     * 那属于路线 A（协议扩展）的范围，现在不动 PC 端契约。 */
-    {.gpio = PET_P4_INPUT_SW4_GPIO, .control = PET_P4_INPUT_CONTROL_SW1},
+    {.gpio = PET_P4_INPUT_KEY1_GPIO, .control = PET_P4_INPUT_CONTROL_KEY1},
+    {.gpio = PET_P4_INPUT_KEY2_GPIO, .control = PET_P4_INPUT_CONTROL_KEY2},
+    {.gpio = PET_P4_INPUT_KEY3_GPIO, .control = PET_P4_INPUT_CONTROL_KEY3},
+    {.gpio = PET_P4_INPUT_KEY4_GPIO, .control = PET_P4_INPUT_CONTROL_KEY4},
+    {.gpio = PET_P4_INPUT_JOY_PRESS_GPIO, .control = PET_P4_INPUT_CONTROL_JOY_PRESS},
+    {.gpio = PET_P4_INPUT_BOOT_GPIO, .control = PET_P4_INPUT_CONTROL_BOOT},
   };
   pet_p4_rotary_decoder_t rotary;
   pet_p4_joystick_decoder_t joystick;
@@ -915,13 +1043,14 @@ static void input_task(void *arg) {
 
 esp_err_t pet_p4_input_init(void) {
   gpio_config_t config = {
-    .pin_bit_mask = (1ULL << PET_P4_INPUT_SW1_GPIO)
-      | (1ULL << PET_P4_INPUT_SW2_GPIO)
-      | (1ULL << PET_P4_INPUT_SW3_GPIO)
-      | (1ULL << PET_P4_INPUT_ENCODER_PRESS_GPIO)
+    .pin_bit_mask = (1ULL << PET_P4_INPUT_KEY1_GPIO)
+      | (1ULL << PET_P4_INPUT_KEY2_GPIO)
+      | (1ULL << PET_P4_INPUT_KEY3_GPIO)
+      | (1ULL << PET_P4_INPUT_KEY4_GPIO)
+      | (1ULL << PET_P4_INPUT_JOY_PRESS_GPIO)
       | (1ULL << PET_P4_INPUT_ENCODER_A_GPIO)
       | (1ULL << PET_P4_INPUT_ENCODER_B_GPIO)
-      | (1ULL << PET_P4_INPUT_SW4_GPIO),
+      | (1ULL << PET_P4_INPUT_BOOT_GPIO),
     .mode = GPIO_MODE_INPUT,
     .pull_up_en = GPIO_PULLUP_ENABLE,
     .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -976,11 +1105,13 @@ esp_err_t pet_p4_input_init(void) {
   }
   ESP_LOGI(
     TAG,
-    "inputs ready sw1=%d sw2=%d sw3=%d center_key=%d enc_b=%d enc_a=%d joy_x=%d joy_y=%d",
-    PET_P4_INPUT_SW1_GPIO,
-    PET_P4_INPUT_SW2_GPIO,
-    PET_P4_INPUT_SW3_GPIO,
-    PET_P4_INPUT_ENCODER_PRESS_GPIO,
+    "inputs ready key1=%d key2=%d key3=%d key4=%d joy_k=%d boot_b=%d enc_b=%d enc_a=%d joy_x=%d joy_y=%d",
+    PET_P4_INPUT_KEY1_GPIO,
+    PET_P4_INPUT_KEY2_GPIO,
+    PET_P4_INPUT_KEY3_GPIO,
+    PET_P4_INPUT_KEY4_GPIO,
+    PET_P4_INPUT_JOY_PRESS_GPIO,
+    PET_P4_INPUT_BOOT_GPIO,
     PET_P4_INPUT_ENCODER_B_GPIO,
     PET_P4_INPUT_ENCODER_A_GPIO,
     PET_P4_INPUT_JOYSTICK_X_GPIO,
@@ -1440,7 +1571,7 @@ static void dispatch_binding_event(
       state->touch_test.pointer_down = false;
       send_input_event(state, send_line, ctx, event, event_name, gesture, binding, "",
                        !strcmp(binding->action, "page_back"));
-    } else if (!strcmp(event_name, "button.sw1.short_press")) {
+    } else if (!strcmp(event_name, "button.1.short_press")) {
       pet_p4_slice_start(&state->touch_test, event->ts_ms);
       state->touch_test_until_ms = event->ts_ms + 120000;
     } else send_ignored_component_event(state, send_line, ctx, event, event_name, gesture);
@@ -1543,7 +1674,7 @@ static void process_button_event(
   static bool early_sw1=false;
   static bool held_sw1=false;
   if(event->gesture==PET_P4_INPUT_GESTURE_DOWN){
-    if(event->control!=PET_P4_INPUT_CONTROL_SW1)return;
+    if(event->control!=PET_P4_INPUT_CONTROL_KEY1)return;
     early_sw1=false;
     held_sw1=false;
     snprintf(event_name,sizeof(event_name),"%s.short_press",prefix);
@@ -1572,7 +1703,7 @@ static void process_button_event(
     }
     return;
   }
-  if(event->control==PET_P4_INPUT_CONTROL_SW1&&early_sw1){
+  if(event->control==PET_P4_INPUT_CONTROL_KEY1&&early_sw1){
     if(event->gesture==PET_P4_INPUT_GESTURE_UP){
       if(held_sw1)pet_p4_miniapp_hold_event(NULL,state&&!pet_p4_conversation_active(state)&&!strcmp(state->screen_page,"app")?1:2,1,event->ts_ms);
       early_sw1=false;held_sw1=false;

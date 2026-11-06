@@ -1,7 +1,8 @@
 /*
  * [Input] Physical-input runtime lifecycle and desktop input-config commands.
- * [Output] Version-9 P4 input configuration API with 16 persisted bindings
- *          plus a coherent bounded-try joystick ADC diagnostic snapshot.
+ * [Output] Version-10 P4 input configuration API with 16 persisted bindings
+ *          (physical layout naming: 1红/2黄/3蓝/4绿/摇杆K/BOOT B) plus a
+ *          coherent bounded-try joystick ADC diagnostic snapshot.
  * [Pos] Public interface for the ESP32-P4 input runtime.
  * [Sync] If this file changes, update `firmware/.folder.md` and `protocol.md`.
  */
@@ -18,7 +19,7 @@
 extern "C" {
 #endif
 
-#define PET_P4_INPUT_CONFIG_VERSION 9
+#define PET_P4_INPUT_CONFIG_VERSION 10
 #define PET_P4_INPUT_MAX_BINDINGS 16
 #define PET_P4_INPUT_EVENT_MAX 40
 #define PET_P4_INPUT_ACTION_MAX 24
@@ -59,6 +60,14 @@ unsigned int pet_p4_input_dropped_events(void);
 
 /* 电池电压（毫伏，已换算成 VBAT）。-1 = 尚未采样到。 */
 int pet_p4_battery_millivolts(void);
+/* v10 按键命名统一：把新事件名映射到旧组件包声明的兼容名。
+ * button.1→button.sw1、button.2→button.sw2、button.3→button.sw3、
+ * button.k→button.encoder；button.4/button.b 与摇杆方向无别名，返回 false。
+ * 仅在输入任务上下文调用（无锁、无重入）。 */
+bool pet_p4_input_legacy_alias(const char *event_name, char *out, size_t out_size);
+/* 接线诊断：读 6 个按键 GPIO 的瞬时电平（1=未按，0=按下，上拉输入）。
+ * 顺序：key1(红) key2(黄) key3(蓝) key4(绿) joyK bootB。 */
+void pet_p4_input_gpio_levels(int levels[6]);
 /* Read-only completed observation; no ADC read or input event. Unavailable
  * publication returns zeroed ready=false, never a mixed partially updated row. */
 void pet_p4_input_get_joystick_snapshot(pet_p4_input_joystick_snapshot_t *snapshot);

@@ -29,7 +29,19 @@
 #endif
 #include "pet_p4_touch.h"
 #include "pet_p4_audio.h"
+#include "pet_p4_input.h"
 #include "pet_p4_app_store.h"
+
+/* v10 命名统一：包声明的事件（旧名 sw1~sw3/encoder 或新名 1~3/k）是否
+ * 对应固件当前发出的 canonical 短按事件。 */
+static bool binding_declares_short_press(const char *declared, const char *canonical_short) {
+  char alias[PET_P4_INPUT_EVENT_MAX];
+  if (strcmp(declared, canonical_short) == 0) return true;
+  if (pet_p4_input_legacy_alias(canonical_short, alias, sizeof(alias))) {
+    return strcmp(declared, alias) == 0;
+  }
+  return false;
+}
 #include "nvs.h"
 #include "pet_p4_store_budget.h"
 #include "pet_p4_file_read.h"
@@ -2119,7 +2131,7 @@ static const char *const keys[]={"engine","repeat","press","swipe","confirm","dr
     const cJSON *scene=cJSON_GetObjectItemCaseSensitive(root,"scene");
     bool side=!strcmp(json_string(scene,"engine"),"p4-side-scene-v1");
     if(!cJSON_IsString(hold)||!runtime_has_transition_action(r,hold->valuestring)||(!side&&!cJSON_GetObjectItemCaseSensitive(scene,"motion")))return false;
-    bool bound=false;for(int b=0;b<r->button_count;b++)if(!strcmp(r->buttons[b].action,hold->valuestring)&&!strcmp(r->buttons[b].event,"button.sw1.short_press"))bound=true;
+    bool bound=false;for(int b=0;b<r->button_count;b++)if(!strcmp(r->buttons[b].action,hold->valuestring)&&binding_declares_short_press(r->buttons[b].event,"button.1.short_press"))bound=true;
     if(!bound||cJSON_HasObjectItem(p,"drag"))return false;
     const char *conflicts[]={"repeat","press","confirm","cooldown"};
     for(int k=0;k<4;k++){const cJSON *v=cJSON_GetObjectItemCaseSensitive(p,conflicts[k]),*item;
@@ -2142,7 +2154,7 @@ static const char *const keys[]={"engine","repeat","press","swipe","confirm","dr
       if(mode){
         const cJSON *game=cJSON_GetObjectItemCaseSensitive(root,"game");
         const char *flap=json_string(cJSON_GetObjectItemCaseSensitive(game,"actions"),"flap");
-        if(strcmp(event,"button.sw1.short_press")||
+        if(!binding_declares_short_press(event,"button.1.short_press")||
            (strcmp(v->valuestring,flap)&&!(cJSON_GetObjectItemCaseSensitive(root,"instrument")&&!strcmp(v->valuestring,"instrument.strike"))))return false;
       }else if(strcmp(event,"knob.rotate_ccw")&&strcmp(event,"knob.rotate_cw")&&strcmp(event,"joystick.up")&&strcmp(event,"joystick.down"))return false;
       mask|=1u<<b;
@@ -2897,9 +2909,10 @@ static bool parse_side_runtime(miniapp_runtime_t*r,const cJSON*root,const cJSON*
   for(int i=0;i<4;i++){int v=find_var(r,d->vars[i]);if(v<0||r->vars[v].type!=MINIAPP_VAR_INT||r->vars[v].int_min>0||r->vars[v].int_max<maximums[i])goto done;for(int j=0;j<i;j++)if(r->side_vars[j]==v)goto done;r->side_vars[i]=v;}
   int image=-1;for(int i=0;i<r->surface.image_count;i++)if(!strcmp(r->surface.image_ids[i],d->art.image))image=i;
   if(image<0||r->surface.image_jpeg[image]||r->surface.image_w[image]!=d->art.columns*16||r->surface.image_h[image]!=d->art.rows*16)goto done;
-  const char*events[]={"knob.rotate_ccw","knob.rotate_cw","button.sw1.short_press","button.sw2.short_press"};
+  const char*events[]={"knob.rotate_ccw","knob.rotate_cw","",""};
+  const char*canonical[]={"","","button.1.short_press","button.2.short_press"};
   for(int i=0;i<4;i++){
-    bool found=false;for(int b=0;b<r->button_count;b++)if(!strcmp(r->buttons[b].action,d->actions[i])&&!strcmp(r->buttons[b].event,events[i]))found=true;
+    bool found=false;for(int b=0;b<r->button_count;b++)if(!strcmp(r->buttons[b].action,d->actions[i])&&(i<2?!strcmp(r->buttons[b].event,events[i]):binding_declares_short_press(r->buttons[b].event,canonical[i])))found=true;
     if(!found)goto done;copy_utf8(r->side_actions[i],48,d->actions[i]);
   }
   if(strcmp(r->hold_action,d->actions[2]))goto done;
@@ -3811,8 +3824,8 @@ static bool dispatch_action_observed(const char *action,uint64_t now_ms,const pe
   if(g_confirm_action[0]){
     bool yes=!strcmp(action,"input.confirm"),no=!strcmp(action,"input.cancel");
     for(int i=0;i<g_runtime.button_count;i++)if(!strcmp(action,g_runtime.buttons[i].action)){
-      yes|=!strcmp(g_runtime.buttons[i].event,"button.sw1.short_press");
-      no|=!strcmp(g_runtime.buttons[i].event,"button.sw2.short_press");
+      yes|=binding_declares_short_press(g_runtime.buttons[i].event,"button.1.short_press");
+      no|=binding_declares_short_press(g_runtime.buttons[i].event,"button.2.short_press");
     }
     if(no){g_confirm_action[0]=0;g_runtime.view.revision++;miniapp_runtime_unlock();return true;}
     if(!yes){miniapp_runtime_unlock();return true;}
@@ -4058,8 +4071,14 @@ bool pet_p4_miniapp_dispatch_action(const char *action,uint64_t now_ms){
 
 static bool button_matches_event(const char *binding, const char *event_name) {
   if (strcmp(binding, event_name) == 0) return true;
-  return strcmp(binding, "knob.rotate_cw / knob.rotate_ccw") == 0
-    && (strcmp(event_name, "knob.rotate_cw") == 0 || strcmp(event_name, "knob.rotate_ccw") == 0);
+  if (strcmp(binding, "knob.rotate_cw / knob.rotate_ccw") == 0
+      && (strcmp(event_name, "knob.rotate_cw") == 0 || strcmp(event_name, "knob.rotate_ccw") == 0)) {
+    return true;
+  }
+  /* v10 命名统一：旧组件包仍声明 sw1~sw3/encoder，新事件名经别名回退命中 */
+  char alias[PET_P4_INPUT_EVENT_MAX];
+  return pet_p4_input_legacy_alias(event_name, alias, sizeof(alias))
+    && strcmp(binding, alias) == 0;
 }
 
 bool pet_p4_miniapp_has_input(const char *event_name) {
@@ -4390,7 +4409,7 @@ bool pet_p4_miniapp_input_policy(const char *event_name,bool press) {
   miniapp_runtime_lock();
   /* Only explicit opt-in permits repeated mutations. */
   if(g_runtime.active&&g_runtime.input_v1)for(int i=0;i<g_runtime.button_count;i++)
-    if(!strcmp(event_name,g_runtime.buttons[i].event)){
+    if(button_matches_event(g_runtime.buttons[i].event,event_name)){
       enabled=((press?g_runtime.press_mask:g_runtime.repeat_mask)&(1u<<i))!=0;
       break;
     }
@@ -4711,8 +4730,8 @@ static bool app_surface_locked(pet_surface_t *surface,const pet_host_render_t *h
     if(g_pressed_node>=0&&memcmp(g_pressed_scroll,scroll,sizeof(scroll))){g_viewport_epoch++;g_pressed_node=-1;}
     surface->viewport.offset=scroll[0];
     for(int i=0;i<surface->viewport_count;i++)surface->viewports[i].offset=scroll[i+1];
-    static const char *const events[]={"button.sw1.short_press","button.sw2.short_press","button.sw3.short_press","button.encoder.short_press","button.encoder.long_press","knob.rotate_ccw","knob.rotate_cw","joystick.up","joystick.down"};
-    static const char *const labels[]={"SW1","SW2","SW3","中按","中长","左","右","上","下"};
+    static const char *const events[]={"button.1.short_press","button.2.short_press","button.3.short_press","button.4.short_press","button.k.short_press","button.k.long_press","button.sw1.short_press","button.sw2.short_press","button.sw3.short_press","button.encoder.short_press","button.encoder.long_press","knob.rotate_ccw","knob.rotate_cw","joystick.up","joystick.down"};
+    static const char *const labels[]={"红1","黄2","蓝3","绿4","摇杆K","K长按","SW1","SW2","SW3","中按","中长","左","右","上","下"};
 #if PET_FORM_V2_ENABLED
     /* Capture/format each field once under this runtime lock, not once for
      * every bound node (up to 32). Normal builds have no extra scratch/calls. */
