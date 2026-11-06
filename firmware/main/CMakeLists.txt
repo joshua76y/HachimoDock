@@ -37,6 +37,12 @@ idf_component_register(
     # and licenses/MiSans-Embedded-Fonts-NOTICE.txt at the repository root.
     "pet_p4_font_cn.c"
     "pet_p4_font_cn_32.c"
+    # Noto Sans SC (SIL OFL) 16px subsets used for rendering: A4 for GB2312
+    # level-1, A2 for level-2 fallback. The MiSans arrays above stay compiled as
+    # the licence-bearing originals but are unreferenced, so --gc-sections drops
+    # them from the image; the metric-columns gate still reads pet_p4_font_cn.c.
+    "pet_p4_font_cn_a4.c"
+    "pet_p4_font_cn_l2.c"
     "pet_p4_font_bitmap.c"
     "pet_p4_bubble_pixels.c"
     "pet_p4_game.c"

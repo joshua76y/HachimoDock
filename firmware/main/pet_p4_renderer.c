@@ -189,7 +189,15 @@ _Static_assert(CONFIG_ESP_H264_DUAL_TASK_CORE == 1,
 
 static const char *TAG = "pet-p4-renderer";
 
-extern const lv_font_t pet_p4_font_cn_16;
+extern const lv_font_t pet_p4_font_cn_16_a4;
+/* 二级汉字二级字库（GB2312 二级 3008 字，A2 灰度）。与主字库同为 16px，
+ * 度量一致，找不到字形时直接回退到它。 */
+extern const lv_font_t pet_p4_font_cn_16_l2;
+
+static bool pet_glyph_lookup(lv_font_glyph_dsc_t *g, uint32_t cp, uint32_t next) {
+  if (lv_font_get_glyph_dsc(&pet_p4_font_cn_16_a4, g, cp, next)) return true;
+  return lv_font_get_glyph_dsc(&pet_p4_font_cn_16_l2, g, cp, next);
+}
 #include "pet_p4_font_native32.h"
 
 static uint16_t *g_framebuffer;
@@ -1533,7 +1541,7 @@ static uint8_t glyph_alpha_at(const uint8_t *bitmap, const lv_font_glyph_dsc_t *
 static int glyph_width(uint32_t codepoint, uint32_t next_codepoint) {
   lv_font_glyph_dsc_t glyph = {0};
   if (codepoint == 0xFE0F || codepoint == 0x200D) return 0;
-  if (!lv_font_get_glyph_dsc(&pet_p4_font_cn_16, &glyph, codepoint, next_codepoint)) {
+  if (!pet_glyph_lookup(&glyph, codepoint, next_codepoint)) {
     return codepoint >= 0x2300 ? 16 : 10;
   }
   return glyph.adv_w > 0 ? glyph.adv_w : glyph.box_w;
@@ -1555,14 +1563,14 @@ static inline bool scaled_glyph_dsc(uint32_t cp,uint32_t next,lv_font_glyph_dsc_
 #else
   (void)scale;
 #endif
-  return lv_font_get_glyph_dsc(&pet_p4_font_cn_16,glyph,cp,next);
+  return pet_glyph_lookup(glyph, cp, next);
 }
 static inline int scaled_glyph_baseline(const lv_font_glyph_dsc_t *glyph,int scale){
 #if PET_FONT_NATIVE_32
   return (glyph->resolved_font->line_height-glyph->resolved_font->base_line)*scale;
 #else
   (void)glyph;
-  return (pet_p4_font_cn_16.line_height-pet_p4_font_cn_16.base_line)*scale;
+  return (pet_p4_font_cn_16_a4.line_height-pet_p4_font_cn_16_a4.base_line)*scale;
 #endif
 }
 
@@ -1636,7 +1644,7 @@ static void text_visual_bounds(const char *text, int scale, int *top, int *botto
   }
   if (!found) {
     *top = 0;
-    *bottom = pet_p4_font_cn_16.line_height * (scale > 0 ? scale : 1) - 1;
+    *bottom = pet_p4_font_cn_16_a4.line_height * (scale > 0 ? scale : 1) - 1;
   }
 }
 
@@ -1751,7 +1759,7 @@ static bool medium_glyph_visual_bounds(
 ) {
   lv_font_glyph_dsc_t glyph = {0};
   if (codepoint == 0xFE0F || codepoint == 0x200D) return false;
-  if (!lv_font_get_glyph_dsc(&pet_p4_font_cn_16, &glyph, codepoint, next_codepoint)) {
+  if (!pet_glyph_lookup(&glyph, codepoint, next_codepoint)) {
     if (codepoint == 0x00B7) {
       *top = 8;
       *bottom = 12;
@@ -1783,7 +1791,7 @@ static bool medium_glyph_visual_bounds(
   }
   lv_font_glyph_release_draw_data(&glyph);
   if (last_ink_row < first_ink_row) return false;
-  int baseline = ((pet_p4_font_cn_16.line_height - pet_p4_font_cn_16.base_line) * 3 + 1) / 2;
+  int baseline = ((pet_p4_font_cn_16_a4.line_height - pet_p4_font_cn_16_a4.base_line) * 3 + 1) / 2;
   int glyph_top = baseline - scaled_height - glyph.ofs_y * 3 / 2;
   *top = glyph_top + first_ink_row;
   *bottom = glyph_top + last_ink_row;
@@ -1812,7 +1820,7 @@ static void text_visual_bounds_medium(const char *text, int *top, int *bottom) {
   }
   if (!found) {
     *top = 0;
-    *bottom = (pet_p4_font_cn_16.line_height * 3 + 1) / 2 - 1;
+    *bottom = (pet_p4_font_cn_16_a4.line_height * 3 + 1) / 2 - 1;
   }
 }
 
@@ -1850,7 +1858,7 @@ static bool draw_native32_as_24(
     lv_font_glyph_release_draw_data(&glyph);
     return false;
   }
-  const int baseline = y + ((pet_p4_font_cn_16.line_height - pet_p4_font_cn_16.base_line) * 3 + 1) / 2;
+  const int baseline = y + ((pet_p4_font_cn_16_a4.line_height - pet_p4_font_cn_16_a4.base_line) * 3 + 1) / 2;
   const int gx0 = x + glyph.ofs_x * 3 / 4;
   const int gy0 = baseline - (glyph.box_h * 3 + 2) / 4 - glyph.ofs_y * 3 / 4;
   const int dw = (glyph.box_w * 3 + 2) / 4;
@@ -1896,10 +1904,9 @@ static void draw_lvgl_glyph_medium(
   int y,
   uint16_t color
 ) {
-  if (draw_native32_as_24(codepoint, next_codepoint, x, y, color)) return;
   lv_font_glyph_dsc_t glyph = {0};
   if (codepoint == 0xFE0F || codepoint == 0x200D) return;
-  if (!lv_font_get_glyph_dsc(&pet_p4_font_cn_16, &glyph, codepoint, next_codepoint)) {
+  if (!pet_glyph_lookup(&glyph, codepoint, next_codepoint)) {
     if (codepoint == 0x00B7) {
       fill_ellipse(x + 6, y + 10, 2, 2, color);
     } else if (codepoint >= 0x2300) {
@@ -1917,7 +1924,7 @@ static void draw_lvgl_glyph_medium(
     lv_font_glyph_release_draw_data(&glyph);
     return;
   }
-  int baseline = y + ((pet_p4_font_cn_16.line_height - pet_p4_font_cn_16.base_line) * 3 + 1) / 2;
+  int baseline = y + ((pet_p4_font_cn_16_a4.line_height - pet_p4_font_cn_16_a4.base_line) * 3 + 1) / 2;
   int gx0 = x + glyph.ofs_x * 3 / 2;
   int gy0 = baseline - (glyph.box_h * 3 + 1) / 2 - glyph.ofs_y * 3 / 2;
   int scaled_w = (glyph.box_w * 3 + 1) / 2;
@@ -1925,14 +1932,34 @@ static void draw_lvgl_glyph_medium(
   uint8_t r = (uint8_t) (((color >> 11) & 0x1F) * 255 / 31);
   uint8_t g = (uint8_t) (((color >> 5) & 0x3F) * 255 / 63);
   uint8_t b = (uint8_t) ((color & 0x1F) * 255 / 31);
+  /* 3:2 放大走双线性（源是 A4 灰度字库，插值才有意义）：
+   * 旧实现是 dx*2/3 最近邻，笔画宽 1px 和 2px 交替跳变，观感发虚。 */
+  const int w = glyph.box_w;
+  const int h = glyph.box_h;
   for (int dy = 0; dy < scaled_h; dy += 1) {
-    int source_y = dy * 2 / 3;
-    if (source_y >= glyph.box_h) source_y = glyph.box_h - 1;
+    int fy256 = (dy * 2 * 256) / 3;
+    int y0 = fy256 >> 8;
+    int wy = fy256 & 0xFF;
+    if (y0 >= h) { y0 = h - 1; wy = 0; }
+    const int y1 = y0 + 1 < h ? y0 + 1 : y0;
     for (int dx = 0; dx < scaled_w; dx += 1) {
-      int source_x = dx * 2 / 3;
-      if (source_x >= glyph.box_w) source_x = glyph.box_w - 1;
-      uint8_t alpha = glyph_alpha_at(bitmap, &glyph, source_x, source_y);
-      if (alpha) blend_px(gx0 + dx, gy0 + dy, r, g, b, alpha);
+      int fx256 = (dx * 2 * 256) / 3;
+      int x0 = fx256 >> 8;
+      int wx = fx256 & 0xFF;
+      if (x0 >= w) { x0 = w - 1; wx = 0; }
+      const int x1 = x0 + 1 < w ? x0 + 1 : x0;
+      const uint32_t a00 = glyph_alpha_at(bitmap, &glyph, x0, y0);
+      const uint32_t a10 = glyph_alpha_at(bitmap, &glyph, x1, y0);
+      const uint32_t a01 = glyph_alpha_at(bitmap, &glyph, x0, y1);
+      const uint32_t a11 = glyph_alpha_at(bitmap, &glyph, x1, y1);
+      const uint32_t top = a00 * (uint32_t) (256 - wx) + a10 * (uint32_t) wx;
+      const uint32_t bottom = a01 * (uint32_t) (256 - wx) + a11 * (uint32_t) wx;
+      uint32_t alpha = (top * (uint32_t) (256 - wy) + bottom * (uint32_t) wy) >> 16;
+      /* 轻微加粗（stem darkening）：1.5 倍插值会让细笔画被摊薄成灰线，
+       * 提 15% 覆盖率后笔画看起来是实心的一笔，而不是雾状。 */
+      alpha = alpha * 115u / 100u;
+      if (alpha > 255u) alpha = 255u;
+      if (alpha) blend_px(gx0 + dx, gy0 + dy, r, g, b, (uint8_t) alpha);
     }
   }
   lv_font_glyph_release_draw_data(&glyph);
@@ -2274,19 +2301,18 @@ static void draw_card_body_lines(
       x, first_line_y, max_px, color)) return;
   /* 正文用 16px 点阵的原生 1 倍：1bpp 字库只有原生尺寸是锐利的，
    * 1.5 倍最近邻重采样会出现笔画宽窄跳变（历史上的"像素不对应"）。 */
-  const char *second_line = draw_text_line_vcenter(
+  const char *second_line = draw_text_line_medium_vcenter(
     body,
     x,
     first_line_y,
-    18,
+    27,
     max_px,
     color,
-    1,
     false
   );
   while (second_line && (*second_line == ' ' || *second_line == '\t')) second_line += 1;
   if (second_line && second_line[0]) {
-    draw_text_line_vcenter(second_line, x, first_line_y + 18, 18, max_px, color, 1, true);
+    draw_text_line_medium_vcenter(second_line, x, first_line_y + 27, 27, max_px, color, true);
   }
 }
 
@@ -5739,10 +5765,10 @@ static void draw_app_glyph(uint32_t cp,uint32_t next,float x,float y,int px,uint
     x+=8*scale;cp='C';
   }
   lv_font_glyph_dsc_t g={0};
-  if(!lv_font_get_glyph_dsc(&pet_p4_font_cn_16,&g,cp,next)&&!lv_font_get_glyph_dsc(&pet_p4_font_cn_16,&g,'?',0))return;
+  if(!pet_glyph_lookup(&g, cp, next)&&!pet_glyph_lookup(&g, '?', 0))return;
   g.req_raw_bitmap=1;const uint8_t *bitmap=g.resolved_font->get_glyph_bitmap(&g,NULL);
   if(!bitmap){lv_font_glyph_release_draw_data(&g);return;}
-  float scale=px/16.0f,gx=x+g.ofs_x*scale,gy=y+(pet_p4_font_cn_16.line_height-pet_p4_font_cn_16.base_line-g.box_h-g.ofs_y)*scale;
+  float scale=px/16.0f,gx=x+g.ofs_x*scale,gy=y+(pet_p4_font_cn_16_a4.line_height-pet_p4_font_cn_16_a4.base_line-g.box_h-g.ofs_y)*scale;
   int left=(int)floorf(gx)-1,top=(int)floorf(gy)-1,right=(int)ceilf(gx+g.box_w*scale)+1,bottom=(int)ceilf(gy+g.box_h*scale)+1;
 #if PET_P4_GLYPH_PIXEL_FAST
   const uint8_t cr=((color>>11)&31)*255/31,cg=((color>>5)&63)*255/63,cb=(color&31)*255/31;

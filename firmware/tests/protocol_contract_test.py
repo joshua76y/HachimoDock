@@ -1186,8 +1186,8 @@ def test_p4_conversation_queue_is_synced_and_rendered_with_pixel_ellipsis():
     assert "rgb565(255, 255, 255)" in renderer
     assert "draw_text_line_vcenter(text.title, x + 30, y + 10, 38, w - 82, ink, 2, true)" in renderer
     assert "static void draw_card_body_lines(" in renderer
-    assert "const char *second_line = draw_text_line_vcenter(" in renderer
-    assert "first_line_y + 18, 18" in renderer
+    assert "const char *second_line = draw_text_line_medium_vcenter(" in renderer
+    assert "first_line_y + 27, 27" in renderer
     assert "draw_card_body_lines(text.body, x + 30, y + 50, w - 60, muted, &text)" in renderer
     assert "static const char *draw_text_line_medium(" in renderer
     assert "static const char *draw_text_line_medium_vcenter(" in renderer
