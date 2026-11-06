@@ -40,7 +40,7 @@ export default function ComponentPreviewModal({
   installing,
   bindings = [],
   bindingConflict = "",
-  globalExitControl = "SW1",
+  globalExitControl = "1红",
   getControlOptions,
   onBindingChange,
   onResetBindings,
@@ -57,7 +57,12 @@ export default function ComponentPreviewModal({
       ? isCurrent
       : Boolean(currentComponent?.id && currentComponent.id === component.id)
   );
-  const switchControls = ["SW1", "SW2", "SW3"];
+  /* 物理键身份（v10）：旧包 buttons.json 仍用 SW1/SW2/SW3 作为 control，
+   * 显示与分组统一归一化到 1红/2黄/3蓝/4绿/K。 */
+  const SWITCH_CONTROL_ALIASES = { SW1: "1红", SW2: "2黄", SW3: "3蓝" };
+  const switchControls = ["1红", "2黄", "3蓝", "4绿", "K"];
+  const bindingSwitchControl = (binding) =>
+    SWITCH_CONTROL_ALIASES[String(binding?.control || "")] || String(binding?.control || "");
   const resolvedKind = resolveComponentKind(kind, component.gameType);
   const componentKind = componentKindLabel(resolvedKind);
   const playGuide = resolvedKind === "game"
@@ -194,9 +199,9 @@ export default function ComponentPreviewModal({
                       <RotateCcw size={14} /> 恢复默认
                     </Button>
                   </header>
-                  <div className="component-preview-modal__switch-strip" aria-label="SW1、SW2、SW3 当前映射">
+                  <div className="component-preview-modal__switch-strip" aria-label="1红、2黄、3蓝、4绿、K 当前映射">
                     {switchControls.map((control) => {
-                      const assigned = bindings.filter((binding) => binding.control === control);
+                      const assigned = bindings.filter((binding) => bindingSwitchControl(binding) === control);
                       return (
                         <div
                           className={`component-preview-modal__switch${assigned.length ? " is-assigned" : ""}`}

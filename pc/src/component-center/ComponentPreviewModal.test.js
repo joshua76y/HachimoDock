@@ -93,7 +93,7 @@ test("ComponentPreviewModal renders a per-component button editor", () => {
   assert.match(source, /onBindingChange/);
   assert.match(source, /已占用/);
   assert.match(source, /恢复默认/);
-  assert.match(source, /SW1、SW2、SW3 当前映射/);
+  assert.match(source, /1红、2黄、3蓝、4绿、K 当前映射/);
   assert.match(source, /component-preview-modal__switch-strip/);
   assert.match(source, /动作逻辑不变/);
 });

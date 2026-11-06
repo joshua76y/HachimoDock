@@ -66,9 +66,11 @@ static esp_err_t status_get(httpd_req_t *req) {
   esp_chip_info_t chip;
   esp_chip_info(&chip);
 
-  char body[896];
+  char body[1152];
   int key_levels[6] = {0};
   pet_p4_input_gpio_levels(key_levels);
+  pet_p4_input_joystick_snapshot_t joy;
+  pet_p4_input_get_joystick_snapshot(&joy);
   size_t n = (size_t) snprintf(body, sizeof(body),
     "{\"ok\":true,"
     "\"device\":\"%s\","
@@ -79,6 +81,8 @@ static esp_err_t status_get(httpd_req_t *req) {
     "\"heap\":{\"internal\":%u,\"psram\":%u},"
     "\"state_posts\":%u,"
     "\"buttons\":{\"k1\":%d,\"k2\":%d,\"k3\":%d,\"k4\":%d,\"joyK\":%d,\"bootB\":%d},"
+    "\"joystick\":{\"ready\":%s,\"x\":%d,\"y\":%d,\"cx\":%d,\"cy\":%d,"
+    "\"minx\":%d,\"maxx\":%d,\"miny\":%d,\"maxy\":%d},"
     "\"transport\":\"wifi-http-route-b\"}",
     PET_P4_WIFI_HOSTNAME,
     app ? app->version : "unknown",
@@ -89,7 +93,10 @@ static esp_err_t status_get(httpd_req_t *req) {
     (unsigned) heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
     (unsigned) s_post_count,
     key_levels[0], key_levels[1], key_levels[2],
-    key_levels[3], key_levels[4], key_levels[5]);
+    key_levels[3], key_levels[4], key_levels[5],
+    joy.ready ? "true" : "false",
+    joy.current_x, joy.current_y, joy.center_x, joy.center_y,
+    joy.minimum_x, joy.maximum_x, joy.minimum_y, joy.maximum_y);
   if (n >= sizeof(body)) n = sizeof(body) - 1;
   return json_reply(req, NULL, body);
 }

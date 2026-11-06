@@ -4730,8 +4730,9 @@ static bool app_surface_locked(pet_surface_t *surface,const pet_host_render_t *h
     if(g_pressed_node>=0&&memcmp(g_pressed_scroll,scroll,sizeof(scroll))){g_viewport_epoch++;g_pressed_node=-1;}
     surface->viewport.offset=scroll[0];
     for(int i=0;i<surface->viewport_count;i++)surface->viewports[i].offset=scroll[i+1];
-    static const char *const events[]={"button.1.short_press","button.2.short_press","button.3.short_press","button.4.short_press","button.k.short_press","button.k.long_press","button.sw1.short_press","button.sw2.short_press","button.sw3.short_press","button.encoder.short_press","button.encoder.long_press","knob.rotate_ccw","knob.rotate_cw","joystick.up","joystick.down"};
-    static const char *const labels[]={"1红","2黄","3蓝","4绿","K摇杆","K长按","SW1","SW2","SW3","中按","中长","左","右","上","下"};
+    static const char *const events[]={"button.1.short_press","button.2.short_press","button.3.short_press","button.4.short_press","button.k.short_press","button.k.long_press","button.b.short_press","button.1.long_press","button.2.long_press","button.3.long_press","button.4.long_press","button.b.long_press","knob.rotate_ccw","knob.rotate_cw","joystick.up","joystick.down","button.sw1.short_press","button.sw2.short_press","button.sw3.short_press","button.encoder.short_press","button.encoder.long_press","button.sw1.long_press"};
+    /* 全部按物理键名显示（旧包声明 sw1~sw3/encoder 也显示成 1红/2黄/3蓝/K） */
+    static const char *const labels[]={"1红","2黄","3蓝","4绿","K","K 长按","B","1红 长按","2黄 长按","3蓝 长按","4绿 长按","B 长按","左","右","上","下","1红","2黄","3蓝","K","K 长按","1红 长按"};
 #if PET_FORM_V2_ENABLED
     /* Capture/format each field once under this runtime lock, not once for
      * every bound node (up to 32). Normal builds have no extra scratch/calls. */
@@ -4819,7 +4820,9 @@ static bool app_surface_locked(pet_surface_t *surface,const pet_host_render_t *h
       if(!n->key_for[0])continue;
       copy_utf8(n->text,sizeof(n->text),"—");
       for(int b=0;b<g_runtime.button_count;b++)if(!strcmp(n->key_for,g_runtime.buttons[b].action)){
-        for(int e=0;e<9;e++)if(!strcmp(g_runtime.buttons[b].event,events[e]))copy_utf8(n->text,sizeof(n->text),labels[e]);
+        for(size_t e=0;e<sizeof(events)/sizeof(events[0]);e++)
+          if(button_matches_event(g_runtime.buttons[b].event,events[e]))
+            {copy_utf8(n->text,sizeof(n->text),labels[e]);break;}
         break;
       }
     }
