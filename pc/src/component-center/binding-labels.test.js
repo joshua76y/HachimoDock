@@ -21,7 +21,7 @@ test("buildComponentPlayGuide groups joystick directions and keeps mapped action
 
   assert.equal(
     guide,
-    "摇杆：向上跳跃、快速下坠、向左移动、向右移动；SW2：向前冲刺；SW1：开始或重开；退出跟随设备全局设置",
+    "摇杆：向上跳跃、快速下坠、向左移动、向右移动；2黄：向前冲刺；1红：开始或重开；退出跟随设备全局设置",
   );
 });
 

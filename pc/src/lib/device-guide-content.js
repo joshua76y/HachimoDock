@@ -3,7 +3,7 @@
  *         modal in DeviceDashboard.
  * [Output] Card data + storage key + canonical labels used by DeviceGuideModal,
  *          including compact screen/physical-control labels, all twelve P4
- *          gestures, SW1-confirm/SW2-page-toggle/SW3-back defaults, and
+ *          gestures, 1红-confirm/2黄-page-toggle/3蓝-back defaults, and
  *          install-time widget button functions.
  * [Pos] lib helper for pc/src/DeviceGuideModal.jsx
  * [Sync] If `firmware/main/pet_p4_input.c` or legacy device input maps
@@ -25,9 +25,9 @@ export const CONTROLS = {
   encoder: { emoji: "旋", shortLabel: "旋钮", name: "屏幕前编码旋钮" },
   touch: { emoji: "屏", shortLabel: "屏幕", name: "触摸屏" },
   p4Joystick: { emoji: "杆", shortLabel: "摇杆", name: "ESP32-P4 四向摇杆" },
-  sw1: { emoji: "1", shortLabel: "SW1", name: "SW1" },
-  sw2: { emoji: "2", shortLabel: "SW2", name: "SW2" },
-  sw3: { emoji: "3", shortLabel: "SW3", name: "SW3" },
+  sw1: { emoji: "1", shortLabel: "1红", name: "1红（红色键·上）" },
+  sw2: { emoji: "2", shortLabel: "2黄", name: "2黄（黄色键·左）" },
+  sw3: { emoji: "3", shortLabel: "3蓝", name: "3蓝（蓝色键·下）" },
 };
 
 // Canonical labels for the two device screen pages. Source-of-truth mapping
@@ -106,28 +106,28 @@ export const CARDS = [
 export const P4_CARDS = [
   {
     id: "screen-switch",
-    title: "用摇杆选择，用 SW2 切换页面",
+    title: "用摇杆选择，用 2黄 切换页面",
     shortTitle: "摇杆导航",
-    headline: "左右选择当前内容，SW2 在宠物与组件页面间切换。",
+    headline: "左右选择当前内容，2黄 在宠物与组件页面间切换。",
     screenIds: ["main", "components"],
     canonicalControl: "p4Joystick",
-    canonicalActionText: "宠物界面左右切换会话气泡，组件中心左右切换组件；SW2 短按切换两个页面。",
+    canonicalActionText: "宠物界面左右切换会话气泡，组件中心左右切换组件；2黄 短按切换两个页面。",
     otherWays: [
       { control: "p4Joystick", text: "向右默认：下一个" },
       { control: "p4Joystick", text: "向左默认：上一个" },
       { control: "p4Joystick", text: "向上 / 向下默认：暂不绑定，可单独配置" },
-      { control: "p4Joystick", text: "中按短按默认：确认" },
-      { control: "p4Joystick", text: "中按长按默认：暂不绑定" },
+      { control: "p4Joystick", text: "K（摇杆按下）短按默认：确认" },
+      { control: "p4Joystick", text: "K（摇杆按下）长按默认：暂不绑定" },
     ],
     gestures: [
       { gesture: "向上", action: "可独立配置" },
       { gesture: "向下", action: "可独立配置" },
       { gesture: "向左", action: "上一个" },
       { gesture: "向右", action: "下一个" },
-      { gesture: "中按短按", action: "确认 / 进入" },
-      { gesture: "中按长按", action: "暂不绑定" },
+      { gesture: "K 短按", action: "确认 / 进入" },
+      { gesture: "K 长按", action: "暂不绑定" },
     ],
-    supportingText: "这些默认动作可以在 PC 端独立调整；SW3 短按默认承担清晰的返回路径。",
+    supportingText: "这些默认动作可以在 PC 端独立调整；3蓝 短按默认承担清晰的返回路径。",
   },
   {
     id: "controls",
@@ -170,12 +170,12 @@ export const P4_CARDS = [
         { control: "sw1", gesture: "长按", action: "语音输入" },
         { control: "sw2", gesture: "短按", action: "切换宠物/组件" },
         { control: "sw3", gesture: "短按", action: "返回 / 取消" },
-        { control: "p4Joystick", gesture: "中按短按", action: "确认 / 进入" },
+        { control: "p4Joystick", gesture: "K 短按", action: "确认 / 进入" },
         { control: "p4Joystick", gesture: "向左 / 向右", action: "上一个 / 下一个" },
       ],
     },
     footnotes: [
-      "SW1/SW2/SW3 的短按和长按，加上摇杆的六种手势，共 12 个独立入口。",
+      "1红/2黄/3蓝/4绿 与 K、B 的短按和长按，加上摇杆六种手势，共 12 个独立入口。",
       "组件按键只在该组件打开时生效，不覆盖设备页面的默认导航。",
     ],
   },

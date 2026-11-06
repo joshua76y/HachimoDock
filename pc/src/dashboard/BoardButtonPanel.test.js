@@ -234,12 +234,12 @@ test("Component-owned actions are not rendered as global hardware actions", () =
   assert.doesNotMatch(source, /voice-button-action-value--readonly/);
 });
 
-test("P4 map matches the physical left-to-right SW1, SW2, SW3, joystick layout", () => {
+test("P4 map matches the physical left-to-right 1红, 2黄, 3蓝, joystick layout", () => {
   assert.match(source, /board-button-map__body--p4/);
   assert.match(source, /board-button-map__control-deck/);
-  assert.match(source, /\["p4_sw1", "p4_sw1_short", 84, "SW1"\]/);
-  assert.match(source, /\["p4_sw2", "p4_sw2_short", 150, "SW2"\]/);
-  assert.match(source, /\["p4_sw3", "p4_sw3_short", 216, "SW3"\]/);
+  assert.match(source, /\["p4_sw1", "p4_sw1_short", 84, "1红"\]/);
+  assert.match(source, /\["p4_sw2", "p4_sw2_short", 150, "2黄"\]/);
+  assert.match(source, /\["p4_sw3", "p4_sw3_short", 216, "3蓝"\]/);
   assert.match(source, /board-button-map__encoder--p4[\s\S]*cx="328" cy="242"/);
   assert.match(source, /x=\{x\} y="218" width="48" height="48" rx="12"/);
   assert.match(source, /board-button-map__encoder-label/);

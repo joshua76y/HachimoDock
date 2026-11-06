@@ -18,8 +18,8 @@ import {
   resolveGlobalExitEvents,
 } from "./button-config.js";
 
-test("device button config model advances for joystick up/down navigation defaults", () => {
-  assert.equal(DEVICE_BUTTON_CONFIG_MODEL_VERSION, 9);
+test("device button config model advances to v10 physical-key naming", () => {
+  assert.equal(DEVICE_BUTTON_CONFIG_MODEL_VERSION, 10);
 });
 
 test("the exact shipped v7 board map migrates SW1/SW3 without changing custom maps", () => {
@@ -47,7 +47,7 @@ test("the exact shipped v7 board map migrates SW1/SW3 without changing custom ma
   );
 
   assert.equal(migration.migrated, true);
-  assert.equal(migration.response.config.version, 9);
+  assert.equal(migration.response.config.version, 10);
   assert.equal(
     migration.response.config.bindings.find((binding) => binding.event === "button.sw1.short_press")?.action,
     "page_enter",
@@ -80,17 +80,21 @@ test("component exit follows every authoritative board page-back binding", () =>
     }),
     ["button.sw1.short_press", "button.sw3.short_press", "button.sw2.long_press"],
   );
-  assert.equal(globalExitControlLabel("button.sw2.long_press"), "SW2 长按");
+  assert.equal(globalExitControlLabel("button.2.long_press"), "2黄 长按");
 });
 
 test("component controls expose screen, switches, and joystick events without duplicates", () => {
   const events = COMPONENT_CONTROL_OPTIONS.map((option) => option.event);
   assert.equal(new Set(events).size, events.length);
   assert.ok(events.includes("screen.region.tap"));
-  assert.ok(events.includes("button.sw1.short_press"));
-  assert.ok(events.includes("button.encoder.long_press"));
-  assert.ok(events.includes("button.sw1.long_press"));
-  assert.equal(events.some((event) => /button\.sw[23]\.long_press/.test(event)), false);
+  assert.ok(events.includes("button.1.short_press"));
+  assert.ok(events.includes("button.2.short_press"));
+  assert.ok(events.includes("button.3.short_press"));
+  assert.ok(events.includes("button.4.short_press"));
+  assert.ok(events.includes("button.k.long_press"));
+  assert.ok(events.includes("button.b.short_press"));
+  assert.ok(events.includes("button.1.long_press"));
+  assert.equal(events.some((event) => /button\.(sw[23]|2|3)\.long_press/.test(event)), false);
   assert.ok(events.includes("knob.rotate_cw"));
   assert.ok(events.includes("knob.rotate_ccw"));
   assert.ok(events.includes("knob.rotate_cw / knob.rotate_ccw"));
@@ -100,8 +104,8 @@ test("component controls expose screen, switches, and joystick events without du
 
 test("package bindings resolve to the joystick-aware component-center labels", () => {
   assert.equal(
-    defaultControlLabelForBinding({ control: "SW2", event: "button.sw2.short_press" }),
-    "SW2 短按",
+    defaultControlLabelForBinding({ control: "2黄", event: "button.2.short_press" }),
+    "2黄 短按",
   );
   assert.equal(
     defaultControlLabelForBinding({ control: "屏幕区域", event: "screen.region.tap" }),
@@ -109,7 +113,7 @@ test("package bindings resolve to the joystick-aware component-center labels", (
   );
   assert.equal(
     defaultControlLabelForBinding({
-      control: "前方旋钮",
+      control: "前方摇杆",
       event: "knob.rotate_cw / knob.rotate_ccw",
     }),
     "摇杆左右方向",

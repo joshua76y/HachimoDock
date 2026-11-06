@@ -21,10 +21,10 @@ import Button from "../shell/Button";
 import { buildUsageHelp, friendlyControlLabel } from "../lib/usage-help.js";
 
 const CONTROL_GROUP_META = {
-  p4_sw1: { label: "SW1", detail: "左侧按键" },
-  p4_sw2: { label: "SW2", detail: "中间按键" },
-  p4_sw3: { label: "SW3", detail: "右侧按键" },
-  p4_joystick: { label: "摇杆", detail: "四向与中按" },
+  p4_sw1: { label: "1红", detail: "红色键（上）" },
+  p4_sw2: { label: "2黄", detail: "黄色键（左）" },
+  p4_sw3: { label: "3蓝", detail: "蓝色键（下）" },
+  p4_joystick: { label: "摇杆 K", detail: "四向与按下键 K" },
   legacy_encoder: { label: "前方旋钮", detail: "旋转与按压" },
 };
 
@@ -269,13 +269,13 @@ export default function BoardButtonPanel({
                     12 GESTURES
                   </text>
                   <text className="board-button-map__screen-copy" x="108" y="153">
-                    SW1 · SW2 · SW3 · JOYSTICK
+                    1红 · 2黄 · 3蓝 · JOYSTICK
                   </text>
                   <rect className="board-button-map__control-deck" x="66" y="206" width="324" height="76" rx="22" />
                   {[
-                    ["p4_sw1", "p4_sw1_short", 84, "SW1"],
-                    ["p4_sw2", "p4_sw2_short", 150, "SW2"],
-                    ["p4_sw3", "p4_sw3_short", 216, "SW3"],
+                    ["p4_sw1", "p4_sw1_short", 84, "1红"],
+                    ["p4_sw2", "p4_sw2_short", 150, "2黄"],
+                    ["p4_sw3", "p4_sw3_short", 216, "3蓝"],
                   ].map(([controlId, activeActionId, x, label]) => (
                     <g
                       key={controlId}

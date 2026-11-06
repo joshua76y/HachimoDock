@@ -24,13 +24,13 @@ test("device guide documents P4 navigation and all twelve configurable gestures"
   const modal = readSource("DeviceGuideModal.jsx");
 
   assert.match(content, /screenIds: \["main", "components"\]/);
-  assert.match(content, /左右选择当前内容，SW2 在宠物与组件页面间切换/);
+  assert.match(content, /左右选择当前内容，2黄 在宠物与组件页面间切换/);
   assert.match(content, /\{ gesture: "向上", action: "可独立配置" \}/);
   assert.match(content, /\{ gesture: "向下", action: "可独立配置" \}/);
   assert.match(content, /\{ gesture: "向左", action: "上一个" \}/);
   assert.match(content, /\{ gesture: "向右", action: "下一个" \}/);
-  assert.match(content, /\{ gesture: "中按短按", action: "确认 \/ 进入" \}/);
-  assert.match(content, /\{ gesture: "中按长按", action: "暂不绑定" \}/);
+  assert.match(content, /\{ gesture: "K 短按", action: "确认 \/ 进入" \}/);
+  assert.match(content, /\{ gesture: "K 长按", action: "暂不绑定" \}/);
   assert.match(content, /export const P4_CARDS/);
   assert.match(content, /共 12 个独立入口/);
   assert.match(content, /组件按键只在该组件打开时生效/);

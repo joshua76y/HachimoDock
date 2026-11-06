@@ -120,10 +120,10 @@ export const DEFAULT_BUTTON_ACTIONS = {
 };
 
 export const P4_VOICE_BUTTON_OPTIONS = [
-  { id: P4_DEFAULT_VOICE_TRIGGER, rowId: "p4_sw1_long", label: "SW1 长按", detail: "按住 SW1 开始录音，松开后只写入草稿。", event: "button.sw1.hold" },
-  { id: "sw2.hold", rowId: "p4_sw2_long", label: "SW2 长按", detail: "按住 SW2 开始录音，松开后只写入草稿。", event: "button.sw2.hold" },
-  { id: "sw3.hold", rowId: "p4_sw3_long", label: "SW3 长按", detail: "按住 SW3 开始录音，松开后只写入草稿。", event: "button.sw3.hold" },
-  { id: "encoder_button.hold", rowId: "p4_encoder_long", label: "摇杆中按长按", detail: "按住摇杆中键开始录音，松开后只写入草稿。", event: "button.encoder.hold" },
+  { id: P4_DEFAULT_VOICE_TRIGGER, rowId: "p4_sw1_long", label: "1红 长按", detail: "按住 1红 键开始录音，松开后只写入草稿。", event: "button.1.hold" },
+  { id: "sw2.hold", rowId: "p4_sw2_long", label: "2黄 长按", detail: "按住 2黄 键开始录音，松开后只写入草稿。", event: "button.2.hold" },
+  { id: "sw3.hold", rowId: "p4_sw3_long", label: "3蓝 长按", detail: "按住 3蓝 键开始录音，松开后只写入草稿。", event: "button.3.hold" },
+  { id: "encoder_button.hold", rowId: "p4_encoder_long", label: "K 摇杆按下长按", detail: "按住摇杆按下键 K 开始录音，松开后只写入草稿。", event: "button.k.hold" },
 ];
 export const VOICE_BUTTON_OPTIONS = P4_VOICE_BUTTON_OPTIONS;
 

@@ -32,6 +32,13 @@ static const char *TAG = "chrome";
 #define C_ACCENT  0xEB32u  /* 暖橙 */
 #define C_OK      0x3C4Fu
 #define C_LINE    0x3186u
+/* 按键识别色：方框填充物理键颜色（1红 2黄 3蓝 4绿），K/B 用中性灰 */
+#define C_KEY_RED    0xF800u
+#define C_KEY_YELLOW 0xFFE0u
+#define C_KEY_BLUE   0x021Fu
+#define C_KEY_GREEN  0x07E0u
+#define C_KEY_NEUTRAL 0x5AEBu
+#define C_KEY_WHITE  0xFFFFu
 
 static uint16_t *s_bar;   /* 160x480 横屏画布 */
 static uint16_t *s_rot;   /* 480x160 旋转后缓冲 */
@@ -163,19 +170,26 @@ static void draw_bars(int x, int y, int bars) {
   }
 }
 
-/* 按键行：按下时整行高亮（绿底深字 + 亮框），并显示对应 GPIO 号。
- * 这是接线自检视图：按哪个键看哪行亮，不亮就是那根线没通。 */
+/* 按键行：方框直接填充物理键颜色（1红/2黄/3蓝/4绿，K/B 中性灰），
+ * 框内是键名、右侧是用途与 GPIO 号。按下时方框反白（白底+键色字），
+ * 用途文字提亮——按哪个键看哪个方框立刻反白，就是接线自检。 */
 static void draw_key_row(int x, int y, const char *label, const char *name,
-                         const char *gpio, bool pressed) {
+                         const char *gpio, uint16_t color, bool pressed) {
+  /* 亮色底（黄/绿）用深色字，暗色底（红/蓝/灰）用亮色字 */
+  const uint16_t base_fg =
+    (((color >> 5) & 0x3Fu) > ((color >> 11) & 0x1Fu)) ? C_BG : C_TEXT;
   if (pressed) {
-    fill(x - 3, y - 3, W - 2 * (x - 3), 22, C_OK);
-    frame(x - 3, y - 3, W - 2 * (x - 3), 22, C_TEXT);
+    fill(x, y, 15, 15, C_KEY_WHITE);
+    frame(x, y, 15, 15, color);
+    text_center(label, x + 7, y, color, 1);
+    text(name, x + 21, y, C_KEY_WHITE, 1);
+    text(gpio, x + 92, y, C_TEXT, 1);
+    return;
   }
-  const uint16_t fg = pressed ? C_BG : C_DIM;
-  frame(x, y, 15, 15, pressed ? C_BG : C_DIM);
-  text_center(label, x + 7, y, fg, 1);
-  text(name, x + 21, y, fg, 1);
-  text(gpio, x + 92, y, pressed ? C_BG : C_LINE, 1);
+  fill(x, y, 15, 15, color);
+  text_center(label, x + 7, y, base_fg, 1);
+  text(name, x + 21, y, C_DIM, 1);
+  text(gpio, x + 92, y, C_LINE, 1);
 }
 
 /* ── 数据换算 ─────────────────────────────────────────────────────── */
@@ -281,13 +295,17 @@ static void redraw(const char *clock, const char *date, const char *net,
   fill(14, 252, W - 28, 1, C_LINE);
 
   text("按键", 14, 260, C_DIM, 1);
-  /* 接线自检视图（物理命名）：1红(上) 2黄(左) 3蓝(下) 4绿(右) K=摇杆按下 B=BOOT。
-   * 每行右侧是实际 GPIO 号，按下时整行绿底高亮——按哪个亮哪个才通。 */
+  /* 接线自检视图（物理命名）：方框填键色 —— 1红 2黄 3蓝 4绿，K=摇杆按下
+   * （中性灰），B=BOOT（中性灰）。框内键名、右侧用途 + 实际 GPIO 号，
+   * 按下时方框反白。 */
   static const char *const labels[] = {"1", "2", "3", "4", "K", "B"};
   static const char *const names[] = {"确认", "组件", "返回", "—", "确认", "—"};
   static const char *const gpios[] = {"29", "30", "25", "24", "28", "35"};
+  static const uint16_t colors[] = {
+    C_KEY_RED, C_KEY_YELLOW, C_KEY_BLUE, C_KEY_GREEN, C_KEY_NEUTRAL, C_KEY_NEUTRAL
+  };
   for (int i = 0; i < 6; i += 1) {
-    draw_key_row(14, 282 + i * 24, labels[i], names[i], gpios[i],
+    draw_key_row(14, 282 + i * 24, labels[i], names[i], gpios[i], colors[i],
                  (keys & (1u << i)) != 0);
   }
 

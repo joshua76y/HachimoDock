@@ -4731,7 +4731,7 @@ static bool app_surface_locked(pet_surface_t *surface,const pet_host_render_t *h
     surface->viewport.offset=scroll[0];
     for(int i=0;i<surface->viewport_count;i++)surface->viewports[i].offset=scroll[i+1];
     static const char *const events[]={"button.1.short_press","button.2.short_press","button.3.short_press","button.4.short_press","button.k.short_press","button.k.long_press","button.sw1.short_press","button.sw2.short_press","button.sw3.short_press","button.encoder.short_press","button.encoder.long_press","knob.rotate_ccw","knob.rotate_cw","joystick.up","joystick.down"};
-    static const char *const labels[]={"红1","黄2","蓝3","绿4","摇杆K","K长按","SW1","SW2","SW3","中按","中长","左","右","上","下"};
+    static const char *const labels[]={"1红","2黄","3蓝","4绿","K摇杆","K长按","SW1","SW2","SW3","中按","中长","左","右","上","下"};
 #if PET_FORM_V2_ENABLED
     /* Capture/format each field once under this runtime lock, not once for
      * every bound node (up to 32). Normal builds have no extra scratch/calls. */

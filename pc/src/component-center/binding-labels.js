@@ -9,12 +9,20 @@
 
 export function formatBindingControl(binding = {}) {
   const event = String(binding.event || "").trim();
-  if (event === "button.sw1.short_press") return "SW1 · 短按";
-  if (event === "button.sw1.long_press") return "SW1 · 长按";
-  if (event === "button.sw2.short_press") return "SW2 · 短按";
-  if (event === "button.sw3.short_press") return "SW3 · 短按";
-  if (event === "button.encoder.short_press") return "前方摇杆 · 中按";
-  if (event === "button.encoder.long_press") return "前方摇杆 · 中按长按";
+  /* v10 物理命名：1红 / 2黄 / 3蓝 / 4绿 / K（摇杆按下）/ B（BOOT）。
+   * 旧名 sw1~sw3/encoder 仍可能出现在已安装组件包里，继续给出同一套显示名。 */
+  if (event === "button.1.short_press" || event === "button.sw1.short_press") return "1红 · 短按";
+  if (event === "button.1.long_press" || event === "button.sw1.long_press") return "1红 · 长按";
+  if (event === "button.2.short_press" || event === "button.sw2.short_press") return "2黄 · 短按";
+  if (event === "button.2.long_press" || event === "button.sw2.long_press") return "2黄 · 长按";
+  if (event === "button.3.short_press" || event === "button.sw3.short_press") return "3蓝 · 短按";
+  if (event === "button.3.long_press" || event === "button.sw3.long_press") return "3蓝 · 长按";
+  if (event === "button.4.short_press") return "4绿 · 短按";
+  if (event === "button.4.long_press") return "4绿 · 长按";
+  if (event === "button.k.short_press" || event === "button.encoder.short_press") return "K（摇杆按下）· 短按";
+  if (event === "button.k.long_press" || event === "button.encoder.long_press") return "K（摇杆按下）· 长按";
+  if (event === "button.b.short_press") return "B（BOOT）· 短按";
+  if (event === "button.b.long_press") return "B（BOOT）· 长按";
   if (event === "joystick.up") return "前方摇杆 · 向上";
   if (event === "joystick.down") return "前方摇杆 · 向下";
   if (event === "knob.rotate_cw / knob.rotate_ccw") return "前方摇杆 · 左右";
@@ -34,12 +42,20 @@ const JOYSTICK_DIRECTION_EVENTS = new Set([
 ]);
 
 const COMPACT_CONTROL_LABELS = {
-  "button.sw1.short_press": "SW1",
-  "button.sw1.long_press": "SW1 长按",
-  "button.sw2.short_press": "SW2",
-  "button.sw3.short_press": "SW3",
-  "button.encoder.short_press": "摇杆中按",
-  "button.encoder.long_press": "摇杆中按长按",
+  "button.1.short_press": "1红",
+  "button.1.long_press": "1红 长按",
+  "button.2.short_press": "2黄",
+  "button.3.short_press": "3蓝",
+  "button.4.short_press": "4绿",
+  "button.k.short_press": "K",
+  "button.k.long_press": "K 长按",
+  "button.b.short_press": "B",
+  "button.sw1.short_press": "1红",
+  "button.sw1.long_press": "1红 长按",
+  "button.sw2.short_press": "2黄",
+  "button.sw3.short_press": "3蓝",
+  "button.encoder.short_press": "K",
+  "button.encoder.long_press": "K 长按",
   "screen.region.tap": "屏幕点击",
   "screen.region.long_press": "屏幕长按",
 };
@@ -75,6 +91,13 @@ export function buildComponentPlayGuide(bindings = []) {
 const ROUTED_WIDGET_EVENTS = new Set([
   "screen.region.tap",
   "screen.region.long_press",
+  "button.1.short_press",
+  "button.2.short_press",
+  "button.3.short_press",
+  "button.4.short_press",
+  "button.k.short_press",
+  "button.k.long_press",
+  "button.b.short_press",
   "button.sw1.short_press",
   "button.sw2.short_press",
   "button.sw3.short_press",
@@ -99,7 +122,8 @@ const COMPONENT_SYSTEM_ACTIONS = new Set([
 export function isRoutedWidgetBinding(binding = {}) {
   return (
     (ROUTED_WIDGET_EVENTS.has(String(binding.event || "").trim())
-      || (binding.event === "button.sw1.long_press" && binding.action === "media.lyrics"))
+      || ((binding.event === "button.1.long_press" || binding.event === "button.sw1.long_press")
+        && binding.action === "media.lyrics"))
     && !COMPONENT_SYSTEM_ACTIONS.has(String(binding.action || "").trim())
   );
 }
