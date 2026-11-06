@@ -288,11 +288,13 @@ static void load_default_config(pet_p4_input_config_t *config) {
    * K=摇杆按下确认；4绿与 B(BOOT) 默认不绑，留 PC 组件中心自定义。 */
   add_default_binding(config, "button.1.short_press", "page_enter", "");
   add_default_binding(config, "button.1.long_press", "disabled", "");
-  add_default_binding(config, "button.1.hold", "voice_ptt", "");
+  add_default_binding(config, "button.1.hold", "disabled", "");
   add_default_binding(config, "button.2.short_press", "component_center", "");
   add_default_binding(config, "button.2.long_press", "realtime_chat", "");
   add_default_binding(config, "button.2.hold", "disabled", "");
   add_default_binding(config, "button.3.short_press", "page_back", "");
+  /* 4绿：语音识别（按住说话），1红 按住不再兼作 PTT */
+  add_default_binding(config, "button.4.hold", "voice_ptt", "");
   add_default_binding(config, "button.3.long_press", "disabled", "");
   add_default_binding(config, "button.3.hold", "disabled", "");
   add_default_binding(config, "button.k.short_press", "page_enter", "");
@@ -551,6 +553,30 @@ static bool migrate_v9_config(pet_p4_input_config_t *config) {
     }
   }
   if (!config_bindings_are_valid(config)) return false;
+  config->version = 10;
+  return true;
+}
+
+static bool migrate_v10_config(pet_p4_input_config_t *config) {
+  if (!config) return false;
+  /* v11：语音按键从 1红 改到 4绿。旧配置里 1红 按住若仍是 voice_ptt，
+   * 清空它，避免两个键同时触发录音；4绿 按住补上 voice_ptt。 */
+  migrate_default_binding(
+    config,
+    "button.1.hold",
+    "voice_ptt",
+    "",
+    "disabled",
+    ""
+  );
+  migrate_default_binding(
+    config,
+    "button.4.hold",
+    "disabled",
+    "",
+    "voice_ptt",
+    ""
+  );
   config->version = PET_P4_INPUT_CONFIG_VERSION;
   return true;
 }
@@ -564,7 +590,8 @@ static bool migrate_input_config(pet_p4_input_config_t *config) {
   if (config->version == 6 && !migrate_v6_config(config)) return false;
   if (config->version == 7 && !migrate_v7_config(config)) return false;
   if (config->version == 8 && !migrate_v8_config(config)) return false;
-  return config->version == 9 && migrate_v9_config(config);
+  if (config->version == 9) return migrate_v9_config(config);
+  return config->version == 10 && migrate_v10_config(config);
 }
 
 static esp_err_t persist_config(const pet_p4_input_config_t *config) {

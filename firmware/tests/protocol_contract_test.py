@@ -2343,7 +2343,8 @@ def test_p4_hardware_inputs_are_debounced_persistent_and_configurable():
     assert "events |= PET_P4_BUTTON_EVENT_LONG_RELEASE" in core
     assert "PET_P4_INPUT_GESTURE_HOLD_START" in input_source
     assert "PET_P4_INPUT_GESTURE_HOLD_END" in input_source
-    assert '"button.1.hold", "voice_ptt"' in input_source
+    assert '"button.4.hold", "voice_ptt"' in input_source   # v11: 4绿 = 语音键
+    assert '"button.1.hold", "disabled"' in input_source
     assert '"button.2.short_press", "component_center"' in input_source
     assert '"button.1.short_press", "page_enter"' in input_source
     assert '"button.3.short_press", "page_back"' in input_source
@@ -2371,7 +2372,7 @@ def test_p4_hardware_inputs_are_debounced_persistent_and_configurable():
     assert "migrate_v7_config" in input_source
     assert "migrate_v8_config" in input_source
     assert "migrate_input_config" in input_source
-    assert "PET_P4_INPUT_CONFIG_VERSION 10" in read_required("main/pet_p4_input.h")
+    assert "PET_P4_INPUT_CONFIG_VERSION 11" in read_required("main/pet_p4_input.h")
     assert "center_binding" not in input_source
     assert '"page_toggle"' in input_source
     assert '"page_enter"' in input_source

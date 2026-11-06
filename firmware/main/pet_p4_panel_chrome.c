@@ -196,8 +196,14 @@ static void draw_key_row(int x, int y, const char *label, const char *name,
 
 /* ── 数据换算 ─────────────────────────────────────────────────────── */
 
+/* 没接电池时 VBAT 分压是悬空的，实测约 3375mV，会被换算成假的 "5%"。
+ * 单节锂电真正能用到的下限在 3.45V 以上都还有意义，低于它按"未接电池"
+ * 处理（返回 -1，侧栏显示 USB 供电）。 */
+#define PET_BATTERY_ABSENT_MV 3450
+
 static int battery_percent(int mv) {
   if (mv <= 0) return -1;
+  if (mv < PET_BATTERY_ABSENT_MV) return -1;
   static const int v[] = {3300, 3600, 3700, 3800, 3900, 4000, 4100, 4200};
   static const int p[] = {   0,   20,   40,   60,   75,   85,   95,  100};
   if (mv <= v[0]) return 0;
@@ -298,7 +304,7 @@ static void redraw(const char *clock, const char *date, const char *net,
    * （中性灰），B=BOOT（中性灰）。框内键名、右侧用途 + 实际 GPIO 号，
    * 按下时方框反白。 */
   static const char *const labels[] = {"1", "2", "3", "4", "K", "B"};
-  static const char *const names[] = {"确认", "组件", "返回", "—", "确认", "—"};
+  static const char *const names[] = {"确认", "组件", "返回", "录音", "确认", "—"};
   static const char *const gpios[] = {"29", "30", "25", "24", "28", "35"};
   static const uint16_t colors[] = {
     C_KEY_RED, C_KEY_YELLOW, C_KEY_BLUE, C_KEY_GREEN, C_KEY_NEUTRAL, C_KEY_NEUTRAL
