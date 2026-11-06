@@ -34,6 +34,8 @@ void pet_p4_panel_chrome_flush(void);
 
 /* 自上次 flush 起是否有改动（给上层做调度判断）。 */
 bool pet_p4_panel_chrome_dirty(void);
+/* 屏幕方向的侧栏像素（480x160，行优先）：截图/诊断用只读指针。 */
+const uint16_t *pet_p4_panel_chrome_screen_pixels(void);
 
 #ifdef __cplusplus
 }

@@ -1722,12 +1722,17 @@ static void draw_lvgl_glyph(uint32_t codepoint, uint32_t next_codepoint, int x, 
   uint8_t r = (uint8_t) (((color >> 11) & 0x1F) * 255 / 31);
   uint8_t g = (uint8_t) (((color >> 5) & 0x3F) * 255 / 63);
   uint8_t b = (uint8_t) ((color & 0x1F) * 255 / 31);
-  const int out_w = glyph.box_w * scale;
-  const int out_h = glyph.box_h * scale;
-  for (int oy = 0; oy < out_h; oy += 1) {
-    for (int ox = 0; ox < out_w; ox += 1) {
-      uint8_t alpha = glyph_alpha_bilinear(bitmap, &glyph, ox, oy, scale);
-      if (alpha) blend_px(gx0 + ox, gy0 + oy, r, g, b, alpha);
+  /* 16px 中文库是 1bpp（--bpp 1），插值只会把硬边糊成灰边；
+   * 整数倍放大保持块状但笔画均匀，是这种字库最锐利的放大方式。 */
+  for (int gy = 0; gy < glyph.box_h; gy += 1) {
+    for (int gx = 0; gx < glyph.box_w; gx += 1) {
+      uint8_t alpha = glyph_alpha_at(bitmap, &glyph, gx, gy);
+      if (!alpha) continue;
+      for (int sy = 0; sy < scale; sy += 1) {
+        for (int sx = 0; sx < scale; sx += 1) {
+          blend_px(gx0 + gx * scale + sx, gy0 + gy * scale + sy, r, g, b, alpha);
+        }
+      }
     }
   }
   lv_font_glyph_release_draw_data(&glyph);
@@ -1920,11 +1925,13 @@ static void draw_lvgl_glyph_medium(
   uint8_t r = (uint8_t) (((color >> 11) & 0x1F) * 255 / 31);
   uint8_t g = (uint8_t) (((color >> 5) & 0x3F) * 255 / 63);
   uint8_t b = (uint8_t) ((color & 0x1F) * 255 / 31);
-  /* 1.5 倍同样走定点双线性（等价 scale=3 的目标网格再取 1/2 尺寸）：
-   * ox/oy 以 1.5 倍坐标映射回 16px 源，用 scale=3 的插值核采样。 */
   for (int dy = 0; dy < scaled_h; dy += 1) {
+    int source_y = dy * 2 / 3;
+    if (source_y >= glyph.box_h) source_y = glyph.box_h - 1;
     for (int dx = 0; dx < scaled_w; dx += 1) {
-      uint8_t alpha = glyph_alpha_bilinear(bitmap, &glyph, dx, dy, 3);
+      int source_x = dx * 2 / 3;
+      if (source_x >= glyph.box_w) source_x = glyph.box_w - 1;
+      uint8_t alpha = glyph_alpha_at(bitmap, &glyph, source_x, source_y);
       if (alpha) blend_px(gx0 + dx, gy0 + dy, r, g, b, alpha);
     }
   }
@@ -2265,18 +2272,21 @@ static void draw_card_body_lines(
 ) {
   if (host_pixels && host_pixels->pixels && renderer_bubble_draw_pinned(host_pixels, PET_BUBBLE_BODY_CLIPPED, 0, g_framebuffer,
       x, first_line_y, max_px, color)) return;
-  const char *second_line = draw_text_line_medium_vcenter(
+  /* 正文用 16px 点阵的原生 1 倍：1bpp 字库只有原生尺寸是锐利的，
+   * 1.5 倍最近邻重采样会出现笔画宽窄跳变（历史上的"像素不对应"）。 */
+  const char *second_line = draw_text_line_vcenter(
     body,
     x,
     first_line_y,
-    27,
+    18,
     max_px,
     color,
+    1,
     false
   );
   while (second_line && (*second_line == ' ' || *second_line == '\t')) second_line += 1;
   if (second_line && second_line[0]) {
-    draw_text_line_medium_vcenter(second_line, x, first_line_y + 27, 27, max_px, color, true);
+    draw_text_line_vcenter(second_line, x, first_line_y + 18, 18, max_px, color, 1, true);
   }
 }
 
@@ -7644,6 +7654,10 @@ esp_err_t pet_p4_renderer_render_transfer_status(
     BSP_LCD_V_RES,
     g_native_framebuffer
   );
+}
+
+const uint16_t *pet_p4_renderer_screen_framebuffer(void) {
+  return g_native_framebuffer;
 }
 
 const uint16_t *pet_p4_renderer_logical_framebuffer(int *width, int *height) {

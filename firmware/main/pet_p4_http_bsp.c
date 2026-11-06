@@ -32,6 +32,8 @@
 #include "esp_timer.h"
 #include "pet_p4_wifi_bsp.h"
 #include "pet_p4_input.h"
+#include "pet_p4_renderer.h"
+#include "pet_p4_panel_chrome.h"
 
 static const char *TAG = "pet-p4-http";
 
@@ -103,6 +105,89 @@ static esp_err_t status_get(httpd_req_t *req) {
   return json_reply(req, NULL, body);
 }
 
+/* GET /shot —— 把屏幕当前画面导出成 24bit BMP，用于远程自查渲染效果。
+ * 内容区 480x640 + 侧栏 480x160 拼成 480x800。数据一次性从 PSRAM 发送。 */
+#define SHOT_W 480
+#define SHOT_H 800
+#define SHOT_CONTENT_H 640
+
+static esp_err_t shot_get(httpd_req_t *req) {
+  const uint16_t *content = pet_p4_renderer_screen_framebuffer();
+  const uint16_t *chrome = pet_p4_panel_chrome_screen_pixels();
+  /* 可选 ?y=<起始行>&h=<行数>：分块抓取，避免 1.15MB 大响应卡住 WiFi 传输 */
+  int y0 = 0;
+  int rows = SHOT_H;
+  char query[64];
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+    char value[16];
+    if (httpd_query_key_value(query, "y", value, sizeof(value)) == ESP_OK) {
+      int parsed = atoi(value);
+      if (parsed >= 0 && parsed < SHOT_H) y0 = parsed;
+    }
+    if (httpd_query_key_value(query, "h", value, sizeof(value)) == ESP_OK) {
+      int parsed = atoi(value);
+      if (parsed > 0) rows = parsed;
+    }
+  }
+  if (y0 + rows > SHOT_H) rows = SHOT_H - y0;
+  const size_t row_bytes = (size_t) SHOT_W * 3;
+  const size_t pixel_bytes = row_bytes * (size_t) rows;
+  const size_t header_bytes = 54;
+  const size_t total = header_bytes + pixel_bytes;
+  uint8_t *buf = (uint8_t *) heap_caps_malloc(total, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!buf) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no mem");
+  memset(buf, 0, header_bytes);
+  buf[0] = 'B'; buf[1] = 'M';
+  uint32_t file_size = (uint32_t) total;
+  memcpy(buf + 2, &file_size, 4);
+  uint32_t offset = (uint32_t) header_bytes;
+  memcpy(buf + 10, &offset, 4);
+  uint32_t dib = 40;
+  memcpy(buf + 14, &dib, 4);
+  int32_t w = SHOT_W, h = (int32_t) rows;
+  memcpy(buf + 18, &w, 4);
+  memcpy(buf + 22, &h, 4);
+  uint16_t planes = 1, bpp = 24;
+  memcpy(buf + 26, &planes, 2);
+  memcpy(buf + 28, &bpp, 2);
+  uint32_t payload = (uint32_t) pixel_bytes;
+  memcpy(buf + 34, &payload, 4);
+  /* BMP 行序自下而上（只输出 [y0, y0+rows) 这一段） */
+  for (int y = 0; y < rows; y += 1) {
+    const int sy = y0 + rows - 1 - y;
+    uint8_t *dst = buf + header_bytes + (size_t) y * row_bytes;
+    for (int x = 0; x < SHOT_W; x += 1) {
+      uint16_t px = 0;
+      if (sy < SHOT_CONTENT_H) {
+        if (content) px = content[(size_t) sy * SHOT_W + x];
+      } else if (chrome) {
+        px = chrome[(size_t) (sy - SHOT_CONTENT_H) * SHOT_W + x];
+      }
+      const uint8_t r = (uint8_t) (((px >> 11) & 0x1F) * 255 / 31);
+      const uint8_t g = (uint8_t) (((px >> 5) & 0x3F) * 255 / 63);
+      const uint8_t b = (uint8_t) ((px & 0x1F) * 255 / 31);
+      dst[x * 3 + 0] = b;
+      dst[x * 3 + 1] = g;
+      dst[x * 3 + 2] = r;
+    }
+  }
+  httpd_resp_set_type(req, "image/bmp");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  /* 1.15MB 一次性 send 会卡在 socket 缓冲上，分段（chunked）推进 */
+  esp_err_t err = ESP_OK;
+  size_t sent_bytes = 0;
+  while (sent_bytes < total) {
+    size_t chunk = total - sent_bytes;
+    if (chunk > 16384) chunk = 16384;
+    err = httpd_resp_send_chunk(req, (const char *) buf + sent_bytes, (ssize_t) chunk);
+    if (err != ESP_OK) break;
+    sent_bytes += chunk;
+  }
+  if (err == ESP_OK) err = httpd_resp_send_chunk(req, NULL, 0);
+  heap_caps_free(buf);
+  return err;
+}
+
 /* 读取一行 JSON 并交给协议队列。返回 true 表示已成功入队。 */
 static bool submit_body(httpd_req_t *req) {
   size_t total = req->content_len;
@@ -171,7 +256,8 @@ esp_err_t pet_p4_http_init(pet_p4_http_submit_fn submit) {
   cfg.max_uri_handlers = 8;
   cfg.stack_size = 6144;
   cfg.recv_wait_timeout = 2;
-  cfg.send_wait_timeout = 2;
+  cfg.send_wait_timeout = 10;
+  cfg.task_priority = 8;
   cfg.lru_purge_enable = true;   /* RLCD 教训：连接不释放会堵死 server */
 
   err = httpd_start(&s_server, &cfg);
@@ -183,6 +269,7 @@ esp_err_t pet_p4_http_init(pet_p4_http_submit_fn submit) {
   static const httpd_uri_t uris[] = {
     {.uri = "/health", .method = HTTP_GET,    .handler = health_get,      .user_ctx = NULL},
     {.uri = "/status", .method = HTTP_GET,    .handler = status_get,      .user_ctx = NULL},
+    {.uri = "/shot",   .method = HTTP_GET,    .handler = shot_get,        .user_ctx = NULL},
     {.uri = "/state",  .method = HTTP_POST,   .handler = state_post,      .user_ctx = NULL},
     {.uri = "/line",   .method = HTTP_POST,   .handler = state_post,      .user_ctx = NULL},
     {.uri = "/*",      .method = HTTP_OPTIONS,.handler = options_handler, .user_ctx = NULL},
@@ -193,7 +280,7 @@ esp_err_t pet_p4_http_init(pet_p4_http_submit_fn submit) {
       ESP_LOGW(TAG, "注册 %s 失败: %s", uris[i].uri, esp_err_to_name(reg));
     }
   }
-  ESP_LOGI(TAG, "HTTP 就绪 :80  /health /status /state /line");
+  ESP_LOGI(TAG, "HTTP 就绪 :80  /health /status /shot /state /line");
   return ESP_OK;
 }
 

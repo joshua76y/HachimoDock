@@ -74,6 +74,9 @@ void pet_p4_renderer_note_wait_holder(uint32_t wait_us,const char *holder,uint32
 static inline void pet_p4_renderer_note_wait_holder(uint32_t wait_us,const char *holder,uint32_t topic_hash){(void)wait_us;(void)holder;(void)topic_hash;}
 #endif
 const uint16_t *pet_p4_renderer_logical_framebuffer(int *width, int *height);
+/* 屏幕方向的当前内容帧（480x640，已旋转）：截图/诊断用只读指针。
+ * 未渲染完成时为 NULL。 */
+const uint16_t *pet_p4_renderer_screen_framebuffer(void);
 #if PET_P4_PARTICLES
 /* Any task: accepted transition plus its exact native component revision. */
 void pet_p4_renderer_note_action(const char *action,uint32_t revision);

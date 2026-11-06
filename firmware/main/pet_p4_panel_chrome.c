@@ -181,17 +181,17 @@ static void draw_key_row(int x, int y, const char *label, const char *name,
   const uint16_t base_fg =
     (((color >> 5) & 0x3Fu) > ((color >> 11) & 0x1Fu)) ? C_BG : C_TEXT;
   if (pressed) {
-    fill(x, y, 15, 15, C_KEY_WHITE);
-    frame(x, y, 15, 15, color);
-    text_center(label, x + 7, y, color, 1);
-    text(name, x + 21, y, C_KEY_WHITE, 1);
-    text(gpio, x + 92, y, C_TEXT, 1);
+    fill(x, y, 19, 19, C_KEY_WHITE);
+    frame(x, y, 19, 19, color);
+    text_center(label, x + 9, y + 2, color, 1);
+    text(name, x + 25, y + 2, C_KEY_WHITE, 1);
+    text(gpio, x + 96, y + 2, C_TEXT, 1);
     return;
   }
-  fill(x, y, 15, 15, color);
-  text_center(label, x + 7, y, base_fg, 1);
-  text(name, x + 21, y, C_DIM, 1);
-  text(gpio, x + 92, y, C_LINE, 1);
+  fill(x, y, 19, 19, color);
+  text_center(label, x + 9, y + 2, base_fg, 1);
+  text(name, x + 25, y + 2, C_DIM, 1);
+  text(gpio, x + 96, y + 2, C_DIM, 1);
 }
 
 /* ── 数据换算 ─────────────────────────────────────────────────────── */
@@ -269,38 +269,31 @@ static void redraw(const char *clock, const char *date, const char *net,
                    int host_online, unsigned int keys) {
   fill(0, 0, W, H, C_BG);
 
-  text_center(clock, W / 2, 8, C_TEXT, 2);
-  text_center(date, W / 2, 44, C_DIM, 1);
-  fill(14, 66, W - 28, 1, C_LINE);
+  /* 精简版：只留时间/日期/网络/电量/按键。
+   * 「主机」「状态」「页面」三行信息密度低、屏幕上本来就看得出来，已移除；
+   * 腾出的空间给时钟和按键区。 */
+  text_center(clock, W / 2, 16, C_TEXT, 2);
+  text_center(date, W / 2, 56, C_DIM, 1);
+  fill(14, 82, W - 28, 1, C_LINE);
 
-  draw_bars(16, 74, bars);
-  text(net, 44, 72, C_TEXT, 1);
+  draw_bars(16, 92, bars);
+  text(net, 44, 90, C_TEXT, 1);
 
-  /* 主机（PC）连接状态：谁在跟设备说话 */
-  text("主机", 14, 96, C_DIM, 1);
-  text(host_online ? "连接" : "断开", 14, 114, host_online ? C_OK : C_DIM, 1);
+  fill(14, 118, W - 28, 1, C_LINE);
 
-  text("状态", 14, 136, C_DIM, 1);
-  text(state, 14, 154, C_ACCENT, 1);
-
-  text("页面", 14, 176, C_DIM, 1);
-  text(page, 14, 194, C_TEXT, 1);
-
-  fill(14, 212, W - 28, 1, C_LINE);
-
-  text("电量", 14, 218, C_DIM, 1);
-  draw_battery(14, 238, batt);
+  text("电量", 14, 130, C_DIM, 1);
+  draw_battery(14, 154, batt);
   if (batt >= 0) {
     char buf[8];
     snprintf(buf, sizeof(buf), "%d%%", batt);
-    text(buf, 50, 237, C_TEXT, 1);
+    text(buf, 54, 153, C_TEXT, 1);
   } else {
-    text("USB", 50, 237, C_TEXT, 1);   /* 未接电池：当前由 USB 供电 */
+    text("USB", 54, 153, C_TEXT, 1);   /* 未接电池：当前由 USB 供电 */
   }
 
-  fill(14, 262, W - 28, 1, C_LINE);
+  fill(14, 186, W - 28, 1, C_LINE);
 
-  text("按键", 14, 268, C_DIM, 1);
+  text("按键", 14, 196, C_DIM, 1);
   /* 接线自检视图（物理命名）：方框填键色 —— 1红 2黄 3蓝 4绿，K=摇杆按下
    * （中性灰），B=BOOT（中性灰）。框内键名、右侧用途 + 实际 GPIO 号，
    * 按下时方框反白。 */
@@ -310,9 +303,11 @@ static void redraw(const char *clock, const char *date, const char *net,
   static const uint16_t colors[] = {
     C_KEY_RED, C_KEY_YELLOW, C_KEY_BLUE, C_KEY_GREEN, C_KEY_NEUTRAL, C_KEY_NEUTRAL
   };
+  /* 实测：画布 y 递增在屏幕上就是从上到下，正序即 1红 在最上。 */
+  static const int bits[] = {0, 1, 2, 3, 4, 5};
   for (int i = 0; i < 6; i += 1) {
-    draw_key_row(14, 288 + i * 22, labels[i], names[i], gpios[i], colors[i],
-                 (keys & (1u << i)) != 0);
+    draw_key_row(14, 224 + i * 30, labels[i], names[i], gpios[i], colors[i],
+                 (keys & (1u << bits[i])) != 0);
   }
 
   fill(0, H - 1, W, 1, C_LINE);
@@ -415,6 +410,10 @@ void pet_p4_panel_chrome_flush(void) {
     return;   /* 保持 dirty，下帧重试 */
   }
   s_dirty = false;
+}
+
+const uint16_t *pet_p4_panel_chrome_screen_pixels(void) {
+  return s_rot;
 }
 
 bool pet_p4_panel_chrome_dirty(void) {
