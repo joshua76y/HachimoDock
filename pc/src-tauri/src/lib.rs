@@ -11580,6 +11580,7 @@ pub fn run() {
         .manage(usb_manager)
         .invoke_handler(tauri::generate_handler![
             appearance_recovery_ipc::usb_reconcile_appearance_unknown,
+            local_asr::local_asr_health,
             reference_image::reference_image_mount,
             reference_image::reference_image_action,
             desktop_window::set_exit_reasons,

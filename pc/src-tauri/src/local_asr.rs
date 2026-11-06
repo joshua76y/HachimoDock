@@ -199,3 +199,10 @@ mod tests {
         assert!(err.is_err());
     }
 }
+
+/// 设置页「测试连接」用：探测本地服务是否在跑、模型是否已加载。
+#[tauri::command]
+pub fn local_asr_health(endpoint: Option<String>) -> Result<Health, String> {
+    let base = endpoint.unwrap_or_else(|| DEFAULT_ENDPOINT.to_string());
+    health(&base, Duration::from_millis(2500))
+}

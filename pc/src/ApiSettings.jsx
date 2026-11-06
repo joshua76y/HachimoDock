@@ -77,6 +77,18 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
   const [providerPending, setProviderPending] = useState({});
   const [savedLlm, setSavedLlm] = useState(null);
   const [asrApiKey, setAsrApiKey] = useState("");
+  /* 本地 ASR（sherpa-onnx）与火山引擎并列，偏好存本机 localStorage，
+   * 不写进加密凭据文件——它不需要 Key。 */
+  const [asrProvider, setAsrProvider] = useState(
+    () => window.localStorage.getItem("hachimo.asrProvider") || "volcengine",
+  );
+  const [localAsrEndpoint, setLocalAsrEndpoint] = useState(
+    () => window.localStorage.getItem("hachimo.localAsrEndpoint") || "http://127.0.0.1:8900",
+  );
+  const [localAsrEngine, setLocalAsrEngine] = useState(
+    () => window.localStorage.getItem("hachimo.localAsrEngine") || "sensevoice",
+  );
+  const [localAsrProbe, setLocalAsrProbe] = useState({ pending: false, message: "" });
   const [asrState, setAsrState] = useState({
     loading: true,
     pending: false,
@@ -372,6 +384,90 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
           <details><summary>使用前需要什么</summary><p>请保持设备连接电脑，并让 Pet Manager 持续运行。默认使用豆包 ASR 2.0 和 TTS 2.0，请为该 Key 开通对应服务。</p></details>
         </div>
         <div className="api-settings__form api-settings__form--speech">
+          <div className="ui-field" role="radiogroup" aria-label="语音识别来源">
+            <span className="ui-field__label">语音识别来源</span>
+            <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                type="radio"
+                name="asr-provider"
+                value="volcengine"
+                checked={asrProvider === "volcengine"}
+                onChange={() => {
+                  setAsrProvider("volcengine");
+                  window.localStorage.setItem("hachimo.asrProvider", "volcengine");
+                }}
+              />
+              <span>火山引擎（云端，需要 Key）</span>
+            </label>
+            <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                type="radio"
+                name="asr-provider"
+                value="local"
+                checked={asrProvider === "local"}
+                onChange={() => {
+                  setAsrProvider("local");
+                  window.localStorage.setItem("hachimo.asrProvider", "local");
+                }}
+              />
+              <span>本地 ASR（sherpa-onnx，免 Key，离线）</span>
+            </label>
+          </div>
+          {asrProvider === "local" && (
+            <>
+              <label className="ui-field" htmlFor="api-settings-local-asr-endpoint">
+                <span className="ui-field__label">本地服务地址</span>
+                <input
+                  id="api-settings-local-asr-endpoint"
+                  className="ui-control"
+                  value={localAsrEndpoint}
+                  onChange={(event) => {
+                    setLocalAsrEndpoint(event.target.value);
+                    window.localStorage.setItem("hachimo.localAsrEndpoint", event.target.value);
+                  }}
+                  placeholder="http://127.0.0.1:8900"
+                />
+              </label>
+              <label className="ui-field" htmlFor="api-settings-local-asr-engine">
+                <span className="ui-field__label">识别引擎</span>
+                <select
+                  id="api-settings-local-asr-engine"
+                  className="ui-control"
+                  value={localAsrEngine}
+                  onChange={(event) => {
+                    setLocalAsrEngine(event.target.value);
+                    window.localStorage.setItem("hachimo.localAsrEngine", event.target.value);
+                  }}
+                >
+                  <option value="sensevoice">SenseVoice（快，0.2 秒 / 900MB）</option>
+                  <option value="qwen3">Qwen3-ASR（准，2 秒 / 5GB）</option>
+                </select>
+              </label>
+              <button
+                type="button"
+                className="ui-button"
+                disabled={localAsrProbe.pending}
+                onClick={async () => {
+                  setLocalAsrProbe({ pending: true, message: "正在连接本地 ASR…" });
+                  try {
+                    const health = await invoke("local_asr_health", { endpoint: localAsrEndpoint });
+                    setLocalAsrProbe({
+                      pending: false,
+                      message: `本地 ASR 已连通：${health.engine}${health.loaded ? "（已加载）" : "（未加载）"} · ${health.latencyMs}ms`,
+                    });
+                  } catch (error) {
+                    setLocalAsrProbe({ pending: false, message: `连接失败：${String(error)}` });
+                  }
+                }}
+              >
+                测试本地连接
+              </button>
+              {localAsrProbe.message && (
+                <p className="usage-help__notice">{localAsrProbe.message}</p>
+              )}
+            </>
+          )}
+          {asrProvider === "volcengine" && (
           <label className="ui-field" htmlFor="api-settings-asr-key">
             <span className="ui-field__label">语音 API Key（识别与合成共用）</span>
             <input
@@ -385,6 +481,8 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
               disabled={asrState.pending || asrState.loading}
             />
           </label>
+          )}
+          )}
           <button
             type="button"
             className="btn-primary btn-sm api-settings__save"
