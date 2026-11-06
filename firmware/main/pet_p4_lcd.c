@@ -30,7 +30,6 @@
 #include "bsp/display.h"
 
 static const char *TAG = "pet-p4-lcd";
-static const int LCD_BACKLIGHT_FORCE_LEVEL = 1;
 static const TickType_t LCD_REFRESH_WAIT_TICKS = pdMS_TO_TICKS(250);
 
 static esp_lcd_panel_handle_t g_panel_handle;
@@ -38,7 +37,6 @@ static esp_lcd_panel_io_handle_t g_lcd_io;
 static SemaphoreHandle_t g_refresh_done_sem;
 static esp_err_t g_backlight_status = ESP_ERR_INVALID_STATE;
 static bool g_backlight_revealed;
-static bool g_forced_backlight_logged;
 static bool g_refresh_callback_logged;
 static uint16_t *g_test_row_buffer;
 static size_t g_test_row_pixels;
@@ -47,27 +45,24 @@ static uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
   return (uint16_t) (((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
 }
 
-static esp_err_t force_lcd_backlight_gpio(int level) {
-  gpio_config_t io_conf = {
-    .pin_bit_mask = 1ULL << BSP_LCD_BACKLIGHT,
-    .mode = GPIO_MODE_OUTPUT,
-    .pull_up_en = GPIO_PULLUP_DISABLE,
-    .pull_down_en = GPIO_PULLDOWN_DISABLE,
-    .intr_type = GPIO_INTR_DISABLE,
-  };
-  ESP_RETURN_ON_ERROR(gpio_config(&io_conf), TAG, "configure LCD backlight GPIO");
-  ESP_RETURN_ON_ERROR(gpio_set_level(BSP_LCD_BACKLIGHT, level), TAG, "force LCD backlight GPIO");
-  if (level == LCD_BACKLIGHT_FORCE_LEVEL && !g_forced_backlight_logged) {
-    ESP_LOGI(TAG, "LCD backlight revealed gpio=%d", LCD_BACKLIGHT_FORCE_LEVEL);
-    g_forced_backlight_logged = true;
-  }
-  return ESP_OK;
-}
+/* 背光完全交给 BSP 的 LEDC PWM，不再用普通 GPIO 强拉电平。
+ *
+ * 原固件这里有个 force_lcd_backlight_gpio()：把 GPIO26 配成推挽输出然后拉高/拉低。
+ * 那是给原 2.8" WLK2802 板用的（背光使能就是简单高低电平）。
+ * 微雪 4.3" 板用 LEDC 10-bit PWM 驱动背光升压/恒流，强拉电平会把引脚从 LEDC 抢走。
+ *
+ * 移植回 4.3" 板一共要修两处，缺一都会「有画面但很暗」：
+ *   1) 本文件：删掉 force hack，全程走 bsp_display_brightness_*()；
+ *   2) BSP 的 bsp_display_brightness_init()：LEDC .output_invert 必须是 1
+ *      （4.3" 板背光低电平有效，上游为 2.8" 板改成了 0）。
+ */
 
 esp_err_t pet_p4_lcd_prepare_boot(void) {
+  /* 此时 LEDC 还没初始化（bsp_display_new() 里才做 brightness_init，duty 初值 0）。
+   * 不要在这里把 GPIO26 抢成普通 GPIO，否则后面的 PWM 接管不了。 */
   g_backlight_revealed = false;
-  g_backlight_status = force_lcd_backlight_gpio(1 - LCD_BACKLIGHT_FORCE_LEVEL);
-  return g_backlight_status;
+  g_backlight_status = ESP_OK;
+  return ESP_OK;
 }
 
 static bool IRAM_ATTR lcd_refresh_done_callback(
@@ -116,12 +111,8 @@ esp_err_t pet_p4_lcd_init(void) {
   // Keep the panel hidden until the renderer has committed the first complete
   // frame so the controller's blue reset surface is never shown to the user.
   g_backlight_status = bsp_display_backlight_off();
-  esp_err_t force_err = force_lcd_backlight_gpio(1 - LCD_BACKLIGHT_FORCE_LEVEL);
-  if (g_backlight_status != ESP_OK || force_err != ESP_OK) {
+  if (g_backlight_status != ESP_OK) {
     ESP_LOGW(TAG, "display backlight hide failed: %s", esp_err_to_name(g_backlight_status));
-  }
-  if (g_backlight_status == ESP_OK && force_err != ESP_OK) {
-    g_backlight_status = force_err;
   }
   return ESP_OK;
 }
@@ -129,11 +120,9 @@ esp_err_t pet_p4_lcd_init(void) {
 esp_err_t pet_p4_lcd_reveal(void) {
   if (!g_panel_handle) return ESP_ERR_INVALID_STATE;
   if (g_backlight_revealed) return g_backlight_status;
+  /* 只走 LEDC PWM：bsp_display_backlight_on() = brightness_set(100)。
+   * 之前那句 force_lcd_backlight_gpio() 会把 GPIO26 从 LEDC 抢走，是背光发暗的根因。 */
   g_backlight_status = bsp_display_backlight_on();
-  esp_err_t force_err = force_lcd_backlight_gpio(LCD_BACKLIGHT_FORCE_LEVEL);
-  if (g_backlight_status == ESP_OK && force_err != ESP_OK) {
-    g_backlight_status = force_err;
-  }
   if (g_backlight_status == ESP_OK) {
     g_backlight_revealed = true;
   } else {

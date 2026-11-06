@@ -148,6 +148,9 @@ typedef struct {
 } pet_p4_runtime_state_t;
 
 void pet_p4_state_init(pet_p4_runtime_state_t *state, const char *board_device_id);
+
+/* 宿主墙钟（epoch ms），未收到 system/heartbeat 锚点前返回 0。 */
+unsigned long long pet_p4_host_wall_clock_ms(unsigned long long now_ms);
 /* Trusted single-thread startup only. Repeated starts cannot replace a boot ID. */
 void pet_p4_boot_identity_start(uint32_t first,uint32_t second);
 const char *pet_p4_boot_identity(void);

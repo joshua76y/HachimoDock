@@ -4,7 +4,7 @@
 #include <string.h>
 
 #define PET_P4_PANEL_WIDTH 480
-#define PET_P4_PANEL_HEIGHT 640
+#define PET_P4_PANEL_HEIGHT 800   /* 微雪 4.3" 480x800；横屏内容占前 640 行，后 160 行是状态栏 */
 
 bool pet_p4_ft6336_decode(const uint8_t *raw, size_t len, pet_p4_ft6336_frame_t *out) {
   if (!raw || !out || len < 13) return false;

@@ -30,10 +30,10 @@
 #define BSP_LCD_COLOR_SPACE         (ESP_LCD_COLOR_SPACE_RGB)
 
 #define BSP_LCD_H_RES              (480)
-#define BSP_LCD_V_RES              (640)
+#define BSP_LCD_V_RES              (800)   /* 微雪 4.3" 480x800；逻辑画布 800x480 横屏旋转上屏 */
 
-#define BSP_LCD_MIPI_DSI_LANE_BITRATE_MBPS (800)
-#define BSP_LCD_MIPI_DSI_LANE_NUM          (1)    // WLK2802MIPI-15P/ST7701S uses 1 data lane
+#define BSP_LCD_MIPI_DSI_LANE_BITRATE_MBPS (500)
+#define BSP_LCD_MIPI_DSI_LANE_NUM          (2)    /* 4.3" ST7701 走 2 data lane */
 
 #define BSP_MIPI_DSI_PHY_PWR_LDO_CHAN       (3)  // LDO_VO3 is connected to VDD_MIPI_DPHY
 #define BSP_MIPI_DSI_PHY_PWR_LDO_VOLTAGE_MV (2500)

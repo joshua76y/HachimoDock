@@ -46,16 +46,26 @@
 #include "pet_p4_miniapp.h"
 #include "pet_p4_media.h"
 
-#define PET_P4_INPUT_SW1_GPIO GPIO_NUM_50
-#define PET_P4_INPUT_SW2_GPIO GPIO_NUM_49
-#define PET_P4_INPUT_SW3_GPIO GPIO_NUM_5
-#define PET_P4_INPUT_ENCODER_PRESS_GPIO GPIO_NUM_4
+/* 微雪 ESP32-P4-WIFI6-Touch-LCD-4.3 + 用户外接「模拟摇杆 + 5 键」模块。
+ * 接线全部收在 J3 的 pin15~24（偶数脚左列、奇数脚右列），见 PORTING-PLAN §五。
+ *
+ * ⚠️ 原固件把摇杆 Y 放在 GPIO20 —— 这块板上 GPIO20 是电池检测 BAT_ADC（VBAT/3），
+ *    既不在排针上也读不到摇杆，必须换到 GPIO22。 */
+#define PET_P4_INPUT_SW1_GPIO GPIO_NUM_28   /* K1 · pin16 · 确认/录音 */
+#define PET_P4_INPUT_SW2_GPIO GPIO_NUM_29   /* K2 · pin20 · 切页/实时对话 */
+#define PET_P4_INPUT_SW3_GPIO GPIO_NUM_24   /* K3 · pin21 · 返回/取消 */
+#define PET_P4_INPUT_ENCODER_PRESS_GPIO GPIO_NUM_30  /* K4 · pin22 · 确认 */
+#define PET_P4_INPUT_SW4_GPIO GPIO_NUM_25   /* K5 · pin23 · 暂映射为第二个确认键 */
+/* 模块没有旋转编码器，A/B 保持未接（内部上拉，无沿即无事件） */
 #define PET_P4_INPUT_ENCODER_B_GPIO GPIO_NUM_3
 #define PET_P4_INPUT_ENCODER_A_GPIO GPIO_NUM_2
-#define PET_P4_INPUT_JOYSTICK_X_GPIO GPIO_NUM_21
-#define PET_P4_INPUT_JOYSTICK_Y_GPIO GPIO_NUM_20
+#define PET_P4_INPUT_JOYSTICK_X_GPIO GPIO_NUM_21  /* pin15 · ADC1_CH5 */
+#define PET_P4_INPUT_JOYSTICK_Y_GPIO GPIO_NUM_22  /* pin17 · ADC1_CH6 */
 #define PET_P4_INPUT_JOYSTICK_X_CHANNEL ADC1_GPIO21_CHANNEL
-#define PET_P4_INPUT_JOYSTICK_Y_CHANNEL ADC1_GPIO20_CHANNEL
+#define PET_P4_INPUT_JOYSTICK_Y_CHANNEL ADC1_GPIO22_CHANNEL
+/* 电池电压检测：原理图 R12 200K + R15 100K 分压，BAT_ADC = VBAT/3，接 GPIO20。
+ * 这里复用摇杆那只 ADC1 单元句柄，避免第二次 new_unit 报 INVALID_STATE。 */
+#define PET_P4_BATTERY_CHANNEL ADC1_GPIO20_CHANNEL
 
 #define PET_P4_INPUT_SAMPLE_MS 5
 #define PET_P4_INPUT_DEBOUNCE_MS 25
@@ -120,6 +130,7 @@ static pet_p4_input_config_t g_config;
 static atomic_uint g_dropped_events;
 static unsigned int g_event_sequence;
 static adc_oneshot_unit_handle_t g_joystick_adc;
+static volatile int g_battery_mv = -1;
 /* The existing input task is the only model writer. Diagnostics/providers read
  * only completed immutable observations, never these partially updated fields.
  * Dropping a busy diagnostic publication never changes ADC/input behavior. */
@@ -808,6 +819,9 @@ static void input_task(void *arg) {
     {.gpio = PET_P4_INPUT_SW2_GPIO, .control = PET_P4_INPUT_CONTROL_SW2},
     {.gpio = PET_P4_INPUT_SW3_GPIO, .control = PET_P4_INPUT_CONTROL_SW3},
     {.gpio = PET_P4_INPUT_ENCODER_PRESS_GPIO, .control = PET_P4_INPUT_CONTROL_ENCODER_PRESS},
+    /* 第 5 键：暂时复用 SW1。要给它独立功能需新增 control 并把输入配置版本升到 10，
+     * 那属于路线 A（协议扩展）的范围，现在不动 PC 端契约。 */
+    {.gpio = PET_P4_INPUT_SW4_GPIO, .control = PET_P4_INPUT_CONTROL_SW1},
   };
   pet_p4_rotary_decoder_t rotary;
   pet_p4_joystick_decoder_t joystick;
@@ -842,6 +856,7 @@ static void input_task(void *arg) {
   );
   last_wake = xTaskGetTickCount();
 
+  unsigned int battery_tick = 0;
   while (true) {
     for (size_t i = 0; i < sizeof(buttons) / sizeof(buttons[0]); i += 1) {
       uint8_t flags = pet_p4_button_decoder_update(
@@ -883,6 +898,16 @@ static void input_task(void *arg) {
         queue_event(PET_P4_INPUT_CONTROL_JOYSTICK,PET_P4_INPUT_GESTURE_DIRECTION,PET_P4_JOYSTICK_CENTER);
       }
     }
+    if (++battery_tick >= 200) {
+      battery_tick = 0;
+      int raw = 0;
+      if (adc_oneshot_read(g_joystick_adc, PET_P4_BATTERY_CHANNEL, &raw) == ESP_OK) {
+        /* 12dB 衰减满量程约 3.1V；单次读数毛刺多，和上次做一阶平滑 */
+        int mv = (raw * 3100) / 4095 * 3;
+        int prev = g_battery_mv;
+        g_battery_mv = prev < 0 ? mv : (prev * 3 + mv) / 4;
+      }
+    }
     vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(PET_P4_INPUT_SAMPLE_MS));
   }
 }
@@ -894,7 +919,8 @@ esp_err_t pet_p4_input_init(void) {
       | (1ULL << PET_P4_INPUT_SW3_GPIO)
       | (1ULL << PET_P4_INPUT_ENCODER_PRESS_GPIO)
       | (1ULL << PET_P4_INPUT_ENCODER_A_GPIO)
-      | (1ULL << PET_P4_INPUT_ENCODER_B_GPIO),
+      | (1ULL << PET_P4_INPUT_ENCODER_B_GPIO)
+      | (1ULL << PET_P4_INPUT_SW4_GPIO),
     .mode = GPIO_MODE_INPUT,
     .pull_up_en = GPIO_PULLUP_ENABLE,
     .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -921,6 +947,10 @@ esp_err_t pet_p4_input_init(void) {
       PET_P4_INPUT_JOYSTICK_Y_CHANNEL,
       &adc_channel_config
     );
+  }
+  if (err == ESP_OK) {
+    /* 电池通道单独配置：失败只是没有电量显示，不该拖垮整个输入初始化 */
+    (void) adc_oneshot_config_channel(g_joystick_adc, PET_P4_BATTERY_CHANNEL, &adc_channel_config);
   }
   if (err == ESP_OK) err = gpio_config(&config);
   if (err != ESP_OK) {
@@ -1707,4 +1737,11 @@ void pet_p4_input_get_joystick_snapshot(pet_p4_input_joystick_snapshot_t *snapsh
   if (!snapshot) return;
   if(pet_observation_capture(&g_joystick_observation,snapshot,sizeof(*snapshot))!=PET_OBSERVATION_OK)
     *snapshot=(pet_p4_input_joystick_snapshot_t){0};
+}
+
+
+/* 侧栏用：缓存的电池电压（毫伏）。-1 表示尚未读到或读取失败。
+ * 必须在 input_task 里采样，adc_oneshot_read 不是线程安全的。 */
+int pet_p4_battery_millivolts(void) {
+  return g_battery_mv;
 }

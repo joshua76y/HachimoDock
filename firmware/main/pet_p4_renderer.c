@@ -57,6 +57,7 @@
 #include "miniz.h"
 
 #include "pet_p4_lcd.h"
+#include "pet_p4_panel_chrome.h"
 #include "pet_p4_rgb565_span.h"
 #include "pet_p4_rgb565_blend.h"
 #include "pet_p4_rgb565_rotate.h"
@@ -154,6 +155,11 @@ _Static_assert(CONFIG_ESP_H264_DUAL_TASK_CORE == 1,
 #define P4_BOOT_DIAGNOSTIC_MS 3000ULL
 #define PET_P4_UI_WIDTH 640
 #define PET_P4_UI_HEIGHT 480
+
+/* 旋转上屏后的面板布局：内容区占前 640 行，下面 160 行留给右侧状态栏（横屏 x=640..799）。
+ * PET_P4_PANEL_CONTENT_H = 逻辑画布宽度，旋转 90/270 度后变成面板高度方向的像素数。 */
+#define PET_P4_PANEL_CONTENT_H ((int) PET_P4_UI_WIDTH)
+#define PET_P4_PANEL_BAR_Y     PET_P4_PANEL_CONTENT_H
 #define PET_P4_SESSION_CARD_X 42
 #define PET_P4_SESSION_CARD_WIDTH 556
 #define PET_P4_SESSION_CARD_HEIGHT 120
@@ -3492,12 +3498,23 @@ static void draw_touch_feedback_pixels(int x,int y) {
   fill_ellipse(x, y, 9, 9, teal);
   fill_ellipse(x, y, 3, 3, white);
 }
+/* 上游的本地触摸反馈圆点（白/青同心圆，650ms 超时）是给 PC 驱动的桌宠
+ * 确认「点击被识别」用的。移植到微雪 4.3" 后有实体 5 键 + 独立侧栏，不需要它；
+ * 而且它画在逻辑帧上，经旋转 + 只推内容区后，擦除帧可能被 frame_unchanged
+ * 优化跳过，留下一个不会消失的点。默认关闭，需要时改成 1 并配合下面的强制刷新。 */
+#define PET_P4_TOUCH_FEEDBACK_DOTS 0
+
 static void draw_touch_feedback(
   const pet_p4_runtime_state_t *state,
   unsigned long long now_ms
 ) {
+#if PET_P4_TOUCH_FEEDBACK_DOTS
   if (!pet_p4_state_touch_feedback_active(state, now_ms)) return;
   draw_touch_feedback_pixels(state->local_touch_x,state->local_touch_y);
+#else
+  (void) state;
+  (void) now_ms;
+#endif
 }
 
 
@@ -7422,20 +7439,33 @@ esp_err_t pet_p4_renderer_render(
     logical_unchanged||
 #endif
     pet_p4_frame_unchanged(g_native_framebuffer, previous_native,
-    (size_t) BSP_LCD_H_RES * BSP_LCD_V_RES * sizeof(uint16_t), previous_valid);
+    (size_t) BSP_LCD_H_RES * PET_P4_PANEL_CONTENT_H * sizeof(uint16_t), previous_valid);
+
+  /* 叠加层（触摸反馈点 / 审批浮层等）消失的那一帧必须强制整帧上屏。
+   * 面板改成「只推内容区 + 侧栏独立推」之后，若这一帧恰好被 frame_unchanged
+   * 判为无变化，旧叠加层的像素就会永久留在屏上 —— 这是「点不消失」的根治点。 */
+  static bool s_overlay_was_visible;
+  bool overlay_visible = pet_p4_state_touch_feedback_active(state, now_ms);
+  if (s_overlay_was_visible && !overlay_visible) unchanged = false;
+  s_overlay_was_visible = overlay_visible;
 #if PET_P4_RENDER_LCD_SPLIT_PROBE
   g_last_compare_valid=true;g_last_compare_us=pet_lcd_elapsed(lcd_started_us,esp_timer_get_time(),&g_last_compare_valid);
-  esp_err_t lcd_err=unchanged?ESP_OK:pet_p4_lcd_draw_rgb565_observed(0,0,BSP_LCD_H_RES,BSP_LCD_V_RES,g_native_framebuffer,&g_last_lcd_observation);
+  esp_err_t lcd_err=unchanged?ESP_OK:pet_p4_lcd_draw_rgb565_observed(0,0,BSP_LCD_H_RES,PET_P4_PANEL_CONTENT_H,g_native_framebuffer,&g_last_lcd_observation);
 #else
+  /* 只推内容区 (0,0)-(480,640)；面板 640..799 行归状态栏，由 panel_chrome 独占。 */
   esp_err_t lcd_err = unchanged ? ESP_OK : pet_p4_lcd_draw_rgb565(
     0,
     0,
     BSP_LCD_H_RES,
-    BSP_LCD_V_RES,
+    PET_P4_PANEL_CONTENT_H,
     g_native_framebuffer
   );
 #endif
   g_last_native_valid = lcd_err == ESP_OK;
+
+  /* 右侧 160px 状态栏：数据变化才重画，只有 dirty 才推一次，不占每帧带宽。 */
+  pet_p4_panel_chrome_tick(state, now_ms);
+  pet_p4_panel_chrome_flush();
 #if PET_P4_APP_RETAIN_LOGICAL
   pet_logical_retention_finish(&g_app_final_retention,g_app_common_plan,
     lcd_err==ESP_OK&&g_app_final_eligible&&!approval_visible&&!strcmp(page,"app"));

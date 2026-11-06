@@ -81,6 +81,14 @@ void pet_p4_touch_panel_to_ui(int panel_x, int panel_y, int *ui_x, int *ui_y);
 void pet_p4_touch_cst826_to_ui(int panel_x, int panel_y, int *ui_x, int *ui_y);
 const char *pet_p4_touch_gesture_name(pet_p4_touch_gesture_t gesture);
 
+/* 横屏逻辑画布宽度。旋转后若干坐标 >= 这个值说明落在右侧状态栏，不属于内容区。
+ * 内容区仍是 640x480，状态栏占 160x480（见 PORTING-PLAN §三）。 */
+#define PET_P4_UI_CONTENT_WIDTH 640
+
+static inline bool pet_p4_touch_in_sidebar(int ui_x) {
+  return ui_x >= PET_P4_UI_CONTENT_WIDTH;
+}
+
 #ifdef __cplusplus
 }
 #endif

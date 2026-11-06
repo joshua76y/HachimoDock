@@ -56,6 +56,9 @@ bool pet_p4_input_send_config_state(
   void *ctx
 );
 unsigned int pet_p4_input_dropped_events(void);
+
+/* 电池电压（毫伏，已换算成 VBAT）。-1 = 尚未采样到。 */
+int pet_p4_battery_millivolts(void);
 /* Read-only completed observation; no ADC read or input event. Unavailable
  * publication returns zeroed ready=false, never a mixed partially updated row. */
 void pet_p4_input_get_joystick_snapshot(pet_p4_input_joystick_snapshot_t *snapshot);

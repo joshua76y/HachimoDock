@@ -424,6 +424,9 @@ static void process_touch_event(
   void *ctx,
   const pet_p4_touch_event_t *event
 ) {
+  /* 右侧 160px 状态栏不属于内容区：命中就直接吞掉，不落到宠物/组件逻辑上。
+   * 状态栏自己的点击交互以后在 panel_chrome 里接管。 */
+  if (pet_p4_touch_in_sidebar(event->x)) return;
   if (pet_p4_conversation_active(state)) {
     if (event->gesture == PET_P4_TOUCH_SWIPE_LEFT || event->gesture == PET_P4_TOUCH_SWIPE_UP)
       pet_p4_conversation_move(state, -1, event->ts_ms);

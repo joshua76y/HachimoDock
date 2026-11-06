@@ -7,6 +7,9 @@ idf_component_register(
   SRCS
     "pet_p4_main.c"
     "pet_p4_lcd.c"
+    "pet_p4_panel_chrome.c"
+    "pet_p4_wifi_bsp.c"
+    "pet_p4_http_bsp.c"
     "pet_p4_assets.c"
     "pet_p4_audio.c"
     "pet_p4_audio_patch.c"
@@ -111,6 +114,7 @@ idf_component_register(
   PRIV_INCLUDE_DIRS
     "${IDF_PATH}/components/spiffs/spiffs/src"
   REQUIRES
+    esp_http_server
     esp_adc
     esp_timer
     esp_driver_gpio

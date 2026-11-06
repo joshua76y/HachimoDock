@@ -39,6 +39,8 @@
 #include "pet_p4_boot_trace.h"
 #include "pet_p4_boot_dma.h"
 #include "pet_p4_app_store.h"
+#include "pet_p4_wifi_bsp.h"
+#include "pet_p4_http_bsp.h"
 
 #include "pet_p4_storage_policy.h"
 #include "mbedtls/base64.h"
@@ -1316,6 +1318,18 @@ static bool enqueue_protocol_line(
   return false;
 }
 
+/* 路线 B：HTTP 收到的 JSON 行走同一个协议队列。
+ * 协议层的 ACK / 响应在 HTTP 通道没有接收方，直接丢弃；
+ * POST 只回「是否入队成功」，双向应答留给路线 A 的 TCP 通道。 */
+static void net_discard_send_line(const char *line, void *ctx) {
+  (void) line;
+  (void) ctx;
+}
+
+static bool net_submit_line(const char *line) {
+  return enqueue_protocol_line(line, net_discard_send_line, NULL, NULL);
+}
+
 #if defined(__GNUC__) && !defined(__clang__)
 __attribute__((noinline,optimize("Os")))
 #endif
@@ -2042,6 +2056,20 @@ void app_main(void) {
   esp_err_t ota_err = pet_p4_ota_init(&g_state, transport_send_line, NULL);
   if (ota_err != ESP_OK) {
     ESP_LOGW(TAG, "A/B firmware OTA unavailable: %s", esp_err_to_name(ota_err));
+  }
+#if PET_P4_WIFI_AUTO_START
+  /* 配网凭据存 NVS；没配过就静默跳过，绝不拖累 USB 启动。
+   * esp_wifi_start() 本身非阻塞，连接结果由事件回调异步更新。 */
+  esp_err_t wifi_boot_err = pet_p4_wifi_start_from_nvs();
+  if (wifi_boot_err != ESP_OK) {
+    ESP_LOGI(TAG, "WiFi 未在开机启动（无凭据或初始化失败）: %d", (int) wifi_boot_err);
+  }
+#endif
+  /* HTTP server 绑定 0.0.0.0:80，WiFi 拿到 IP 后即可访问；
+   * 即使没配网也会先把 TCP/IP 栈建好，不拖累 USB 启动。 */
+  esp_err_t http_err = pet_p4_http_init(net_submit_line);
+  if (http_err != ESP_OK) {
+    ESP_LOGW(TAG, "HTTP server unavailable: %s", esp_err_to_name(http_err));
   }
   esp_err_t native_usb_err = pet_p4_native_usb_init(
     &g_state,

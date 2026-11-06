@@ -70,28 +70,21 @@ def test_dsi_clock_uses_sdk_revision_specific_default():
 
 def test_v3_dpi_clock_keeps_compensated_front_porch_positive():
     bsp = read("components/esp32_p4_wifi6_touch_lcd_4_3/esp32_p4_wifi6_touch_lcd_4_3.c")
-    clock = re.search(
-        r"#if CONFIG_ESP32P4_REV_MIN_FULL >= 300\s+.*?"
-        r"\.dpi_clock_freq_mhz = (\d+),\s+#else\s+"
-        r"\.dpi_clock_freq_mhz = (\d+),\s+#endif", bsp, re.S)
-    assert clock, "v3 must use an exact DPI divider without changing v1 timing"
-    v3_clock, v1_clock = map(int, clock.groups())
-    assert v1_clock == 25
-    assert v3_clock == 24
+    # 微雪 4.3" 480x800 官方时序：DPI 30MHz 单一值，不再按 v1/v3 分频。
+    # 原来 24/25MHz 的条件编译是为 480x640 WLK2802 绕开 IDF 5.5.4 的分频补偿，
+    # 换屏后整套 porch 换成官方值，30 = 240/8 整除，补偿项恒为 0。
+    clock = re.search(r"\.dpi_clock_freq_mhz = (\d+),", bsp)
+    assert clock and int(clock.group(1)) == 30
+    assert 240 % 30 == 0
     front = int(re.search(r"\.hsync_front_porch = (\d+)", bsp).group(1))
     back = int(re.search(r"\.hsync_back_porch = (\d+)", bsp).group(1))
     sync = int(re.search(r"\.hsync_pulse_width = (\d+)", bsp).group(1))
-    total = 480 + sync + back + front
-
-    def compensated_front(requested):
-        # IDF 5.5.4 rounds the divider and compensates the bridge timing.
-        divider = int(240 / requested + 0.5)
-        actual = 240 / divider
-        return front + int(actual / requested * total + 0.5) - total
-
-    assert compensated_front(25) == -11  # Regression reproduced numerically.
-    assert 240 % v3_clock == 0
-    assert compensated_front(v3_clock) == front > 0
+    assert front > 0
+    assert 480 + sync + back + front == 576      # 官方 h_total
+    vfront = int(re.search(r"\.vsync_front_porch = (\d+)", bsp).group(1))
+    vback = int(re.search(r"\.vsync_back_porch = (\d+)", bsp).group(1))
+    vsync = int(re.search(r"\.vsync_pulse_width = (\d+)", bsp).group(1))
+    assert 800 + vsync + vback + vfront == 870  # 官方 v_total
 
 
 def test_protocol_doc_declares_usb_only_p4_runtime():
@@ -1408,10 +1401,13 @@ def test_p4_lcd_matches_wlk2802_st7701s_panel_geometry():
     display = read("components/esp32_p4_wifi6_touch_lcd_4_3/include/bsp/display.h")
     bsp = read("components/esp32_p4_wifi6_touch_lcd_4_3/esp32_p4_wifi6_touch_lcd_4_3.c")
 
+    # 微雪 ESP32-P4-WIFI6-Touch-LCD-4.3：480x800 ST7701，2-lane / 500Mbps / DPI 30MHz。
+    # 原断言针对上游 480x640 WLK2802（1-lane / 800Mbps / 25MHz），换屏后几何、
+    # 时序、初始化表、背光极性全部要跟着换，不能只改分辨率。
     assert "#define BSP_LCD_H_RES              (480)" in display
-    assert "#define BSP_LCD_V_RES              (640)" in display
-    assert "#define BSP_LCD_MIPI_DSI_LANE_BITRATE_MBPS (800)" in display
-    assert "#define BSP_LCD_MIPI_DSI_LANE_NUM          (1)" in display
+    assert "#define BSP_LCD_V_RES              (800)" in display
+    assert "#define BSP_LCD_MIPI_DSI_LANE_BITRATE_MBPS (500)" in display
+    assert "#define BSP_LCD_MIPI_DSI_LANE_NUM          (2)" in display
     assert ".h_size = BSP_LCD_H_RES" in bsp
     assert ".v_size = BSP_LCD_V_RES" in bsp
     assert "#define BSP_LCD_PIXEL_FORMAT        LCD_COLOR_PIXEL_FORMAT_RGB565" in display
@@ -1419,20 +1415,22 @@ def test_p4_lcd_matches_wlk2802_st7701s_panel_geometry():
     assert ".pixel_format = BSP_LCD_PIXEL_FORMAT" in bsp
     assert ".bits_per_pixel = BSP_LCD_BITS_PER_PIXEL" in bsp
     assert ".rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB" in bsp
-    assert ".dpi_clock_freq_mhz = 25" in bsp
-    assert ".hsync_front_porch = 10" in bsp
-    assert ".hsync_pulse_width = 4" in bsp
-    assert ".hsync_back_porch = 20" in bsp
-    assert ".vsync_front_porch = 8" in bsp
-    assert ".vsync_pulse_width = 4" in bsp
-    assert ".vsync_back_porch = 14" in bsp
-    assert "{0xC0, (uint8_t[]){0x4F, 0x00}, 2, 0}" in bsp
-    assert "{0xC2, (uint8_t[]){0x01, 0x14}, 2, 0}" in bsp
+    assert ".dpi_clock_freq_mhz = 30" in bsp
+    assert ".hsync_front_porch = 42" in bsp
+    assert ".hsync_pulse_width = 12" in bsp
+    assert ".hsync_back_porch = 42" in bsp
+    assert ".vsync_front_porch = 60" in bsp
+    assert ".vsync_pulse_width = 8" in bsp
+    assert ".vsync_back_porch = 2" in bsp
+    # 微雪官方 4.3" ST7701 初始化表（49 行），不是 WLK2802 那张
+    assert "{0xFF, (uint8_t[]){0x77, 0x01, 0x00, 0x00, 0x13}, 5, 0}" in bsp
+    assert "{0xC0, (uint8_t[]){0x63, 0x00}, 2, 0}" in bsp
+    assert "{0xC2, (uint8_t[]){0x17, 0x08}, 2, 0}" in bsp
     assert "{0xB0, (uint8_t[]){0x5D}, 1, 0}" in bsp
-    assert "{0xED, (uint8_t[]){0xFF, 0x45, 0x67, 0xFA" in bsp
+    assert "{0xED, (uint8_t[]){0xB0, 0x2B, 0x98, 0xA4" in bsp
     assert bsp.index("{0x11, (uint8_t[]){0x00}, 0, 120}") < bsp.index("{0x29, (uint8_t[]){0x00}, 0, 0}")
-    assert bsp.index("{0x29, (uint8_t[]){0x00}, 0, 0}") < bsp.index("{0x35, (uint8_t[]){0x00}, 1, 0}")
-    assert ".flags = {.output_invert = 0}" in bsp
+    # 4.3" 背光升压/恒流低电平有效，官方 BSP 的 LEDC 必须反相
+    assert ".flags = {.output_invert = 1}" in bsp
 
 
 def test_p4_lcd_write_only_command_link_cannot_wait_for_ack_or_id():
@@ -2318,16 +2316,21 @@ def test_p4_hardware_inputs_are_debounced_persistent_and_configurable():
 
     assert '"pet_p4_input.c"' in cmake
     assert '"pet_p4_input_core.c"' in cmake
-    assert "PET_P4_INPUT_SW1_GPIO GPIO_NUM_50" in input_source
-    assert "PET_P4_INPUT_SW2_GPIO GPIO_NUM_49" in input_source
-    assert "PET_P4_INPUT_SW3_GPIO GPIO_NUM_5" in input_source
-    assert "PET_P4_INPUT_ENCODER_PRESS_GPIO GPIO_NUM_4" in input_source
+    # 微雪 ESP32-P4-WIFI6-Touch-LCD-4.3 移植：外接「模拟摇杆 + 5 键」模块，
+    # 接线全部收在 J3 的 pin15~24（见 PORTING-PLAN §五）。
+    # GPIO20 在这块板上是 BAT_ADC（VBAT/3，200K/100K 分压），不在排针上，
+    # 所以摇杆 Y 必须改到 GPIO22 / ADC1_CH6，不能用原板的 GPIO20。
+    assert "PET_P4_INPUT_SW1_GPIO GPIO_NUM_28" in input_source
+    assert "PET_P4_INPUT_SW2_GPIO GPIO_NUM_29" in input_source
+    assert "PET_P4_INPUT_SW3_GPIO GPIO_NUM_24" in input_source
+    assert "PET_P4_INPUT_ENCODER_PRESS_GPIO GPIO_NUM_30" in input_source
+    assert "PET_P4_INPUT_SW4_GPIO GPIO_NUM_25" in input_source   # 第 5 键
     assert "PET_P4_INPUT_ENCODER_B_GPIO GPIO_NUM_3" in input_source
     assert "PET_P4_INPUT_ENCODER_A_GPIO GPIO_NUM_2" in input_source
     assert "PET_P4_INPUT_JOYSTICK_X_GPIO GPIO_NUM_21" in input_source
-    assert "PET_P4_INPUT_JOYSTICK_Y_GPIO GPIO_NUM_20" in input_source
+    assert "PET_P4_INPUT_JOYSTICK_Y_GPIO GPIO_NUM_22" in input_source
     assert "PET_P4_INPUT_JOYSTICK_X_CHANNEL ADC1_GPIO21_CHANNEL" in input_source
-    assert "PET_P4_INPUT_JOYSTICK_Y_CHANNEL ADC1_GPIO20_CHANNEL" in input_source
+    assert "PET_P4_INPUT_JOYSTICK_Y_CHANNEL ADC1_GPIO22_CHANNEL" in input_source
     assert '"esp_adc"' in cmake or "esp_adc" in cmake
     assert "PET_P4_INPUT_SAMPLE_MS 5" in input_source
     assert "PET_P4_INPUT_DEBOUNCE_MS 25" in input_source

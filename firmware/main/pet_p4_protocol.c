@@ -16,6 +16,7 @@
  */
 
 #include "pet_p4_protocol.h"
+#include "pet_p4_wifi_bsp.h"
 #include "pet_p4_usb_native.h"
 #include "pet_p4_variable_owners.h"
 #include "pet_p4_conversation.h"
@@ -435,6 +436,11 @@ static unsigned long long host_wall_clock_estimate_ms(unsigned long long now_ms)
   if (!g_host_wall_clock_ms || !g_host_wall_clock_at_ms) return 0;
   elapsed_ms = now_ms >= g_host_wall_clock_at_ms ? now_ms - g_host_wall_clock_at_ms : 0;
   return g_host_wall_clock_ms + elapsed_ms;
+}
+
+/* 侧栏时钟用：没收到 heartbeat 锚点前返回 0，调用方自己显示 "--:--"。 */
+unsigned long long pet_p4_host_wall_clock_ms(unsigned long long now_ms) {
+  return host_wall_clock_estimate_ms(now_ms);
 }
 
 /* Converts the optional approval expiresAtMs into a device monotonic deadline.
@@ -4329,6 +4335,19 @@ bool pet_p4_handle_line_with_reply(
       g_host_wall_clock_at_ms = heartbeat_now_ms;
     }
     send_protocol_ack_if_requested(send_line, ctx, topic, payload);
+  } else if (strcmp(topic, "control/apply-wifi") == 0) {
+    /* PC 端 usb_apply_wifi(ssid, psk) 现成通道；上游原本只回 unsupported_topic。
+     * 凭据落 NVS，并立即连 WiFi（已 init 过则只换配置重连）。 */
+    const char *wifi_ssid = json_string(payload, "ssid");
+    const char *wifi_pass = json_string(payload, "password");
+    esp_err_t wifi_err = pet_p4_wifi_apply(wifi_ssid, wifi_pass);
+    if (wifi_err == ESP_OK) {
+      send_protocol_ack_if_requested(send_line, ctx, topic, payload);
+    } else {
+      char detail[64];
+      snprintf(detail, sizeof(detail), "wifi apply failed: %d", (int) wifi_err);
+      send_protocol_ack(send_line, ctx, topic, payload, false, "wifi_apply_failed", detail);
+    }
   } else if (pet_p4_diagnostics_handle_topic_with_reply(topic, payload, state, send_line, ctx, reply)) {
     state->last_update_ms += 1;
   } else if (pet_p4_ota_handle_topic(topic, payload, send_line, ctx)) {

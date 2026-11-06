@@ -1,0 +1,191 @@
+/*
+ * 路线 B：设备侧最小 HTTP server。
+ *
+ * 端点：
+ *   GET  /health  -> {"ok":true}
+ *   GET  /status  -> 设备 ID / 固件 / IP / uptime / 堆水位 / POST 计数
+ *   POST /state   -> body 是一行 JSON Lines，转交 g_protocol_queue
+ *   POST /line    -> /state 的别名，便于以后直接复用 USB 协议客户端
+ *
+ * 设计约束：
+ *  - 响应体都很小。RLCD 踩过「一次 httpd_resp_send 15KB 把服务器堵死」的坑，
+ *    这里不做大块推送；语音/截图等大数据走后面的路线 A。
+ *  - POST 是 fire-and-forget：协议层的 ACK 由 main.c 提供的 send_line 丢弃，
+ *    HTTP 只回入队结果。要等 ACK 属于路线 A 的 TCP 双向通道。
+ *  - 不访问 g_state，避免跨任务读写运行时状态。
+ */
+#include "pet_p4_http_bsp.h"
+
+#include <stdio.h>
+#include <string.h>
+
+#include "esp_app_desc.h"
+#include "esp_chip_info.h"
+#include "esp_err.h"
+#include "esp_event.h"
+#include "esp_heap_caps.h"
+#include "esp_http_server.h"
+#include "esp_log.h"
+#include "esp_netif.h"
+#include "esp_system.h"
+#include "esp_timer.h"
+#include "pet_p4_wifi_bsp.h"
+
+static const char *TAG = "pet-p4-http";
+
+#define HTTP_MAX_LINE 4096
+
+static httpd_handle_t s_server;
+static pet_p4_http_submit_fn s_submit;
+static uint32_t s_post_count;
+
+static void set_cors(httpd_req_t *req) {
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+}
+
+static esp_err_t json_reply(httpd_req_t *req, const char *status, const char *body) {
+  httpd_resp_set_type(req, "application/json");
+  set_cors(req);
+  if (status) httpd_resp_set_status(req, status);
+  return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t health_get(httpd_req_t *req) {
+  return json_reply(req, NULL, "{\"ok\":true,\"service\":\"hachimo-p4\"}");
+}
+
+static esp_err_t status_get(httpd_req_t *req) {
+  char ip[32] = {0};
+  bool connected = pet_p4_wifi_is_connected();
+  if (connected) (void) pet_p4_wifi_get_ip(ip, sizeof(ip));
+
+  const esp_app_desc_t *app = esp_app_get_description();
+  esp_chip_info_t chip;
+  esp_chip_info(&chip);
+
+  char body[768];
+  size_t n = (size_t) snprintf(body, sizeof(body),
+    "{\"ok\":true,"
+    "\"device\":\"%s\","
+    "\"fw\":\"%s\","
+    "\"chip\":\"rev%d.%d cores=%d\","
+    "\"uptime_s\":%llu,"
+    "\"wifi\":{\"connected\":%s,\"ip\":\"%s\"},"
+    "\"heap\":{\"internal\":%u,\"psram\":%u},"
+    "\"state_posts\":%u,"
+    "\"transport\":\"wifi-http-route-b\"}",
+    PET_P4_WIFI_HOSTNAME,
+    app ? app->version : "unknown",
+    chip.revision / 100, chip.revision % 100, chip.cores,
+    (unsigned long long) (esp_timer_get_time() / 1000000ULL),
+    connected ? "true" : "false", ip,
+    (unsigned) esp_get_free_heap_size(),
+    (unsigned) heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+    (unsigned) s_post_count);
+  if (n >= sizeof(body)) n = sizeof(body) - 1;
+  return json_reply(req, NULL, body);
+}
+
+/* 读取一行 JSON 并交给协议队列。返回 true 表示已成功入队。 */
+static bool submit_body(httpd_req_t *req) {
+  size_t total = req->content_len;
+  if (total == 0 || total >= HTTP_MAX_LINE) {
+    ESP_LOGW(TAG, "拒绝请求：body=%u 字节（上限 %d）", (unsigned) total, HTTP_MAX_LINE - 1);
+    return false;
+  }
+  char *buf = (char *) heap_caps_malloc(total + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!buf) buf = (char *) malloc(total + 1);
+  if (!buf) return false;
+
+  size_t got = 0;
+  while (got < total) {
+    int r = httpd_req_recv(req, buf + got, (int) (total - got));
+    if (r <= 0) { free(buf); return false; }
+    got += (size_t) r;
+  }
+  buf[got] = 0;
+  /* 允许末尾换行（JSON Lines 习惯），但内部不能有换行 */
+  while (got && (buf[got - 1] == '\n' || buf[got - 1] == '\r')) buf[--got] = 0;
+  if (strchr(buf, '\n') || buf[0] != '{') {
+    ESP_LOGW(TAG, "拒绝请求：不是单行 JSON object");
+    free(buf);
+    return false;
+  }
+
+  bool ok = s_submit && s_submit(buf);
+  free(buf);
+  if (ok) s_post_count += 1;
+  return ok;
+}
+
+static esp_err_t state_post(httpd_req_t *req) {
+  if (!submit_body(req)) {
+    return json_reply(req, "400 Bad Request",
+                      "{\"ok\":false,\"error\":\"invalid_or_queue_busy\"}");
+  }
+  return json_reply(req, NULL, "{\"ok\":true,\"queued\":true}");
+}
+
+static esp_err_t options_handler(httpd_req_t *req) {
+  set_cors(req);
+  httpd_resp_set_status(req, "204 No Content");
+  return httpd_resp_send(req, NULL, 0);
+}
+
+esp_err_t pet_p4_http_init(pet_p4_http_submit_fn submit) {
+  if (s_server) return ESP_OK;
+  s_submit = submit;
+
+  /* 没配 WiFi 时 netif / 事件循环还没建；httpd 依赖 TCP/IP 栈，这里先补齐。
+   * 已存在返回 INVALID_STATE，视为成功。 */
+  esp_err_t err = esp_netif_init();
+  if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+    ESP_LOGE(TAG, "netif 初始化失败: %s", esp_err_to_name(err));
+    return err;
+  }
+  err = esp_event_loop_create_default();
+  if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+    ESP_LOGE(TAG, "事件循环创建失败: %s", esp_err_to_name(err));
+    return err;
+  }
+
+  httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
+  cfg.server_port = 80;
+  cfg.max_uri_handlers = 8;
+  cfg.stack_size = 6144;
+  cfg.recv_wait_timeout = 2;
+  cfg.send_wait_timeout = 2;
+  cfg.lru_purge_enable = true;   /* RLCD 教训：连接不释放会堵死 server */
+
+  err = httpd_start(&s_server, &cfg);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "HTTP server 启动失败: %s", esp_err_to_name(err));
+    return err;
+  }
+
+  static const httpd_uri_t uris[] = {
+    {.uri = "/health", .method = HTTP_GET,    .handler = health_get,      .user_ctx = NULL},
+    {.uri = "/status", .method = HTTP_GET,    .handler = status_get,      .user_ctx = NULL},
+    {.uri = "/state",  .method = HTTP_POST,   .handler = state_post,      .user_ctx = NULL},
+    {.uri = "/line",   .method = HTTP_POST,   .handler = state_post,      .user_ctx = NULL},
+    {.uri = "/*",      .method = HTTP_OPTIONS,.handler = options_handler, .user_ctx = NULL},
+  };
+  for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
+    esp_err_t reg = httpd_register_uri_handler(s_server, &uris[i]);
+    if (reg != ESP_OK) {
+      ESP_LOGW(TAG, "注册 %s 失败: %s", uris[i].uri, esp_err_to_name(reg));
+    }
+  }
+  ESP_LOGI(TAG, "HTTP 就绪 :80  /health /status /state /line");
+  return ESP_OK;
+}
+
+bool pet_p4_http_running(void) {
+  return s_server != NULL;
+}
+
+uint32_t pet_p4_http_post_count(void) {
+  return s_post_count;
+}
