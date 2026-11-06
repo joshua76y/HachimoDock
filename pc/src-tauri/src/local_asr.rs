@@ -206,3 +206,22 @@ pub fn local_asr_health(endpoint: Option<String>) -> Result<Health, String> {
     let base = endpoint.unwrap_or_else(|| DEFAULT_ENDPOINT.to_string());
     health(&base, Duration::from_millis(2500))
 }
+
+/// 设置页保存语音识别来源。写 `~/.hachimo-local-asr.json`，识别器每次开麦
+/// 前读一次，因此切换后下一句就生效，不需要重启客户端。
+#[tauri::command]
+pub fn local_asr_save_prefs(
+    provider: String,
+    endpoint: Option<String>,
+    engine: Option<String>,
+) -> Result<(), String> {
+    let home = std::env::var("HOME").map_err(|_| "无法定位 HOME 目录".to_string())?;
+    let path = std::path::Path::new(&home).join(".hachimo-local-asr.json");
+    let payload = serde_json::json!({
+        "provider": provider,
+        "endpoint": endpoint.unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
+        "engine": engine.unwrap_or_else(|| DEFAULT_ENGINE.to_string()),
+    });
+    std::fs::write(&path, payload.to_string())
+        .map_err(|e| format!("保存语音识别偏好失败：{e}"))
+}

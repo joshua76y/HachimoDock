@@ -89,6 +89,14 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
     () => window.localStorage.getItem("hachimo.localAsrEngine") || "sensevoice",
   );
   const [localAsrProbe, setLocalAsrProbe] = useState({ pending: false, message: "" });
+  /* provider / endpoint / engine 变化即落盘，识别器下次开麦直接生效。 */
+  useEffect(() => {
+    invoke("local_asr_save_prefs", {
+      provider: asrProvider,
+      endpoint: localAsrEndpoint,
+      engine: localAsrEngine,
+    }).catch(() => {});
+  }, [asrProvider, localAsrEndpoint, localAsrEngine]);
   const [asrState, setAsrState] = useState({
     loading: true,
     pending: false,

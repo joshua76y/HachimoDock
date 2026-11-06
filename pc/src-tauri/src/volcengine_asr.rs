@@ -435,8 +435,103 @@ impl Drop for SpeechWorkerExit {
     fn drop(&mut self) { self.complete(Ok(())); }
 }
 
+/// 本地 ASR 偏好：`~/.hachimo-local-asr.json`，由设置页通过
+/// `local_asr_save_prefs` 写入。缺文件或 provider 不是 local 时返回 None，
+/// 保持原来的火山引擎路径不变。
+pub(crate) fn local_provider_prefs() -> Option<(String, String)> {
+    let home = std::env::var("HOME").ok()?;
+    let path = std::path::Path::new(&home).join(".hachimo-local-asr.json");
+    let raw = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    if value.get("provider")?.as_str()? != "local" {
+        return None;
+    }
+    let endpoint = value
+        .get("endpoint")
+        .and_then(|item| item.as_str())
+        .filter(|item| !item.trim().is_empty())
+        .unwrap_or(crate::local_asr::DEFAULT_ENDPOINT)
+        .to_string();
+    let engine = value
+        .get("engine")
+        .and_then(|item| item.as_str())
+        .filter(|item| !item.trim().is_empty())
+        .unwrap_or(crate::local_asr::DEFAULT_ENGINE)
+        .to_string();
+    Some((endpoint, engine))
+}
+
 impl StreamingSpeechRecognizer {
     /// Offline orchestration tests retain the receiver; no keys, socket or device.
+    /// 本地 ASR worker：把 push_pcm 的裸 PCM 缓冲起来，Finish 时整段 POST 到
+    /// sherpa-onnx 服务（`/stt`），拿到文字后发 Final。服务只提供整段接口，
+    /// 因此没有 Partial——发一次 Ready 让上层进入「listening」状态即可。
+    fn start_local(
+        endpoint: String,
+        engine: String,
+        callback: impl Fn(StreamingSpeechEvent) + Send + Sync + 'static,
+    ) -> Result<Self, String> {
+        let callback: SpeechCallback = Arc::new(callback);
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = cancelled.clone();
+        let round = Arc::new(SpeechRound::new());
+        let worker_round = round.clone();
+        let emit_callback = callback.clone();
+        tauri::async_runtime::spawn(async move {
+            let emit = |event: StreamingSpeechEvent| {
+                worker_round.emit(event, &emit_callback);
+            };
+            emit(StreamingSpeechEvent::Ready);
+            let mut pcm: Vec<u8> = Vec::new();
+            while let Some(command) = receiver.recv().await {
+                match command {
+                    StreamingSpeechCommand::Pcm(queued) => {
+                        if worker_cancelled.load(Ordering::SeqCst) { return; }
+                        pcm.extend_from_slice(&queued.pcm);
+                    }
+                    StreamingSpeechCommand::Finish => {
+                        if pcm.len() < 16_000 / 1000 * 2 * 200 {
+                            emit(StreamingSpeechEvent::Error(
+                                "录音太短，未发送识别".to_string(),
+                            ));
+                            return;
+                        }
+                        let wav = crate::local_asr::pcm_to_wav(&pcm, 16_000, 1);
+                        let result = tokio::task::spawn_blocking(move || {
+                            crate::local_asr::transcribe_wav(
+                                &endpoint,
+                                &engine,
+                                &wav,
+                                std::time::Duration::from_secs(20),
+                            )
+                        })
+                        .await;
+                        match result {
+                            Ok(Ok(transcript)) if !transcript.text.is_empty() => {
+                                emit(StreamingSpeechEvent::Final {
+                                    revision: 1,
+                                    text: transcript.text,
+                                    confidence: None,
+                                });
+                            }
+                            Ok(Ok(_)) => emit(StreamingSpeechEvent::Error(
+                                "本地 ASR 没有识别到文字".to_string(),
+                            )),
+                            Ok(Err(error)) => emit(StreamingSpeechEvent::Error(error)),
+                            Err(error) => emit(StreamingSpeechEvent::Error(format!(
+                                "本地 ASR 任务失败：{error}"
+                            ))),
+                        }
+                        return;
+                    }
+                    StreamingSpeechCommand::Cancel => return,
+                }
+            }
+        });
+        Ok(Self { sender, cancelled, round })
+    }
+
     #[cfg(test)]
     pub(crate) fn test_sink() -> (Self, impl Sized) {
         let (sender, receiver) = mpsc::unbounded_channel();
@@ -447,6 +542,10 @@ impl StreamingSpeechRecognizer {
     pub fn start(
         callback: impl Fn(StreamingSpeechEvent) + Send + Sync + 'static,
     ) -> Result<Self, String> {
+        // 本地 ASR（sherpa-onnx）优先：不需要云端凭据，也不建立 WebSocket。
+        if let Some((endpoint, engine)) = local_provider_prefs() {
+            return Self::start_local(endpoint, engine, callback);
+        }
         let started_at = TokioInstant::now();
         let config = load_runtime_config()?;
         let callback: SpeechCallback = Arc::new(callback);
