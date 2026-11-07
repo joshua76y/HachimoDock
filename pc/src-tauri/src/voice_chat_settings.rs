@@ -95,6 +95,9 @@ pub const LLM_PRESETS: &[LlmPreset] = &[
     LlmPreset { id: "deepseek", label: "DeepSeek", base_url: "https://api.deepseek.com", model: "deepseek-flash" },
     LlmPreset { id: "doubao", label: "豆包（火山方舟）", base_url: "https://ark.cn-beijing.volces.com/api/v3", model: "doubao-seed-2-1-lite-260915" },
     LlmPreset { id: "mimo", label: "Xiaomi MiMo", base_url: "https://api.xiaomimimo.com/v1", model: "mimo-v2.6-flash" },
+    /* 本地 OMLX：OpenAI 兼容网关（默认 127.0.0.1:9876/v1）。Key 可为空或本地令牌，
+     * model 可按 /v1/models 实际返回改写。 */
+    LlmPreset { id: "omlx", label: "本地 OMLX", base_url: "http://127.0.0.1:9876/v1", model: "Qwen3-VL-4B-Instruct-MLX-4bit" },
 ];
 pub const DEFAULT_LLM_PROVIDER: &str = "doubao";
 

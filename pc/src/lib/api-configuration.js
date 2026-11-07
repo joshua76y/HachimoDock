@@ -14,6 +14,9 @@ export const LLM_PRESETS = [
   { id: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com", model: "deepseek-flash" },
   { id: "doubao", label: "豆包", baseUrl: "https://ark.cn-beijing.volces.com/api/v3", model: DEFAULT_LITE_MODEL },
   { id: "mimo", label: "MiMo", baseUrl: "https://api.xiaomimimo.com/v1", model: "mimo-v2.6-flash" },
+  /* 本地 OMLX：OpenAI 兼容网关，默认 http://127.0.0.1:9876/v1，Key 可留空或用网关自带的
+   * 本地令牌。模型名按服务端 /v1/models 实际返回填写（此处可改）。 */
+  { id: "omlx", label: "本地 OMLX", baseUrl: "http://127.0.0.1:9876/v1", model: "Qwen3-VL-4B-Instruct-MLX-4bit" },
 ];
 
 export const DEFAULT_TTS_RESOURCE_ID = "seed-tts-2.0";

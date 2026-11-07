@@ -347,9 +347,16 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
     // (:3333) while no USB serial port is present (e.g. running on battery).
     if (!connectedStatus) {
       try {
-        const rememberedHost = String(
-          window.localStorage.getItem("pet-manager:tcp-host") || "",
+        /* 没有记忆过主机时，用设备当前局域网地址兜底：拔掉 USB 也能自动
+         * 走 TCP:3333。地址来自设备 /status 的 wifi.ip，可被界面覆盖。 */
+        const DEFAULT_WIFI_HOST = "192.168.1.97";
+        let rememberedHost = String(
+          window.localStorage.getItem("pet-manager:tcp-host") || "192.168.1.97",
         ).trim();
+        if (!rememberedHost) {
+          rememberedHost = DEFAULT_WIFI_HOST;
+          window.localStorage.setItem("pet-manager:tcp-host", rememberedHost);
+        }
         if (rememberedHost) {
           const tcpStatus = normalizeUsbStatusPayload(
             await invoke("usb_connect_tcp", { host: rememberedHost, port: 3333 }),
