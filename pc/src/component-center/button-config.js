@@ -192,7 +192,7 @@ export function canonicalButtonEvent(event) {
 }
 
 export const DEVICE_BUTTON_CONFIG_STORAGE_KEY = "pet-manager.board-voice-config";
-export const DEVICE_BUTTON_CONFIG_MODEL_VERSION = 10;
+export const DEVICE_BUTTON_CONFIG_MODEL_VERSION = 11;
 
 export function resolveGlobalExitEvents(response = {}) {
   const boardConfig = response?.config && typeof response.config === "object"
