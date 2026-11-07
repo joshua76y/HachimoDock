@@ -154,6 +154,7 @@ mod usb_serial;
 mod appearance_recovery_ipc;
 mod voice_chat_settings;
 mod local_asr;
+mod prompt_sounds;
 mod volcengine_asr;
 
 use serde::{Deserialize, Serialize};
@@ -11482,6 +11483,15 @@ pub fn run() {
                 url.scheme(), safe_host, port, safe_path);
         })
         .setup(move |app| {
+            /* 本地 ASR：客户端启动即在后台拉起 sherpa-onnx 服务（幂等），
+             * 不依赖任何 IPC 命令，避免命令未注册时静默失败。 */
+            if volcengine_asr::local_provider_prefs().is_some() {
+                std::thread::spawn(|| {
+                    if let Err(error) = local_asr::ensure_service() {
+                        eprintln!("[local-asr] 启动失败：{error}");
+                    }
+                });
+            }
             if cfg!(feature = "composer-diagnostic") {
                 app.manage(program_autostart::ProgramAutostartState::unavailable());
                 // No auto-connect, no credential reads/migrations, no audio,
