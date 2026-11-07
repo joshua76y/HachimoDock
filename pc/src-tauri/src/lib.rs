@@ -155,6 +155,7 @@ mod appearance_recovery_ipc;
 mod voice_chat_settings;
 mod local_asr;
 mod prompt_sounds;
+mod voice_wifi;
 mod volcengine_asr;
 
 use serde::{Deserialize, Serialize};
