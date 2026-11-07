@@ -43,6 +43,7 @@ idf_component_register(
     # them from the image; the metric-columns gate still reads pet_p4_font_cn.c.
     "pet_p4_font_cn_a4.c"
     "pet_p4_font_cn_l2.c"
+    "pet_p4_sound_catalog.c"
     "pet_p4_font_bitmap.c"
     "pet_p4_bubble_pixels.c"
     "pet_p4_game.c"
