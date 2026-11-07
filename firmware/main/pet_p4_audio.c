@@ -1,6 +1,7 @@
 #include "pet_p4_audio_patch.h"
 #include "pet_p4_audio.h"
 #include "pet_p4_voice_ptt.h"
+#include "pet_p4_voice_wifi.h"
 #include "pet_p4_audio_volume.h"
 #include "pet_p4_fs_activity.h"
 #include "pet_p4_instrument_core.h"
@@ -437,6 +438,8 @@ static void send_audio_begin(const char *session_id, bool session_queue_empty, c
   send_topic("audio/begin", payload);
 }
 
+static bool s_wifi_tried;
+
 static bool send_audio_chunk(
   const char *session_id,
   uint32_t sequence,
@@ -450,6 +453,15 @@ static bool send_audio_chunk(
    * 只在 voice_ptt 绑定的本地会话区间生效，不影响 conversation。 */
   if (pet_p4_voice_ptt_capturing()) {
     pet_p4_voice_ptt_feed(pcm, pcm_len);
+    return true;
+  }
+  /* 第二条通路：Wi-Fi 裸 PCM。没配主机地址时保持原样走 USB。 */
+  if (!pet_p4_voice_wifi_active() && !s_wifi_tried) {
+    s_wifi_tried = true;
+    pet_p4_voice_wifi_start_configured();
+  }
+  if (pet_p4_voice_wifi_active()) {
+    pet_p4_voice_wifi_push(pcm, pcm_len);
     return true;
   }
   char encoded[((PET_P4_AUDIO_FRAME_BYTES + 2) / 3) * 4 + 1];

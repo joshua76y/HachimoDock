@@ -14,6 +14,7 @@
 #include "freertos/task.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
+#include "nvs.h"
 
 static const char *TAG = "voice-wifi";
 
@@ -75,4 +76,17 @@ void pet_p4_voice_wifi_stop(void) {
   close(s_sock);
   s_sock = -1;
   ESP_LOGI(TAG, "Wi-Fi 音频通道已关闭（EOF 通知 PC 结束本段）");
+}
+
+/* 按 NVS 里的 "voice_host" 自动连一次；未配置则返回 ESP_ERR_NOT_FOUND，
+ * 由调用方保持原来的 USB 路径。PC 连上设备后写这个键即可切换。 */
+esp_err_t pet_p4_voice_wifi_start_configured(void) {
+  nvs_handle_t handle;
+  if (nvs_open("petcfg", NVS_READONLY, &handle) != ESP_OK) return ESP_ERR_NOT_FOUND;
+  char host[32] = {0};
+  size_t len = sizeof(host);
+  const esp_err_t read = nvs_get_str(handle, "voice_host", host, &len);
+  nvs_close(handle);
+  if (read != ESP_OK || host[0] == '\0') return ESP_ERR_NOT_FOUND;
+  return pet_p4_voice_wifi_start(host, PET_P4_VOICE_WIFI_PORT);
 }

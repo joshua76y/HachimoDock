@@ -25,4 +25,7 @@ esp_err_t pet_p4_voice_wifi_push(const void *pcm, size_t bytes);
 /* 关闭连接 —— 对 PC 而言就是"这一段说完了"（EOF）。 */
 void pet_p4_voice_wifi_stop(void);
 
+/* 读 NVS("petcfg"/"voice_host") 自动连接；未配置返回 ESP_ERR_NOT_FOUND。 */
+esp_err_t pet_p4_voice_wifi_start_configured(void);
+
 bool pet_p4_voice_wifi_active(void);
