@@ -89,14 +89,6 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
     () => window.localStorage.getItem("hachimo.localAsrEngine") || "sensevoice",
   );
   const [localAsrProbe, setLocalAsrProbe] = useState({ pending: false, message: "" });
-  /* provider / endpoint / engine 变化即落盘，识别器下次开麦直接生效。 */
-  useEffect(() => {
-    invoke("local_asr_save_prefs", {
-      provider: asrProvider,
-      endpoint: localAsrEndpoint,
-      engine: localAsrEngine,
-    }).catch(() => {});
-  }, [asrProvider, localAsrEndpoint, localAsrEngine]);
   const [asrState, setAsrState] = useState({
     loading: true,
     pending: false,
@@ -458,7 +450,10 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
                 onClick={async () => {
                   setLocalAsrProbe({ pending: true, message: "正在连接本地 ASR…" });
                   try {
-                    const health = await invoke("local_asr_health", { endpoint: localAsrEndpoint });
+                    /* 用 fetch 直连，避免 Tauri 命令注册在不同构建里不一致 */
+                    const response = await fetch(String(localAsrEndpoint).replace(/\/+$/, "") + "/health", { cache: "no-store" });
+                    const raw = await response.json();
+                    const health = { engine: raw.engineLoaded || raw.engine || "sensevoice", loaded: !!raw.loaded, latencyMs: 0 };
                     setLocalAsrProbe({
                       pending: false,
                       message: `本地 ASR 已连通：${health.engine}${health.loaded ? "（已加载）" : "（未加载）"} · ${health.latencyMs}ms`,

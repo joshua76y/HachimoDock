@@ -499,6 +499,8 @@ impl StreamingSpeechRecognizer {
                         }
                         let wav = crate::local_asr::pcm_to_wav(&pcm, 16_000, 1);
                         let result = tokio::task::spawn_blocking(move || {
+                            /* 服务没起就顺手拉起来（幂等），避免"按了没反应" */
+                            let _ = crate::local_asr::ensure_ready(&endpoint);
                             crate::local_asr::transcribe_wav(
                                 &endpoint,
                                 &engine,

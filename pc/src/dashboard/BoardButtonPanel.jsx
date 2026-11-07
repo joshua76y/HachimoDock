@@ -24,6 +24,7 @@ const CONTROL_GROUP_META = {
   p4_sw1: { label: "1红", detail: "红色键（上）" },
   p4_sw2: { label: "2黄", detail: "黄色键（左）" },
   p4_sw3: { label: "3蓝", detail: "蓝色键（下）" },
+  p4_sw4: { label: "4绿", detail: "绿色键（右）· 按住说话" },
   p4_joystick: { label: "摇杆 K", detail: "四向与按下键 K" },
   legacy_encoder: { label: "前方旋钮", detail: "旋转与按压" },
 };
@@ -276,6 +277,7 @@ export default function BoardButtonPanel({
                     ["p4_sw1", "p4_sw1_short", 84, "1红"],
                     ["p4_sw2", "p4_sw2_short", 150, "2黄"],
                     ["p4_sw3", "p4_sw3_short", 216, "3蓝"],
+                    ["p4_sw4", "p4_sw4_short", 282, "4绿"],
                   ].map(([controlId, activeActionId, x, label]) => (
                     <g
                       key={controlId}
