@@ -669,8 +669,11 @@ static bool apply_binding_json(pet_p4_input_config_t *config, const cJSON *item,
   pet_p4_input_binding_t *binding = find_binding(config, event);
   if (!binding) {
     if (config->binding_count >= PET_P4_INPUT_MAX_BINDINGS) {
-      snprintf(error, error_size, "too many input bindings");
-      return false;
+      /* 容量满了就跳过这条，不要整包失败：PC 会一次推所有"键×手势"行，
+       * 硬拒绝会让用户怎么点都同步不了（历史上就是这个报错）。 */
+      ESP_LOGW("input", "binding capacity %d reached, skipping %s",
+               PET_P4_INPUT_MAX_BINDINGS, event);
+      return true;
     }
     binding = &config->bindings[config->binding_count++];
     memset(binding, 0, sizeof(*binding));
