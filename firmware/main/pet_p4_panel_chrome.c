@@ -304,7 +304,28 @@ static void redraw(const char *clock, const char *date, const char *net,
    * （中性灰），B=BOOT（中性灰）。框内键名、右侧用途 + 实际 GPIO 号，
    * 按下时方框反白。 */
   static const char *const labels[] = {"1", "2", "3", "4", "K", "B"};
-  static const char *const names[] = {"确认", "组件", "返回", "录音", "确认", "—"};
+  /* 侧栏用途跟着设备当前绑定走，不再写死 —— 同步配置后这里立刻变化。 */
+  static const char *const key_events[] = {
+    "button.1.short_press", "button.2.short_press", "button.3.short_press",
+    "button.4.hold", "button.k.short_press", "button.b.short_press",
+  };
+  static const char *const key_default_names[] = {"确认", "组件", "返回", "录音", "确认", "—"};
+  const char *names[6];
+  for (int i = 0; i < 6; i += 1) {
+    char action[PET_P4_INPUT_ACTION_MAX] = {0};
+    names[i] = key_default_names[i];
+    if (pet_p4_input_action_for(key_events[i], action, sizeof(action))) {
+      if (!strcmp(action, "page_enter")) names[i] = "确认";
+      else if (!strcmp(action, "component_center")) names[i] = "组件";
+      else if (!strcmp(action, "page_back")) names[i] = "返回";
+      else if (!strcmp(action, "voice_ptt")) names[i] = "录音";
+      else if (!strcmp(action, "realtime_chat")) names[i] = "对话";
+      else if (!strcmp(action, "session_next")) names[i] = "下一个";
+      else if (!strcmp(action, "session_previous")) names[i] = "上一个";
+      else if (!strcmp(action, "disabled")) names[i] = "—";
+      else names[i] = "已绑";
+    }
+  }
   static const char *const gpios[] = {"29", "30", "25", "24", "28", "35"};
   static const uint16_t colors[] = {
     C_KEY_RED, C_KEY_YELLOW, C_KEY_BLUE, C_KEY_GREEN, C_KEY_NEUTRAL, C_KEY_NEUTRAL

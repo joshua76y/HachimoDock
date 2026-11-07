@@ -75,3 +75,6 @@ void pet_p4_input_get_joystick_snapshot(pet_p4_input_joystick_snapshot_t *snapsh
 #ifdef __cplusplus
 }
 #endif
+
+/* 查询某事件当前绑定的动作名（未绑定返回 false）。侧栏用它显示真实配置。 */
+bool pet_p4_input_action_for(const char *event, char *out, size_t out_size);

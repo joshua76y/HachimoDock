@@ -638,6 +638,16 @@ static void load_persisted_config(void) {
   }
 }
 
+static pet_p4_input_binding_t *find_binding(pet_p4_input_config_t *config, const char *event);
+
+bool pet_p4_input_action_for(const char *event, char *out, size_t out_size) {
+  if (!event || !out || out_size == 0) return false;
+  const pet_p4_input_binding_t *binding = find_binding(&g_config, event);
+  if (!binding) return false;
+  copy_text(out, out_size, binding->action);
+  return true;
+}
+
 static pet_p4_input_binding_t *find_binding(pet_p4_input_config_t *config, const char *event) {
   if (!config || !event) return NULL;
   for (uint32_t i = 0; i < config->binding_count; i += 1) {
