@@ -4725,7 +4725,43 @@ struct ButtonConfigBinding {
 fn is_allowed_button_config_event(event: &str) -> bool {
     matches!(
         event,
-        "button.encoder.short_press"
+        "button.1.short_press"
+            | "button.1.long_press"
+            | "button.1.hold"
+            | "button.2.short_press"
+            | "button.2.long_press"
+            | "button.2.hold"
+            | "button.3.short_press"
+            | "button.3.long_press"
+            | "button.3.hold"
+            | "button.4.short_press"
+            | "button.4.long_press"
+            | "button.4.hold"
+            | "button.k.short_press"
+            | "button.k.long_press"
+            | "button.k.hold"
+            | "button.b.short_press"
+            | "button.b.long_press"
+            | "button.b.hold"
+            | "button.encoder.short_press"
+            | "button.1.short_press"
+            | "button.1.long_press"
+            | "button.1.hold"
+            | "button.2.short_press"
+            | "button.2.long_press"
+            | "button.2.hold"
+            | "button.3.short_press"
+            | "button.3.long_press"
+            | "button.3.hold"
+            | "button.4.short_press"
+            | "button.4.long_press"
+            | "button.4.hold"
+            | "button.k.short_press"
+            | "button.k.long_press"
+            | "button.k.hold"
+            | "button.b.short_press"
+            | "button.b.long_press"
+            | "button.b.hold"
             | "button.encoder.long_press"
             | "knob.rotate_cw / knob.rotate_ccw"
             | "screen.region.tap"
@@ -11486,6 +11522,38 @@ pub fn run() {
         .setup(move |app| {
             /* 本地 ASR：客户端启动即在后台拉起 sherpa-onnx 服务（幂等），
              * 不依赖任何 IPC 命令，避免命令未注册时静默失败。 */
+            /* Wi-Fi 音频（TCP 8898）：与 USB 并行的第二条通路。收到一整段
+             * PCM 后用同一个本地 ASR 识别，结果先落盘便于自检。 */
+            {
+                let receiver = voice_wifi::VoiceWifiReceiver::start(
+                    voice_wifi::VOICE_WIFI_PORT,
+                    |pcm: Vec<u8>| {
+                        let wav = local_asr::pcm_to_wav(
+                            &pcm,
+                            voice_wifi::VOICE_WIFI_RATE,
+                            1,
+                        );
+                        let _ = local_asr::ensure_ready(local_asr::DEFAULT_ENDPOINT);
+                        let text = match local_asr::transcribe_wav(
+                            local_asr::DEFAULT_ENDPOINT,
+                            local_asr::DEFAULT_ENGINE,
+                            &wav,
+                            std::time::Duration::from_secs(20),
+                        ) {
+                            Ok(transcript) => transcript.text,
+                            Err(error) => format!("ERR {error}"),
+                        };
+                        let _ = std::fs::write(
+                            "/tmp/hachimo-wifi-asr.log",
+                            format!("{text}\n"),
+                        );
+                    },
+                );
+                match receiver {
+                    Ok(receiver) => std::mem::forget(receiver),
+                    Err(error) => eprintln!("[voice-wifi] {error}"),
+                }
+            }
             if volcengine_asr::local_provider_prefs().is_some() {
                 std::thread::spawn(|| {
                     if let Err(error) = local_asr::ensure_service() {
