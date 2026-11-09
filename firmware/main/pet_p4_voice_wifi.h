@@ -28,4 +28,7 @@ void pet_p4_voice_wifi_stop(void);
 /* 读 NVS("petcfg"/"voice_host") 自动连接；未配置返回 ESP_ERR_NOT_FOUND。 */
 esp_err_t pet_p4_voice_wifi_start_configured(void);
 
+/* 记录 PC 地址（TCP 3333 的连接方），供无人配置时回退。 */
+void pet_p4_voice_wifi_note_host(const char *host);
+
 bool pet_p4_voice_wifi_active(void);

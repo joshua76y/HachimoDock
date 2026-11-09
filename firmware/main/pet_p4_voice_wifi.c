@@ -19,6 +19,7 @@
 static const char *TAG = "voice-wifi";
 
 static int s_sock = -1;
+static char s_peer_host[32];   /* 最近一次连上来的 PC 地址 */
 
 esp_err_t pet_p4_voice_wifi_start(const char *host, uint16_t port) {
   if (!host || !*host) return ESP_ERR_INVALID_ARG;
@@ -80,6 +81,14 @@ void pet_p4_voice_wifi_stop(void) {
 
 /* 按 NVS 里的 "voice_host" 自动连一次；未配置则返回 ESP_ERR_NOT_FOUND，
  * 由调用方保持原来的 USB 路径。PC 连上设备后写这个键即可切换。 */
+/* 记录 PC 的地址：TCP 3333 的连接方就是主机，拔掉 USB 时音频直接推给它，
+ * 不需要用户手填 IP。 */
+void pet_p4_voice_wifi_note_host(const char *host) {
+  if (!host || !*host) return;
+  strncpy(s_peer_host, host, sizeof(s_peer_host) - 1);
+  s_peer_host[sizeof(s_peer_host) - 1] = '\0';
+}
+
 esp_err_t pet_p4_voice_wifi_start_configured(void) {
   nvs_handle_t handle;
   if (nvs_open("petcfg", NVS_READONLY, &handle) != ESP_OK) return ESP_ERR_NOT_FOUND;
@@ -87,6 +96,10 @@ esp_err_t pet_p4_voice_wifi_start_configured(void) {
   size_t len = sizeof(host);
   const esp_err_t read = nvs_get_str(handle, "voice_host", host, &len);
   nvs_close(handle);
-  if (read != ESP_OK || host[0] == '\0') return ESP_ERR_NOT_FOUND;
+  if (read != ESP_OK || host[0] == '\0') {
+    /* 没写 NVS 就用最近连上来的 PC 地址 */
+    if (s_peer_host[0] == '\0') return ESP_ERR_NOT_FOUND;
+    return pet_p4_voice_wifi_start(s_peer_host, PET_P4_VOICE_WIFI_PORT);
+  }
   return pet_p4_voice_wifi_start(host, PET_P4_VOICE_WIFI_PORT);
 }

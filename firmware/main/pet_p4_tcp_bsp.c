@@ -26,6 +26,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "pet_p4_voice_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lwip/sockets.h"
@@ -178,7 +179,16 @@ static void tcp_listener_task(void *arg) {
   }
   ESP_LOGI(TAG, "listening :%d (route A)", PET_P4_TCP_PORT);
   while (true) {
-    int fd = accept(listener, NULL, NULL);
+    struct sockaddr_in peer = {0};
+    socklen_t peer_len = sizeof(peer);
+    int fd = accept(listener, (struct sockaddr *) &peer, &peer_len);
+    if (fd >= 0 && peer.sin_family == AF_INET) {
+      char peer_ip[32];
+      inet_ntoa_r(peer.sin_addr, peer_ip, sizeof(peer_ip));
+      /* 记住 PC 地址：拔掉 USB 后 Wi-Fi 音频直接推给它 */
+      pet_p4_voice_wifi_note_host(peer_ip);
+      ESP_LOGI(TAG, "client %s connected", peer_ip);
+    }
     if (fd < 0) {
       vTaskDelay(pdMS_TO_TICKS(200));
       continue;
