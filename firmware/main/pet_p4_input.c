@@ -606,7 +606,7 @@ static esp_err_t persist_config(const pet_p4_input_config_t *config) {
 
 static void load_persisted_config(void) {
   nvs_handle_t handle;
-  pet_p4_input_config_t stored;
+  static pet_p4_input_config_t stored;   /* 静态：结构随 MAX_BINDINGS 增长，不能放栈上 */
   size_t size = sizeof(stored);
   load_default_config(&g_config);
   if (nvs_open(PET_P4_INPUT_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) return;
@@ -1161,7 +1161,7 @@ esp_err_t pet_p4_input_init(void) {
 }
 
 esp_err_t pet_p4_input_reset_config(void) {
-  pet_p4_input_config_t defaults;
+  static pet_p4_input_config_t defaults; /* 静态：同上 */
   load_default_config(&defaults);
   esp_err_t err = persist_config(&defaults);
   if (err == ESP_OK) g_config = defaults;
