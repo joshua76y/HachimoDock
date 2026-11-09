@@ -89,6 +89,23 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
     () => window.localStorage.getItem("hachimo.localAsrEngine") || "sensevoice",
   );
   const [localAsrProbe, setLocalAsrProbe] = useState({ pending: false, message: "" });
+  /* 语音合成来源：火山云端 / 本地 macOS 语音（say），与 ASR 解耦，各配各的。 */
+  const [ttsProvider, setTtsProvider] = useState(
+    () => window.localStorage.getItem("hachimo.ttsProvider") || "volcengine",
+  );
+  const [ttsVoice, setTtsVoice] = useState(
+    () => window.localStorage.getItem("hachimo.ttsVoice") || "Tingting",
+  );
+  const [ttsVoices, setTtsVoices] = useState([]);
+  const [ttsProbe, setTtsProbe] = useState({ pending: false, message: "" });
+
+  useEffect(() => {
+    invoke("local_tts_voices").then((list) => setTtsVoices(Array.isArray(list) ? list : [])).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    invoke("local_tts_save_prefs", { provider: ttsProvider, voice: ttsVoice }).catch(() => {});
+  }, [ttsProvider, ttsVoice]);
   const [asrState, setAsrState] = useState({
     loading: true,
     pending: false,
@@ -409,6 +426,77 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
           <details><summary>使用前需要什么</summary><p>请保持设备连接电脑，并让 Pet Manager 持续运行。默认使用豆包 ASR 2.0 和 TTS 2.0，请为该 Key 开通对应服务。</p></details>
         </div>
         <div className="api-settings__form api-settings__form--speech">
+          <div className="ui-field" role="radiogroup" aria-label="语音合成来源">
+            <span className="ui-field__label">语音合成来源</span>
+            <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                type="radio"
+                name="tts-provider"
+                checked={ttsProvider === "volcengine"}
+                onChange={() => {
+                  setTtsProvider("volcengine");
+                  window.localStorage.setItem("hachimo.ttsProvider", "volcengine");
+                }}
+              />
+              <span>火山引擎（与识别共用 Key）</span>
+            </label>
+            <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                type="radio"
+                name="tts-provider"
+                checked={ttsProvider === "local"}
+                onChange={() => {
+                  setTtsProvider("local");
+                  window.localStorage.setItem("hachimo.ttsProvider", "local");
+                }}
+              />
+              <span>本地 macOS 语音（免 Key，离线）</span>
+            </label>
+          </div>
+          {ttsProvider === "local" && (
+            <>
+              <label className="ui-field" htmlFor="api-settings-tts-voice">
+                <span className="ui-field__label">系统音色</span>
+                <select
+                  id="api-settings-tts-voice"
+                  className="ui-control"
+                  value={ttsVoice}
+                  onChange={(event) => {
+                    setTtsVoice(event.target.value);
+                    window.localStorage.setItem("hachimo.ttsVoice", event.target.value);
+                  }}
+                >
+                  {(ttsVoices.length ? ttsVoices : ["Tingting"]).map((voice) => (
+                    <option key={voice} value={voice}>{voice}</option>
+                  ))}
+                </select>
+              </label>
+              <button
+                type="button"
+                className="ui-button"
+                disabled={ttsProbe.pending}
+                onClick={async () => {
+                  setTtsProbe({ pending: true, message: "正在合成…" });
+                  try {
+                    const result = await invoke("local_tts_preview", {
+                      text: "你好，我是本地语音合成测试。",
+                      voice: ttsVoice,
+                    });
+                    setTtsProbe({
+                      pending: false,
+                      message: `合成成功：${result.voice} · ${result.bytes} 字节 · ${result.ms}ms`,
+                    });
+                  } catch (error) {
+                    setTtsProbe({ pending: false, message: `合成失败：${String(error)}` });
+                  }
+                }}
+              >
+                试听本地语音
+              </button>
+              {ttsProbe.message && <p className="usage-help__notice">{ttsProbe.message}</p>}
+            </>
+          )}
+
           <div className="ui-field" role="radiogroup" aria-label="语音识别来源">
             <span className="ui-field__label">语音识别来源</span>
             <label style={{ display: "flex", gap: 8, alignItems: "center" }}>

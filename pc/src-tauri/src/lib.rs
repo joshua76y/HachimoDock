@@ -11702,6 +11702,7 @@ pub fn run() {
             local_asr::local_asr_save_prefs,
             local_tts::local_tts_voices,
             local_tts::local_tts_preview,
+            local_tts::local_tts_save_prefs,
             reference_image::reference_image_mount,
             reference_image::reference_image_action,
             desktop_window::set_exit_reasons,

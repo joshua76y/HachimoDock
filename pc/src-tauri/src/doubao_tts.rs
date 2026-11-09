@@ -360,6 +360,20 @@ impl DoubaoTtsClient {
         if clean.is_empty() {
             return Ok(0);
         }
+        /* 选了本地 TTS 就不走云端：用 macOS say 合成，直接喂 PCM。
+         * 与火山共用同一入口，调用方零改动。 */
+        if crate::local_tts::provider_is_local() {
+            let result = crate::local_tts::synthesize(
+                clean,
+                Some(crate::local_tts::preferred_voice().as_str()),
+                None,
+            )?;
+            let pcm = &result.wav[44..];
+            for chunk in pcm.chunks(1920) {
+                on_pcm(chunk);
+            }
+            return Ok(pcm.len());
+        }
         if self.cfg.uses_http_stream() {
             // Context voices explicitly reject the bidirectional protocol. Never retry
             // after audio has been emitted: that would repeat speech on the device.
@@ -593,5 +607,31 @@ mod tests {
         assert_eq!(cfg.speaker, "zh_female_vv_uranus_bigtts");
         assert_eq!(cfg.resource_id, "seed-tts-2.0");
         assert_eq!(redact(&"中文".repeat(500), "").chars().count(), 400);
+    }
+}
+
+#[cfg(test)]
+mod local_tts_bridge_tests {
+    use super::*;
+
+    /// 把偏好切成本地 TTS，验证 synthesize 真的产出 PCM（不走网络）。
+    #[test]
+    fn local_provider_emits_pcm_without_network() {
+        let home = std::env::var("HOME").expect("home");
+        let path = std::path::Path::new(&home).join(".hachimo-local-asr.json");
+        let backup = std::fs::read_to_string(&path).ok();
+        std::fs::write(&path, r#"{"ttsProvider":"local","localTtsVoice":"Tingting"}"#).unwrap();
+
+        let mut client = DoubaoTtsClient::new(DoubaoTtsConfig::new("", "x", "", 1.0, ""));
+        let mut total = 0usize;
+        let result = tauri::async_runtime::block_on(
+            client.synthesize("本地语音合成测试", |chunk| total += chunk.len()),
+        );
+
+        if let Some(previous) = backup {
+            std::fs::write(&path, previous).ok();
+        }
+        let written = result.expect("local tts");
+        assert!(written > 0 && total == written, "应当产出 PCM 字节");
     }
 }
