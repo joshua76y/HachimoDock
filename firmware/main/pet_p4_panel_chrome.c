@@ -305,9 +305,10 @@ static void redraw(const char *clock, const char *date, const char *net,
    * 按下时方框反白。 */
   static const char *const labels[] = {"1", "2", "3", "4", "K", "B"};
   /* 侧栏用途跟着设备当前绑定走，不再写死 —— 同步配置后这里立刻变化。 */
+  /* 侧栏只反映"短按"绑定：一行一个键，不再混用手势，避免看起来对不上。 */
   static const char *const key_events[] = {
     "button.1.short_press", "button.2.short_press", "button.3.short_press",
-    "button.4.hold", "button.k.short_press", "button.b.short_press",
+    "button.4.short_press", "button.k.short_press", "button.b.short_press",
   };
   static const char *const key_default_names[] = {"确认", "组件", "返回", "录音", "确认", "—"};
   const char *names[6];
