@@ -4515,6 +4515,30 @@ fn resolve_audio_bridge_pc_ip(
         .ok_or_else(|| "无法自动获取本机 LAN IP, 请显式传 pcIp".to_string())
 }
 
+#[cfg(test)]
+mod voice_button_tests {
+    use super::normalize_voice_button;
+
+    #[test]
+    fn accepts_the_four_green_key() {
+        // 4绿 是 P4 的语音键，前端发 sw4.hold，必须放行
+        assert_eq!(normalize_voice_button(Some("sw4.hold".into())).unwrap(), "sw4.hold");
+        assert_eq!(normalize_voice_button(Some("button.4.hold".into())).unwrap(), "sw4.hold");
+        assert_eq!(normalize_voice_button(Some("SW4-HOLD".into())).unwrap(), "sw4.hold");
+    }
+
+    #[test]
+    fn still_accepts_the_legacy_targets() {
+        assert_eq!(normalize_voice_button(Some("sw1.hold".into())).unwrap(), "sw1.hold");
+        assert_eq!(normalize_voice_button(None).unwrap(), "encoder_button.hold");
+    }
+
+    #[test]
+    fn rejects_unknown_values() {
+        assert!(normalize_voice_button(Some("sw9.hold".into())).is_err());
+    }
+}
+
 fn normalize_voice_button(input: Option<String>) -> Result<String, String> {
     let value = input.unwrap_or_else(|| "encoder_button.hold".to_string());
     let normalized = value.trim().replace('-', "_").to_lowercase();
@@ -4528,8 +4552,12 @@ fn normalize_voice_button(input: Option<String>) -> Result<String, String> {
         "sw1" | "sw1.hold" | "button.sw1.hold" => Ok("sw1.hold".to_string()),
         "sw2" | "sw2.hold" | "button.sw2.hold" => Ok("sw2.hold".to_string()),
         "sw3" | "sw3.hold" | "button.sw3.hold" => Ok("sw3.hold".to_string()),
+        /* 4绿：P4 上的语音键就是它，按住说话 */
+        "sw4" | "sw4.hold" | "sw4_hold" | "button.sw4.hold" | "button.4.hold" | "button.4_hold" => {
+            Ok("sw4.hold".to_string())
+        }
         _ => Err(format!(
-            "invalid voiceButton '{value}', expected encoder_button.hold or sw1/sw2/sw3.hold"
+            "invalid voiceButton '{value}', expected encoder_button.hold or sw1/sw2/sw3/sw4.hold"
         )),
     }
 }
