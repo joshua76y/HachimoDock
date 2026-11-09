@@ -311,11 +311,23 @@ static void redraw(const char *clock, const char *date, const char *net,
     "button.4.short_press", "button.k.short_press", "button.b.short_press",
   };
   static const char *const key_default_names[] = {"确认", "组件", "返回", "录音", "确认", "—"};
+  /* 短按没绑定时，用"按住"补一条（4绿 的语音就在按住上），避免整行空白。 */
+  static const char *const key_hold_events[] = {
+    "button.1.hold", "button.2.hold", "button.3.hold",
+    "button.4.hold", "button.k.hold", "button.b.hold",
+  };
   const char *names[6];
   for (int i = 0; i < 6; i += 1) {
     char action[PET_P4_INPUT_ACTION_MAX] = {0};
     names[i] = key_default_names[i];
-    if (pet_p4_input_action_for(key_events[i], action, sizeof(action))) {
+    bool has_short = pet_p4_input_action_for(key_events[i], action, sizeof(action))
+                     && strcmp(action, "disabled") != 0;
+    if (!has_short) {
+      memset(action, 0, sizeof(action));
+      has_short = pet_p4_input_action_for(key_hold_events[i], action, sizeof(action))
+                  && strcmp(action, "disabled") != 0;
+    }
+    if (has_short) {
       if (!strcmp(action, "page_enter")) names[i] = "确认";
       else if (!strcmp(action, "component_center")) names[i] = "组件";
       else if (!strcmp(action, "page_back")) names[i] = "返回";
