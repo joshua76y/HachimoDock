@@ -154,6 +154,7 @@ mod usb_serial;
 mod appearance_recovery_ipc;
 mod voice_chat_settings;
 mod local_asr;
+mod local_tts;
 mod prompt_sounds;
 mod voice_wifi;
 mod volcengine_asr;
@@ -11699,6 +11700,8 @@ pub fn run() {
             appearance_recovery_ipc::usb_reconcile_appearance_unknown,
             local_asr::local_asr_health,
             local_asr::local_asr_save_prefs,
+            local_tts::local_tts_voices,
+            local_tts::local_tts_preview,
             reference_image::reference_image_mount,
             reference_image::reference_image_action,
             desktop_window::set_exit_reasons,
