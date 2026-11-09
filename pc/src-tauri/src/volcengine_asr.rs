@@ -679,6 +679,26 @@ impl Drop for StreamingSpeechRecognizer {
 }
 
 pub fn settings_status() -> Result<DeviceAsrSettingsStatus, String> {
+    /* 选了本地引擎就不该再要求火山 Key —— 直接报"已就绪"，语音通道的前置检查
+     * 才不会因为云端凭据缺失而拦住 PTT。 */
+    if local_provider_prefs().is_some() {
+        return Ok(public_status(
+            true,
+            "local".to_string(),
+            "local",
+            "本地 ASR（sherpa-onnx）已启用",
+        ));
+    }
+    /* 选了本地引擎就不该再要求火山 Key —— 直接报"已就绪"，语音通道的前置检查
+     * 才不会因为云端凭据缺失而拦住 PTT。 */
+    if local_provider_prefs().is_some() {
+        return Ok(public_status(
+            true,
+            "local".to_string(),
+            "local",
+            "本地 ASR（sherpa-onnx）已启用",
+        ));
+    }
     if let Some(config) = runtime_config_from_env() {
         return Ok(public_status(
             true,

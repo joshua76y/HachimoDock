@@ -226,12 +226,26 @@ pub fn local_asr_save_prefs(
         .map_err(|e| format!("保存语音识别偏好失败：{e}"))
 }
 
-/* 本地 ASR 服务的部署位置（macOS 开发机）。移植到别的机器只改这三行。 */
+/* 本地 ASR 服务的部署位置。放在 ~/.hachimo 下，避免 macOS TCC 对
+ * "文稿" 目录的授权拦截（脚本与模型都在 Documents 下会导致 spawn 失败）。 */
 const SERVICE_PYTHON: &str = "/opt/homebrew/opt/python@3.14/bin/python3.14";
-const SERVICE_SCRIPT: &str =
-    "/Volumes/MACdata/Docs/Documents/WorkBuddy/RLCD/mac/voice/stt_server.py";
-const SERVICE_MODEL_DIR: &str =
-    "/Volumes/MACdata/Docs/.vibebuddy/models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17";
+const SERVICE_DIR: &str = ".hachimo";
+const SERVICE_SCRIPT_NAME: &str = "stt_server.py";
+const SERVICE_MODEL_NAME: &str = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17";
+
+fn home_dir() -> Result<std::path::PathBuf, String> {
+    std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .map_err(|_| "无法定位 HOME 目录".to_string())
+}
+
+fn service_script() -> Result<std::path::PathBuf, String> {
+    Ok(home_dir()?.join(SERVICE_DIR).join(SERVICE_SCRIPT_NAME))
+}
+
+fn service_model_dir() -> Result<std::path::PathBuf, String> {
+    Ok(home_dir()?.join(SERVICE_DIR).join("models").join(SERVICE_MODEL_NAME))
+}
 
 /// 确保本地 ASR 服务在跑：已经在跑就复用，否则自己拉起来（不占终端、
 /// 不依赖 launchd）。返回 true 表示本次是新启动的。
@@ -239,16 +253,18 @@ pub fn ensure_service() -> Result<bool, String> {
     if health(DEFAULT_ENDPOINT, Duration::from_millis(900)).is_ok() {
         return Ok(false);
     }
+    let script = service_script()?;
+    let model_dir = service_model_dir()?;
     std::process::Command::new(SERVICE_PYTHON)
-        .arg(SERVICE_SCRIPT)
+        .arg(&script)
         .env("VIBEBUDDY_STT_PORT", "8900")
-        .env("VIBEBUDDY_SENSEVOICE_DIR", SERVICE_MODEL_DIR)
+        .env("VIBEBUDDY_SENSEVOICE_DIR", &model_dir)
         .env("VIBEBUDDY_STT_LOG", "/tmp/hachimo-stt.log")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .map_err(|e| format!("启动本地 ASR 服务失败：{e}（检查 {SERVICE_PYTHON} / {SERVICE_SCRIPT}）"))?;
+        .map_err(|e| format!("启动本地 ASR 服务失败：{e}（检查 {SERVICE_PYTHON} / {}）", script.display()))?;
     Ok(true)
 }
 

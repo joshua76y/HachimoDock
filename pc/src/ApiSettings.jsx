@@ -268,6 +268,31 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
   };
 
   const saveAndTestAsr = async () => {
+    /* 本地 ASR 不需要火山 Key：直接探一次本地服务就算"保存并测试"。 */
+    if (asrProvider === "local") {
+      setAsrState((current) => ({ ...current, pending: true, tone: "muted", message: "正在测试本地 ASR…" }));
+      const started = performance.now();
+      try {
+        const response = await fetch(`${String(localAsrEndpoint).replace(/\/+$/, "")}/health`, { cache: "no-store" });
+        const health = await response.json();
+        setAsrState((current) => ({
+          ...current,
+          configured: true,
+          pending: false,
+          tone: "success",
+          message: `本地 ASR 已就绪：${health.engineLoaded || health.engine || "sensevoice"}${
+            health.loaded ? "（已加载）" : "（未加载）"} · ${Math.round(performance.now() - started)}ms`,
+        }));
+      } catch (error) {
+        setAsrState((current) => ({
+          ...current,
+          pending: false,
+          tone: "error",
+          message: `本地 ASR 连接失败：${String(error)}`,
+        }));
+      }
+      return;
+    }
     if (!asrState.configured && !asrApiKey.trim()) {
       setAsrState((current) => ({
         ...current,
