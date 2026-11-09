@@ -43,6 +43,7 @@
 #include <string.h>
 
 #include "pet_p4_sound_catalog.h"
+#include "freertos/queue.h"
 #include "cJSON.h"
 #include "pet_p4_json_source.h"
 #include "mbedtls/base64.h"
@@ -499,6 +500,60 @@ static void send_topic_payload(pet_p4_send_line_fn send_line, void *ctx, const c
   if (line && send_line) send_line(line, ctx);
   cJSON_free(line);
   cJSON_Delete(root);
+}
+
+/* ── 提示音上传 worker：Flash 写入不放在协议任务里 ───────────────── */
+typedef struct { uint8_t kind; uint8_t *data; size_t len; char event[24]; } sound_job_t;
+static QueueHandle_t s_sound_q;
+static FILE *s_sound_file;
+static size_t s_sound_written;
+
+static void sound_upload_task(void *arg) {
+  (void) arg;
+  sound_job_t job;
+  for (;;) {
+    if (xQueueReceive(s_sound_q, &job, portMAX_DELAY) != pdTRUE) continue;
+    if (job.kind == 0) {
+      if (s_sound_file) { fclose(s_sound_file); s_sound_file = NULL; }
+      char path[96];
+      if (pet_p4_sound_catalog_custom_path(job.event, path, sizeof(path))) {
+        s_sound_file = fopen(path, "wb");
+        s_sound_written = 0;
+      }
+    } else if (job.kind == 1) {
+      if (s_sound_file && job.data && fwrite(job.data, 1, job.len, s_sound_file) == job.len) {
+        s_sound_written += job.len;
+      }
+    } else if (job.kind == 2) {
+      if (s_sound_file) { fflush(s_sound_file); fclose(s_sound_file); s_sound_file = NULL; }
+    }
+    if (job.data) free(job.data);
+  }
+}
+
+static bool sound_enqueue(uint8_t kind, const char *event, const uint8_t *data, size_t len) {
+  if (!s_sound_q) {
+    s_sound_q = xQueueCreate(8, sizeof(sound_job_t));
+    if (!s_sound_q) return false;
+    if (xTaskCreate(sound_upload_task, "sound-up", 4096, NULL, 4, NULL) != pdPASS) {
+      vQueueDelete(s_sound_q); s_sound_q = NULL; return false;
+    }
+  }
+  sound_job_t job;
+  memset(&job, 0, sizeof(job));
+  job.kind = kind;
+  if (event) strncpy(job.event, event, sizeof(job.event) - 1);
+  if (data && len) {
+    job.data = (uint8_t *) malloc(len);
+    if (!job.data) return false;
+    memcpy(job.data, data, len);
+    job.len = len;
+  }
+  if (xQueueSend(s_sound_q, &job, pdMS_TO_TICKS(200)) != pdTRUE) {
+    if (job.data) free(job.data);
+    return false;
+  }
+  return true;
 }
 
 static void send_protocol_ack(
@@ -4138,46 +4193,26 @@ bool pet_p4_handle_line_with_reply(
   } else if (strcmp(topic, "sound/upload/begin") == 0
              || strcmp(topic, "sound/upload/chunk") == 0
              || strcmp(topic, "sound/upload/end") == 0) {
-    /* 三段式分块上传：/state 的请求体装不下几十 KB 的音频。 */
-    static FILE *upload_file;
-    static size_t upload_written;
-    static char upload_path[96];
+    const char *event = json_string(payload, "event");
+    const char *data = json_string(payload, "data");
     bool ok = true;
     if (strcmp(topic, "sound/upload/begin") == 0) {
-      const char *event = json_string(payload, "event");
-      if (upload_file) { fclose(upload_file); upload_file = NULL; }
-      ok = event && pet_p4_sound_catalog_custom_path(event, upload_path, sizeof(upload_path));
-      if (ok) {
-        upload_file = fopen(upload_path, "wb");
-        upload_written = 0;
-        ok = upload_file != NULL;
-      }
+      ok = event && *event && sound_enqueue(0, event, NULL, 0);
     } else if (strcmp(topic, "sound/upload/chunk") == 0) {
-      const char *data = json_string(payload, "data");
-      ok = upload_file && data && *data;
+      ok = data && *data;
       if (ok) {
         const size_t cap = strlen(data) * 3 / 4 + 8;
-        unsigned char *raw = (unsigned char *) malloc(cap);
+        uint8_t *raw = (uint8_t *) malloc(cap);
         size_t len = 0;
-        ok = raw && mbedtls_base64_decode(raw, cap, &len,
-               (const unsigned char *) data, strlen(data)) == 0;
-        if (ok) {
-          ok = fwrite(raw, 1, len, upload_file) == len;
-          if (ok) upload_written += len;
-        }
+        ok = raw && mbedtls_base64_decode(raw, cap, &len, (const unsigned char *) data, strlen(data)) == 0;
+        if (ok) ok = sound_enqueue(1, NULL, raw, len);
         free(raw);
       }
     } else {
-      ok = upload_file && upload_written > 44;
-      if (upload_file) {
-        fflush(upload_file);
-        fclose(upload_file);
-        upload_file = NULL;
-      }
+      ok = sound_enqueue(2, NULL, NULL, 0);
     }
     send_protocol_ack(send_line, ctx, topic, payload, ok,
-                      ok ? "ok" : "sound_upload_failed",
-                      ok ? "prompt sound stored" : "invalid event or payload");
+                      ok ? "ok" : "sound_upload_failed", ok ? "queued" : "enqueue failed");
     if (!ok) { cJSON_Delete(root); return false; }
   } else if (strcmp(topic, "sound/play") == 0) {
     /* {event} → 有自定义音就播，否则回落到内置 preset */
