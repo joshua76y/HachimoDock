@@ -153,6 +153,7 @@ mod device_voice_lifecycle;
 mod usb_serial;
 mod appearance_recovery_ipc;
 mod voice_chat_settings;
+mod llm_models;
 mod local_asr;
 mod local_tts;
 mod prompt_sounds;
@@ -11703,6 +11704,7 @@ pub fn run() {
             local_tts::local_tts_voices,
             local_tts::local_tts_preview,
             local_tts::local_tts_save_prefs,
+            llm_models::list_openai_models,
             reference_image::reference_image_mount,
             reference_image::reference_image_action,
             desktop_window::set_exit_reasons,

@@ -662,6 +662,33 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
               apiKey={voiceChat.llmApiKey} configured={!voiceChat.loading && voiceChat.llmConfigured}
               disabled={voiceChat.llmPending || voiceChat.loading} />
             <span id="api-settings-llm-model-help" className="muted small">可填写账号已开通的模型名称或接入点 ID；留空使用默认模型。</span>
+            <button
+              type="button"
+              className="ui-button"
+              disabled={voiceChat.llmPending || voiceChat.loading}
+              onClick={async () => {
+                setVoiceChat((current) => ({ ...current, llmTone: "muted", llmMessage: "正在获取模型列表…" }));
+                try {
+                  /* 走 Rust 侧请求：本地 OMLX / 云端都绕开 WebView 的 CORS */
+                  const result = await invoke("list_openai_models", {
+                    baseUrl: voiceChat.llmBaseUrl,
+                    /* OMLX 的本地令牌默认是 1234；用户填了就用用户的 */
+                    apiKey: voiceChat.llmApiKey || (voiceChat.llmProvider === "omlx" ? "1234" : null),
+                  });
+                  const first = result.models[0];
+                  setVoiceChat((current) => ({
+                    ...current,
+                    llmModel: current.llmModel || first,
+                    llmTone: "success",
+                    llmMessage: `获取到 ${result.models.length} 个模型（${result.ms}ms）：${result.models.slice(0, 3).join("、")}${result.models.length > 3 ? " …" : ""}`,
+                  }));
+                } catch (error) {
+                  setVoiceChat((current) => ({ ...current, llmTone: "error", llmMessage: `获取模型列表失败：${String(error)}` }));
+                }
+              }}
+            >
+              获取模型列表
+            </button>
           </label>
           <label className="ui-field" htmlFor="api-settings-llm-key">
             <span className="ui-field__label">API Key</span>
