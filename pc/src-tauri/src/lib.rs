@@ -5088,6 +5088,16 @@ fn send_button_config_and_wait_for_ack(
         "[button-config] sending topic={} requestId={}",
         topic, request_id
     );
+    /* 诊断：把实际下发的 payload 落盘，便于核对"界面改了但设备没变"。 */
+    let _ = std::fs::write(
+        "/tmp/hachimo-button-config.log",
+        format!(
+            "topic={}\nrequestId={}\npayload={}\n",
+            topic,
+            request_id,
+            serde_json::to_string_pretty(command_payload).unwrap_or_default()
+        ),
+    );
     let ack_receiver = register_button_config_ack_waiter(request_id)?;
     if let Err(error) = usb_manager.send_to_board(expected_board_device_id, topic, command_payload)
     {

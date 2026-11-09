@@ -98,7 +98,7 @@ import {
 export const VOICE_CONFIG_STORAGE_KEY = DEVICE_BUTTON_CONFIG_STORAGE_KEY;
 export const DEFAULT_VOICE_CONFIG = { enabled: true, trigger: "encoder_button.hold" };
 export const P4_RUNTIME_ID = "esp-p4";
-export const P4_DEFAULT_VOICE_TRIGGER = "sw1.hold";
+export const P4_DEFAULT_VOICE_TRIGGER = "sw4.hold";
 export const P4_DEFAULT_PROMPT = "继续当前任务并给出下一步。";
 
 export const DEFAULT_BUTTON_ACTIONS = {
@@ -175,14 +175,14 @@ const P4_CUSTOM_ACTION_OPTIONS = [
   "disabled",
 ];
 export const P4_BUTTON_CONTROL_ROWS = [
-  { id: "p4_sw1_short", controlId: "p4_sw1", label: "1红 短按", event: "button.sw1.short_press", defaultAction: "page_enter", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
-  { id: "p4_sw1_long", controlId: "p4_sw1", label: "1红 长按", event: "button.sw1.long_press", holdEvent: "button.sw1.hold", defaultAction: "disabled", voiceFallbackAction: "disabled", actionOptions: ["voice_ptt", ...P4_CUSTOM_ACTION_OPTIONS], supportsValue: true },
-  { id: "p4_sw2_short", controlId: "p4_sw2", label: "2黄 短按", event: "button.sw2.short_press", defaultAction: "component_center", defaultValue: P4_DEFAULT_PROMPT, actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
-  { id: "p4_sw2_long", controlId: "p4_sw2", label: "2黄 长按", event: "button.sw2.long_press", holdEvent: "button.sw2.hold", voiceTriggerId: "sw2.hold", defaultAction: "realtime_chat", voiceFallbackAction: "disabled", actionOptions: ["voice_ptt", ...P4_CUSTOM_ACTION_OPTIONS], supportsValue: true },
-  { id: "p4_sw3_short", controlId: "p4_sw3", label: "3蓝 短按", event: "button.sw3.short_press", defaultAction: "page_back", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
-  { id: "p4_sw3_long", controlId: "p4_sw3", label: "3蓝 长按", event: "button.sw3.long_press", holdEvent: "button.sw3.hold", voiceTriggerId: "sw3.hold", defaultAction: "disabled", voiceFallbackAction: "disabled", actionOptions: ["voice_ptt", ...P4_CUSTOM_ACTION_OPTIONS], supportsValue: true },
+  { id: "p4_sw1_short", controlId: "p4_sw1", label: "1红 短按", event: "button.1.short_press", defaultAction: "page_enter", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
+  { id: "p4_sw1_long", controlId: "p4_sw1", label: "1红 长按", event: "button.1.long_press", holdEvent: "button.1.hold", defaultAction: "disabled", voiceFallbackAction: "disabled", actionOptions: ["voice_ptt", ...P4_CUSTOM_ACTION_OPTIONS], supportsValue: true },
+  { id: "p4_sw2_short", controlId: "p4_sw2", label: "2黄 短按", event: "button.2.short_press", defaultAction: "component_center", defaultValue: P4_DEFAULT_PROMPT, actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
+  { id: "p4_sw2_long", controlId: "p4_sw2", label: "2黄 长按", event: "button.2.long_press", holdEvent: "button.2.hold", defaultAction: "realtime_chat", voiceFallbackAction: "disabled", actionOptions: ["voice_ptt", ...P4_CUSTOM_ACTION_OPTIONS], supportsValue: true },
+  { id: "p4_sw3_short", controlId: "p4_sw3", label: "3蓝 短按", event: "button.3.short_press", defaultAction: "page_back", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
+  { id: "p4_sw3_long", controlId: "p4_sw3", label: "3蓝 长按", event: "button.3.long_press", holdEvent: "button.3.hold", defaultAction: "disabled", voiceFallbackAction: "disabled", actionOptions: ["voice_ptt", ...P4_CUSTOM_ACTION_OPTIONS], supportsValue: true },
   { id: "p4_sw4_short", controlId: "p4_sw4", label: "4绿 短按", event: "button.4.short_press", defaultAction: "disabled", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
-  { id: "p4_sw4_hold", controlId: "p4_sw4", label: "4绿 按住", event: "button.4.hold", defaultAction: "voice_ptt", voiceFallbackAction: "disabled", actionOptions: ["voice_ptt", ...P4_CUSTOM_ACTION_OPTIONS], supportsValue: true },
+  { id: "p4_sw4_hold", controlId: "p4_sw4", label: "4绿 按住", event: "button.4.hold", voiceTriggerId: "sw4.hold", defaultAction: "voice_ptt", voiceFallbackAction: "disabled", actionOptions: ["voice_ptt", ...P4_CUSTOM_ACTION_OPTIONS], supportsValue: true },
   { id: "p4_joystick_up", controlId: "p4_joystick", label: "摇杆向上", event: "joystick.up", defaultAction: "session_previous", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
   { id: "p4_joystick_down", controlId: "p4_joystick", label: "摇杆向下", event: "joystick.down", defaultAction: "session_next", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
   { id: "p4_encoder_ccw", controlId: "p4_joystick", label: "摇杆向左", event: "knob.rotate_ccw", defaultAction: "session_previous", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
