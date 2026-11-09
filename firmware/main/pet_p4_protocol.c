@@ -42,6 +42,7 @@
 #include <stdatomic.h>
 #include <string.h>
 
+#include "pet_p4_sound_catalog.h"
 #include "cJSON.h"
 #include "pet_p4_json_source.h"
 #include "mbedtls/base64.h"
@@ -4134,6 +4135,64 @@ bool pet_p4_handle_line_with_reply(
       cJSON_Delete(root);
       return false;
     }
+  } else if (strcmp(topic, "sound/upload/begin") == 0
+             || strcmp(topic, "sound/upload/chunk") == 0
+             || strcmp(topic, "sound/upload/end") == 0) {
+    /* 三段式分块上传：/state 的请求体装不下几十 KB 的音频。 */
+    static FILE *upload_file;
+    static size_t upload_written;
+    static char upload_path[96];
+    bool ok = true;
+    if (strcmp(topic, "sound/upload/begin") == 0) {
+      const char *event = json_string(payload, "event");
+      if (upload_file) { fclose(upload_file); upload_file = NULL; }
+      ok = event && pet_p4_sound_catalog_custom_path(event, upload_path, sizeof(upload_path));
+      if (ok) {
+        upload_file = fopen(upload_path, "wb");
+        upload_written = 0;
+        ok = upload_file != NULL;
+      }
+    } else if (strcmp(topic, "sound/upload/chunk") == 0) {
+      const char *data = json_string(payload, "data");
+      ok = upload_file && data && *data;
+      if (ok) {
+        const size_t cap = strlen(data) * 3 / 4 + 8;
+        unsigned char *raw = (unsigned char *) malloc(cap);
+        size_t len = 0;
+        ok = raw && mbedtls_base64_decode(raw, cap, &len,
+               (const unsigned char *) data, strlen(data)) == 0;
+        if (ok) {
+          ok = fwrite(raw, 1, len, upload_file) == len;
+          if (ok) upload_written += len;
+        }
+        free(raw);
+      }
+    } else {
+      ok = upload_file && upload_written > 44;
+      if (upload_file) {
+        fflush(upload_file);
+        fclose(upload_file);
+        upload_file = NULL;
+      }
+    }
+    send_protocol_ack(send_line, ctx, topic, payload, ok,
+                      ok ? "ok" : "sound_upload_failed",
+                      ok ? "prompt sound stored" : "invalid event or payload");
+    if (!ok) { cJSON_Delete(root); return false; }
+  } else if (strcmp(topic, "sound/play") == 0) {
+    /* {event} → 有自定义音就播，否则回落到内置 preset */
+    const char *event = json_string(payload, "event");
+    bool ok = event && pet_p4_audio_prompt_play(event);
+    if (!ok && event) {
+      unsigned preset = 0;
+      if (pet_p4_sound_catalog_preset(event, &preset)) {
+        ok = pet_p4_audio_sfx_trigger(preset);
+      }
+    }
+    send_protocol_ack(send_line, ctx, topic, payload, ok,
+                      ok ? "ok" : "sound_play_failed",
+                      ok ? "prompt sound queued" : "no such sound");
+    if (!ok) { cJSON_Delete(root); return false; }
   } else if (strcmp(topic, "input/config") == 0) {
     if (!pet_p4_input_handle_config(payload, false, send_line, ctx)) {
       cJSON_Delete(root);

@@ -1,5 +1,6 @@
 #include "pet_p4_audio_patch.h"
 #include "pet_p4_audio.h"
+#include "pet_p4_sound_catalog.h"
 #include "pet_p4_voice_ptt.h"
 #include "pet_p4_voice_wifi.h"
 #include "pet_p4_audio_volume.h"
@@ -815,22 +816,84 @@ static bool cext_mix_step(int16_t *pcm,bool blocked) {
 #define CEXT_PENDING() false
 #define cext_mix_step(pcm,blocked) false
 #endif
+/* ── 自定义提示音：SPIFFS 直读，与内置音/TTS 混音 ──────────────────
+ * 不走 PET_P4_SAMPLES（那是组件采样，编译关闭），而是作为一个额外的
+ * PCM 源混进 sfx_drain_step 的同一块缓冲，最后由同一个 codec 出口播出。 */
+static FILE *g_prompt_file;
+static size_t g_prompt_left;
+static atomic_bool g_prompt_active;
+
+static bool prompt_pending(void) { return atomic_load(&g_prompt_active); }
+
+static bool prompt_mix_step(int16_t *pcm, size_t frames) {
+  if (!atomic_load(&g_prompt_active) || !g_prompt_file) return false;
+  uint8_t raw[640];
+  size_t need = frames * 2;
+  if (need > sizeof(raw)) need = sizeof(raw);
+  if (need > g_prompt_left) need = g_prompt_left;
+  size_t got = need ? fread(raw, 1, need, g_prompt_file) : 0;
+  g_prompt_left -= got;
+  if (got < need || g_prompt_left == 0) {
+    fclose(g_prompt_file);
+    g_prompt_file = NULL;
+    atomic_store(&g_prompt_active, false);
+  }
+  if (!got) return false;
+  const int16_t *src = (const int16_t *) raw;
+  const int32_t volume = (int32_t) atomic_load(&g_sfx_volume);
+  const size_t count = got / 2;
+  for (size_t i = 0; i < count; i += 1) {
+    int32_t mixed = (int32_t) pcm[i] + (int32_t) src[i] * volume / 100;
+    if (mixed > 32767) mixed = 32767;
+    else if (mixed < -32768) mixed = -32768;
+    pcm[i] = (int16_t) mixed;
+  }
+  return true;
+}
+
+/* 播一个事件的提示音：有自定义 WAV 就用文件，没有返回 false 由调用方回退内置音。 */
+bool pet_p4_audio_prompt_play(const char *event) {
+  char path[96];
+  if (!pet_p4_sound_catalog_custom_path(event, path, sizeof(path))) return false;
+  if (!pet_p4_sound_catalog_has_custom(event)) return false;
+  FILE *file = fopen(path, "rb");
+  if (!file) return false;
+  uint8_t header[44];
+  if (fread(header, 1, sizeof(header), file) != sizeof(header)) {
+    fclose(file);
+    return false;
+  }
+  fseek(file, 0, SEEK_END);
+  const long size = ftell(file);
+  fseek(file, (long) sizeof(header), SEEK_SET);
+  if (size <= (long) sizeof(header)) {
+    fclose(file);
+    return false;
+  }
+  if (g_prompt_file) fclose(g_prompt_file);
+  g_prompt_file = file;
+  g_prompt_left = (size_t) (size - (long) sizeof(header));
+  atomic_store(&g_prompt_active, true);
+  return true;
+}
+
 static bool sfx_drain_step(uint8_t *pcm) {
   if(!g_stream_lock)return false;
   xSemaphoreTakeRecursive(g_stream_lock,portMAX_DELAY);
   bool blocked=atomic_load(&g_capture_requested)||atomic_load(&g_capture_active)
     ||atomic_load(&g_conversation)||atomic_load(&g_stream_active)||atomic_load(&g_music);
-  bool enabled=atomic_load(&g_sfx_enabled)||CEXT_ENABLED();
+  bool enabled=atomic_load(&g_sfx_enabled)||CEXT_ENABLED()||prompt_pending();
   unsigned pending=atomic_exchange(&g_sfx_pending,0);
   if(blocked||!enabled){pet_sfx_reset(&g_sfx_core);(void)cext_mix_step((int16_t*)pcm,true);xSemaphoreGiveRecursive(g_stream_lock);return false;}
   for(unsigned p=0;p<PET_SFX_PRESETS;p++)if(pending&(1u<<p)&&atomic_load(&g_sfx_enabled))pet_sfx_trigger(&g_sfx_core,p);
-  if(!pet_sfx_active(&g_sfx_core)&&!CEXT_PENDING()){xSemaphoreGiveRecursive(g_stream_lock);return false;}
+  if(!pet_sfx_active(&g_sfx_core)&&!CEXT_PENDING()&&!prompt_pending()){xSemaphoreGiveRecursive(g_stream_lock);return false;}
   PET_AUDIO_REALTIME_SCOPE(sfx_work);
   if (pet_resources_device_realtime_begin(&sfx_work) != PET_RESOURCE_OK) {
     xSemaphoreGiveRecursive(g_stream_lock); return false;
   }
   pet_sfx_render(&g_sfx_core,(int16_t*)pcm,320,atomic_load(&g_sfx_volume));
   (void)cext_mix_step((int16_t*)pcm,false);
+  (void)prompt_mix_step((int16_t*)pcm,320);
   if(esp_codec_dev_write(g_speaker,pcm,640)!=ESP_OK)pet_sfx_reset(&g_sfx_core);
   xSemaphoreGiveRecursive(g_stream_lock);
   return true;
