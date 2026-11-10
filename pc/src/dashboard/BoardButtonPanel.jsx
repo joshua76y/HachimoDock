@@ -26,6 +26,7 @@ const CONTROL_GROUP_META = {
   p4_sw3: { label: "3蓝", detail: "蓝色键（下）" },
   p4_sw4: { label: "4绿", detail: "绿色键（右）· 按住说话" },
   p4_joystick: { label: "摇杆 K", detail: "四向与按下键 K" },
+  p4_boot: { label: "B键", detail: "侧边 BOOT 按键" },
   legacy_encoder: { label: "前方旋钮", detail: "旋转与按压" },
 };
 

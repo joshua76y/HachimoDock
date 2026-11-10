@@ -28,7 +28,8 @@ pub fn synthesize(text: &str, voice: Option<&str>, rate_wpm: Option<u32>) -> Res
     }
     let voice = voice.unwrap_or(DEFAULT_VOICE);
     let started = std::time::Instant::now();
-    let stamp = std::process::id();
+    /* 临时名必须唯一：两个测试线程并发合成时 pid 相同，同名文件会让 say 报 -54。 */
+    let stamp = stamp();
     let aiff = std::env::temp_dir().join(format!("hachimo-tts-{stamp}.aiff"));
     let wav = std::env::temp_dir().join(format!("hachimo-tts-{stamp}.wav"));
 
@@ -71,6 +72,11 @@ pub fn synthesize(text: &str, voice: Option<&str>, rate_wpm: Option<u32>) -> Res
     if bytes.len() <= 44 {
         return Err("合成结果为空".into());
     }
+    /* 模型未下载/读不了中文的音色：say exit 0 但只有 ~4.6KB 空壳，
+     * 转出的 WAV 近乎纯静音。给个明确错误，别让设备播一段无声。 */
+    if bytes.len() < 4_000 {
+        return Err(format!("音色 {voice} 无法合成这段文本（输出近乎为空，可能未下载该语音模型）"));
+    }
     Ok(TtsResult {
         wav: bytes,
         voice: voice.to_string(),
@@ -78,28 +84,165 @@ pub fn synthesize(text: &str, voice: Option<&str>, rate_wpm: Option<u32>) -> Res
     })
 }
 
-/// 列出系统可用音色，供设置页下拉。
+/// 列出系统全部音色名（不做可用性过滤，测试用）。
 pub fn available_voices() -> Vec<String> {
+    voice_inventory().into_iter().map(|(name, _)| name).collect()
+}
+
+/// `say -v '?'` 的原始清单：音色名 + locale。名字可能含空格（如 "Bad News"）。
+fn voice_inventory() -> Vec<(String, String)> {
     let output = Command::new("/usr/bin/say").arg("-v").arg("?").output();
-    let Ok(output) = output else { return vec![DEFAULT_VOICE.to_string()] };
+    let Ok(output) = output else { return vec![] };
     let text = String::from_utf8_lossy(&output.stdout);
-    let mut voices: Vec<String> = text
+    let mut voices: Vec<(String, String)> = text
         .lines()
-        .filter_map(|line| line.split_whitespace().next())
-        .filter(|name| !name.is_empty())
-        .map(|name| name.to_string())
+        .filter_map(|line| {
+            let head = line.split('#').next()?;
+            let mut parts = head.split_whitespace();
+            let locale = parts.next_back()?.to_string();
+            let name = parts.map(|part| format!("{part} ")).collect::<String>();
+            let name = name.trim_end().to_string();
+            if name.is_empty() || locale.is_empty() { None } else { Some((name, locale)) }
+        })
         .collect();
     voices.sort();
     voices.dedup();
-    if voices.is_empty() {
-        voices.push(DEFAULT_VOICE.to_string());
-    }
     voices
 }
 
+/// 探测一个音色能否真正发声：用中文短语合成，AIFF 输出超过阈值才算可用。
+/// 「模型未下载/读不了中文」的音色 exit code 仍是 0，但输出只有 ~4.6KB 空壳。
+const VOICE_PROBE_TEXT: &str = "你好，今天天气怎么样";
+const VOICE_PROBE_MIN_BYTES: u64 = 10_000;
+
+fn probe_voice_speakable(name: &str) -> bool {
+    let path = std::env::temp_dir().join(format!("hachimo-voice-probe-{}.aiff", stamp()));
+    let Ok(_) = Command::new("/usr/bin/say")
+        .arg("-v").arg(name)
+        .arg("-o").arg(&path)
+        .arg(VOICE_PROBE_TEXT)
+        .output()
+    else {
+        return false;
+    };
+    let size = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+    let _ = std::fs::remove_file(&path);
+    size >= VOICE_PROBE_MIN_BYTES
+}
+
+/// 并发探测时保证临时文件名唯一：pid + 原子序号。
+fn stamp() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    format!("{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed))
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct VoiceAvailability {
+    pub name: String,
+    pub available: bool,
+}
+
+/// 探测缓存的磁盘位置与格式：键是 `say -v '?'` 原文的哈希，
+/// 系统音色列表变化（下载/删除音色）时自动失效重测。
+fn voice_cache_path() -> Result<std::path::PathBuf, String> {
+    let home = std::env::var("HOME").map_err(|_| "无法定位 HOME 目录".to_string())?;
+    Ok(std::path::Path::new(&home)
+        .join(".hachimo")
+        .join("tts-voices-cache.json"))
+}
+
+fn voice_cache_load(inventory_hash: &str) -> Option<Vec<VoiceAvailability>> {
+    let raw = std::fs::read_to_string(voice_cache_path().ok()?).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    if value.get("inventoryHash").and_then(|item| item.as_str()) != Some(inventory_hash) {
+        return None;
+    }
+    let entries = value.get("voices")?.as_array()?;
+    Some(entries
+        .iter()
+        .filter_map(|item| Some(VoiceAvailability {
+            name: item.get("name")?.as_str()?.to_string(),
+            available: item.get("available")?.as_bool()?,
+        }))
+        .collect())
+}
+
+fn voice_cache_save(inventory_hash: &str, voices: &[VoiceAvailability]) {
+    let Ok(path) = voice_cache_path() else { return };
+    let value = serde_json::json!({
+        "inventoryHash": inventory_hash,
+        "savedAt": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        "voices": voices,
+    });
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, value.to_string());
+}
+
+/// 逐音色探测可用性。188 个音色串行要 ~110s，12 路并发压到 ~10s；
+/// 结果落盘缓存，之后设置页秒开。
+fn probe_voices_parallel(inventory: &[(String, String)]) -> Vec<VoiceAvailability> {
+    const WORKERS: usize = 12;
+    let names: Vec<String> = inventory.iter().map(|(name, _)| name.clone()).collect();
+    let per_worked = ((names.len() + WORKERS - 1) / WORKERS).max(1);
+    let chunks: Vec<Vec<String>> = names
+        .chunks(per_worked)
+        .map(<[String]>::to_vec)
+        .collect();
+    let mut voices: Vec<VoiceAvailability> = std::thread::scope(|scope| {
+        let handles: Vec<_> = chunks
+            .iter()
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|name| VoiceAvailability {
+                            name: name.clone(),
+                            available: probe_voice_speakable(name),
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().unwrap_or_default())
+            .collect()
+    });
+    voices.sort_by(|a, b| a.name.cmp(&b.name));
+    voices
+}
+
+/// 设置页下拉：只保留能真正发声的音色（探测结果带缓存）。
+/// 前端在全部音色里挑，`available=false` 的直接不显示。
 #[tauri::command]
-pub fn local_tts_voices() -> Vec<String> {
-    available_voices()
+pub fn local_tts_voices() -> Vec<VoiceAvailability> {
+    let inventory = voice_inventory();
+    if inventory.is_empty() {
+        return vec![VoiceAvailability { name: DEFAULT_VOICE.to_string(), available: true }];
+    }
+    let hash = md5_hex(&format!("{inventory:?}"));
+    if let Some(cached) = voice_cache_load(&hash) {
+        return cached;
+    }
+    let voices = probe_voices_parallel(&inventory);
+    voice_cache_save(&hash, &voices);
+    voices
+}
+
+/// 轻量 FNV-1a：只为给音色清单生成缓存键，不追求密码学强度。
+fn md5_hex(input: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in input.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 #[tauri::command]
@@ -149,6 +292,20 @@ mod tests {
     #[test]
     fn voice_list_is_not_empty() {
         assert!(!available_voices().is_empty());
+    }
+
+    #[test]
+    fn known_good_voice_probes_available() {
+        // 中文音色 Tingting 一定在系统里且能发声；探测缓存不命中时才真正跑 say。
+        let inventory = voice_inventory();
+        assert!(inventory.iter().any(|(name, _)| name == "Tingting"));
+        assert!(probe_voice_speakable("Tingting"));
+    }
+
+    #[test]
+    fn fnv_hex_is_stable() {
+        assert_eq!(md5_hex(""), "cbf29ce484222325"); // FNV-1a 64 空串=偏移基数
+        assert_eq!(md5_hex("a").len(), 16);
     }
 }
 

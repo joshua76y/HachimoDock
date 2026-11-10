@@ -30,6 +30,9 @@ pub(super) struct Requests {
     probe_outcome:Outcome,
     probe_status_seen:bool,
     idle_observed:bool,
+    /// 第一次观察若撞上设备仍在收尾（如尾音还没放完），允许再观察一次。
+    /// 有界：最多一次，且只在「已确认 ACK、已观察到状态、但非 idle」时。
+    reprobes:u8,
 }
 pub(super) fn managed_topic(topic:&str)->bool {
     matches!(topic,"audio/conversation"|"audio/play_begin"|"audio/play_chunk"|"audio/play_end"|"audio/play_flush"|"audio/play_subtitle")
@@ -115,6 +118,15 @@ impl Requests {
         self.probe_request=Some(Request{owner:owner.clone(),topic:"audio/query".into(),session:owner,playback:None});
         self.probe_outcome=Outcome::Waiting;self.probe_claimed=true;true
     }
+    /// 第一次探测确认了 ACK 但观察到设备仍非 idle（播放尾音未收完等），
+    /// 允许一次全新的重探。仍是只读观察，且整条生命周期最多重探一次。
+    pub(super) fn claim_reprobe(&mut self)->bool{
+        if self.reprobes>=1||!self.terminal_acks()||!self.probe_claimed
+            ||!self.probe_status_seen||self.idle_observed{return false;}
+        self.reprobes+=1;self.probe_claimed=false;self.probe_received=false;
+        self.probe_outcome=Outcome::Waiting;self.probe_status_seen=false;
+        self.claim_probe()
+    }
     pub(super) fn probe_written(&mut self,ok:bool){self.probe_written=ok;}
     pub(super) fn observe_status(&mut self,idle:bool){if self.probe_claimed&&self.terminal_acks(){self.probe_status_seen=true;self.idle_observed=idle;}}
     pub(super) fn probe_receipt(&mut self,valid:bool,ok:bool){
@@ -154,6 +166,24 @@ impl Requests {
             assert_eq!(r.accept("rtc",kind.topic(),&id,None,None),Receipt::Terminal(kind));r.terminal_receipt(kind,true,true);
         }
         assert_eq!(r.stop_state(),"acknowledged_idle_unconfirmed");assert!(!r.stopped());
+    }
+    #[test]fn busy_first_observation_gets_one_bounded_reprobe(){
+        let mut r=Requests::default();let requests=r.begin_terminal("rtc").unwrap().unwrap();
+        for (kind,id) in requests{
+            assert_eq!(r.accept("rtc",kind.topic(),&id,None,None),Receipt::Terminal(kind));r.terminal_receipt(kind,true,true);
+        }
+        assert!(r.claim_probe());assert!(!r.claim_probe());
+        let probe=r.probe_id.clone();
+        assert_eq!(r.accept("rtc","audio/query",&probe,None,None),Receipt::Probe);r.probe_receipt(true,true);
+        // 设备仍在收尾：状态已看到但非 idle → 不算 stopped
+        r.observe_status(false);assert!(!r.stopped());
+        // 有界重探：恰好一次
+        assert!(r.claim_reprobe());assert!(!r.claim_reprobe());
+        let probe2=r.probe_id.clone();assert_eq!(probe2,probe);
+        assert_eq!(r.accept("rtc","audio/query",&probe2,None,None),Receipt::Probe);r.probe_receipt(true,true);
+        r.observe_status(true);r.probe_written(true);assert!(r.stopped());
+        // 已经 idle 后不允许再重探
+        assert!(!r.claim_reprobe());
     }
     #[test]fn retired_turn_and_flush_epoch_drain_without_harming_new_turn(){
         let mut r=Requests::default();r.playback(Some("turn-a")).unwrap();

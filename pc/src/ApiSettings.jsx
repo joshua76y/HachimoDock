@@ -48,6 +48,18 @@ function buildSilenceWav(seconds = 0.5) {
   for (let i = 0; i < silence.length; i += 1) view.setInt16(44 + i * 2, 0, true);
   return buffer;
 }
+
+/* 后端 local_tts_voices 返回 [{name, available}]（available=false = 探测时无声）。
+ * 下拉里只显示可发声的音色；但当前已保存的音色即使不可用也保留，
+ * 否则 select 的 value 会落空、用户选择被悄悄改写。 */
+function usableTtsVoices(voices, currentVoice) {
+  const names = voices
+    .filter((item) => item && typeof item.name === "string" && item.available !== false)
+    .map((item) => item.name);
+  if (currentVoice && !names.includes(currentVoice)) names.unshift(currentVoice);
+  return names;
+}
+
 import LlmNetworkSettings from "./LlmNetworkSettings.jsx";
 import GenerationDiagnostics from "./GenerationDiagnostics.jsx";
 import TextModelSelect from "./TextModelSelect.jsx";
@@ -146,10 +158,23 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
     () => window.localStorage.getItem("hachimo.ttsVoice") || "Tingting",
   );
   const [ttsVoices, setTtsVoices] = useState([]);
+  const [ttsVoicesPending, setTtsVoicesPending] = useState(true);
   const [ttsProbe, setTtsProbe] = useState({ pending: false, message: "" });
 
   useEffect(() => {
-    invoke("local_tts_voices").then((list) => setTtsVoices(Array.isArray(list) ? list : [])).catch(() => {});
+    let alive = true;
+    setTtsVoicesPending(true);
+    invoke("local_tts_voices")
+      .then((list) => {
+        if (alive) setTtsVoices(Array.isArray(list) ? list : []);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (alive) setTtsVoicesPending(false);
+      });
+    return () => {
+      alive = false;
+    };
   }, []);
 
   useEffect(() => {
@@ -533,11 +558,19 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
                     window.localStorage.setItem("hachimo.ttsVoice", event.target.value);
                   }}
                 >
-                  {(ttsVoices.length ? ttsVoices : ["Tingting"]).map((voice) => (
+                  {(ttsVoices.length ? usableTtsVoices(ttsVoices, ttsVoice) : ["Tingting"]).map((voice) => (
                     <option key={voice} value={voice}>{voice}</option>
                   ))}
                 </select>
               </label>
+              {ttsVoicesPending && (
+                <p className="muted small">正在检测系统音色可用性（首次约需十几秒，之后有缓存）…</p>
+              )}
+              {!ttsVoicesPending && ttsVoices.length > 0 && (
+                <p className="muted small">
+                  已过滤 {ttsVoices.filter((item) => item && item.available === false).length} 个无法发声的音色（未下载语音模型）。
+                </p>
+              )}
               <button
                 type="button"
                 className="ui-button"

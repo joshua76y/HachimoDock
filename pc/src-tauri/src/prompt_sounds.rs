@@ -259,16 +259,34 @@ pub fn prompt_sound_save_bytes(event: String, bytes: Vec<u8>) -> Result<PromptSo
 
 /// 试听当前设置的音效：让设备自己播（自定义 WAV 或内置 preset），
 /// 这是用户实际听到的声音；内置音是固件合成的，PC 上没有字节。
-/// 同样 spawn_blocking，避免阻塞主线程（同 prompt_sound_upload）。
+/// 自定义音同时在本机同步播放一遍——设备音量/调度出问题时用户也一定听得到。
 #[tauri::command]
 pub async fn prompt_sound_preview(event: String, host: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let ack = call("sound/play", serde_json::json!({ "event": event }), &host)?;
-        if ack.contains("\"ok\":true") {
-            Ok(format!("{event}：设备正在播放当前音效"))
-        } else {
-            Err(format!("{event}：设备播放失败（{ack}）"))
+        /* 先取自定义字节（可能没有：内置音）。取失败不算错误，只跳过本机播放。 */
+        let custom = read_custom(&event).ok();
+        let device = call("sound/play", serde_json::json!({ "event": event }), &host);
+        let mut parts: Vec<String> = Vec::new();
+        match &device {
+            Ok(ack) if ack.contains("\"ok\":true") => parts.push("设备正在播放".into()),
+            Ok(ack) => parts.push(format!("设备播放失败（{ack}）")),
+            Err(error) => parts.push(format!("设备连接失败（{error}）")),
         }
+        if let Some(wav) = custom {
+            if wav.len() > 44 {
+                /* 自定义音就是 16k/1ch/16bit，剥掉 44 字节头直接交给本机播放。
+                 * 播放阻塞几秒没关系：整个命令已在 blocking 线程里。 */
+                match crate::pc_playback::play_pcm16_mono_16k(&wav[44..], Duration::from_secs(30)) {
+                    Ok(()) => parts.push("本机已播放完成".into()),
+                    Err(error) => parts.push(format!("本机播放失败（{error}）")),
+                }
+            }
+        } else {
+            parts.push("内置音只能由设备播放（PC 上没有它的字节）".into());
+        }
+        let ok = device.is_ok_and(|ack| ack.contains("\"ok\":true"));
+        let message = format!("{event}：{}", parts.join("；"));
+        if ok { Ok(message) } else { Err(message) }
     })
     .await
     .map_err(|e| format!("提示音试听任务失败：{e}"))?

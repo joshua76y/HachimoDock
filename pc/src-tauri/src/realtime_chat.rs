@@ -2052,10 +2052,15 @@ async fn finish(app:&AppHandle,usb:&UsbSerialManager,session:&Arc<Session>,reaso
         };
         send_bound_session_payload(usb,session,kind.topic(),&payload)
     });
-    let deadline=Instant::now()+Duration::from_secs(3);
+    let deadline=Instant::now()+Duration::from_secs(5);
     loop{
         let (stopped,failed,probe)=match session.audio_requests.lock(){
-            Ok(mut requests)=>(requests.stopped(),requests.terminal_failed(),requests.claim_probe()),
+            Ok(mut requests)=>{
+                let stopped=requests.stopped();let failed=requests.terminal_failed();
+                /* 首探确认了 ACK 但设备还没安静下来（尾音未收）→ 有界重探一次。 */
+                let probe=requests.claim_probe()||requests.claim_reprobe();
+                (stopped,failed,probe)
+            },
             Err(_)=>(false,true,false),
         };
         if stopped||failed{break;}

@@ -26,6 +26,27 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// 本地 ASR 冷加载 + 识别的最坏情况（Qwen3 冷启动约 19s）。
 const ASR_TIMEOUT: Duration = Duration::from_secs(45);
 
+/// 每次设备 PTT 请求都落一行日志。eprintln 在 GUI 启动下看不到，
+/// 排查「按了语音键没反应」必须有一份能读的记录：
+/// 设备有没有连上来、发了多大、识别结果/错误是什么。
+fn bridge_log(message: &str) {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = format!("{stamp} {message}\n");
+    if let Ok(home) = std::env::var("HOME") {
+        let path = std::path::Path::new(&home).join(".hachimo").join("voice-bridge.log");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = file.write_all(line.as_bytes());
+        }
+    }
+    eprintln!("[device-voice-bridge] {message}");
+}
+
 /// App 启动时调用一次；失败只打日志，不影响主程序。
 pub fn start(app: tauri::AppHandle) {
     std::thread::spawn(move || {
@@ -38,7 +59,7 @@ pub fn start(app: tauri::AppHandle) {
 fn serve(app: tauri::AppHandle) -> Result<(), String> {
     let listener =
         TcpListener::bind(BIND_ADDR).map_err(|e| format!("监听 {BIND_ADDR} 失败：{e}"))?;
-    eprintln!("[device-voice-bridge] listening on http://{BIND_ADDR}/voice");
+    bridge_log(&format!("listening on http://{BIND_ADDR}/voice"));
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
@@ -52,18 +73,39 @@ fn serve(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 fn handle_connection(app: tauri::AppHandle, mut stream: TcpStream) {
+    let peer = stream
+        .peer_addr()
+        .map(|addr| addr.to_string())
+        .unwrap_or_else(|_| "unknown".into());
     let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
     let _ = stream.set_write_timeout(Some(READ_TIMEOUT));
     let (status, body) = match read_request(&mut stream) {
         Ok(Some(wav)) => match transcribe(&wav) {
             Ok(text) => {
+                bridge_log(&format!(
+                    "POST /voice from {peer} bytes={} -> ok text=\"{}\"",
+                    wav.len(),
+                    text.chars().take(60).collect::<String>()
+                ));
                 deliver_to_conversation(&app, &text);
                 (200, serde_json::json!({"ok": true, "text": text}))
             }
-            Err(error) => (200, serde_json::json!({"ok": false, "error": error})),
+            Err(error) => {
+                bridge_log(&format!(
+                    "POST /voice from {peer} bytes={} -> ASR ERROR {error}",
+                    wav.len()
+                ));
+                (200, serde_json::json!({"ok": false, "error": error}))
+            }
         },
-        Ok(None) => (404, serde_json::json!({"ok": false, "error": "not found"})),
-        Err(error) => (400, serde_json::json!({"ok": false, "error": error})),
+        Ok(None) => {
+            bridge_log(&format!("non-voice request from {peer} -> 404"));
+            (404, serde_json::json!({"ok": false, "error": "not found"}))
+        }
+        Err(error) => {
+            bridge_log(&format!("POST /voice from {peer} -> BAD REQUEST {error}"));
+            (400, serde_json::json!({"ok": false, "error": error}))
+        }
     };
     respond(&mut stream, status, &body);
 }

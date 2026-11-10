@@ -117,6 +117,10 @@ export const DEFAULT_BUTTON_ACTIONS = {
   p4_encoder_ccw: "session_previous",
   p4_joystick_up: "session_previous",
   p4_joystick_down: "session_next",
+  p4_joystick_k_short: "page_enter",
+  p4_joystick_k_long: "disabled",
+  p4_boot_short: "disabled",
+  p4_boot_long: "disabled",
 };
 
 export const P4_VOICE_BUTTON_OPTIONS = [
@@ -189,6 +193,12 @@ export const P4_BUTTON_CONTROL_ROWS = [
   { id: "p4_encoder_cw", controlId: "p4_joystick", label: "摇杆向右", event: "knob.rotate_cw", defaultAction: "session_next", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
   { id: "p4_encoder_press", controlId: "p4_joystick", label: "摇杆中按短按", event: "button.encoder.short_press", defaultAction: "page_enter", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
   { id: "p4_encoder_long", controlId: "p4_joystick", label: "摇杆中按长按", event: "button.encoder.long_press", holdEvent: "button.encoder.hold", voiceTriggerId: "encoder_button.hold", defaultAction: "disabled", voiceFallbackAction: "disabled", actionOptions: ["voice_ptt", ...P4_CUSTOM_ACTION_OPTIONS], supportsValue: true },
+  /* 摇杆中心 K 键：固件事件是 button.k.*（与旋钮按压 button.encoder.* 是两个物理键）。 */
+  { id: "p4_joystick_k_short", controlId: "p4_joystick", label: "摇杆K 短按", event: "button.k.short_press", defaultAction: "page_enter", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
+  { id: "p4_joystick_k_long", controlId: "p4_joystick", label: "摇杆K 长按", event: "button.k.long_press", holdEvent: "button.k.hold", defaultAction: "disabled", voiceFallbackAction: "disabled", actionOptions: ["voice_ptt", ...P4_CUSTOM_ACTION_OPTIONS], supportsValue: true },
+  /* BOOT 侧键 B：固件事件 button.b.*，此前在 PC 端完全没有配置入口。 */
+  { id: "p4_boot_short", controlId: "p4_boot", label: "B键 短按", event: "button.b.short_press", defaultAction: "disabled", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
+  { id: "p4_boot_long", controlId: "p4_boot", label: "B键 长按", event: "button.b.long_press", holdEvent: "button.b.hold", defaultAction: "disabled", voiceFallbackAction: "disabled", actionOptions: ["voice_ptt", ...P4_CUSTOM_ACTION_OPTIONS], supportsValue: true },
 ];
 
 const LEGACY_P4_DEFAULT_BUTTON_ACTIONS = {
