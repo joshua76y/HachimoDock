@@ -535,7 +535,7 @@ static void sound_upload_task(void *arg) {
 
 static bool sound_enqueue(uint8_t kind, const char *event, const uint8_t *data, size_t len) {
   if (!s_sound_q) {
-    s_sound_q = xQueueCreate(4, sizeof(sound_job_t));
+    s_sound_q = xQueueCreate(8, sizeof(sound_job_t));
     if (!s_sound_q) return false;
     if (xTaskCreate(sound_upload_task, "sound-up", 8192, NULL, 4, NULL) != pdPASS) {
       vQueueDelete(s_sound_q); s_sound_q = NULL; return false;
@@ -551,7 +551,7 @@ static bool sound_enqueue(uint8_t kind, const char *event, const uint8_t *data, 
     memcpy(job.data, data, len);
     job.len = len;
   }
-  if (xQueueSend(s_sound_q, &job, pdMS_TO_TICKS(200)) != pdTRUE) {
+  if (xQueueSend(s_sound_q, &job, pdMS_TO_TICKS(3000)) != pdTRUE) {
     if (job.data) free(job.data);
     return false;
   }
@@ -4219,6 +4219,8 @@ bool pet_p4_handle_line_with_reply(
   } else if (strcmp(topic, "sound/play") == 0) {
     /* {event} → 有自定义音就播，否则回落到内置 preset */
     const char *event = json_string(payload, "event");
+    /* 上传是异步的：等 worker 把队列里剩下的帧落盘再播 */
+    vTaskDelay(pdMS_TO_TICKS(250));
     bool ok = event && pet_p4_audio_prompt_play(event);
     if (!ok && event) {
       unsigned preset = 0;
