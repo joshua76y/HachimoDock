@@ -125,6 +125,13 @@ idf_component_register(
     "${IDF_PATH}/components/spiffs/spiffs/src"
   REQUIRES
     esp_http_server
+    esp_http_client
+    esp_wifi
+    esp_netif
+    esp_event
+    esp_system
+    lwip
+    esp_driver_i2c
     esp_adc
     esp_timer
     esp_driver_gpio
