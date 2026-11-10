@@ -22,6 +22,32 @@ import {
 } from "lucide-react";
 import PageShell from "./shell/PageShell.jsx";
 import Card from "./shell/Card.jsx";
+
+/* 构造一段 16k/单声道/16bit 的静音 WAV，用于把本地 ASR 引擎预热进内存。
+ * 服务端懒加载 + 引擎互踢：预热必须用当前所选引擎的请求才能"证明"它已加载。 */
+function buildSilenceWav(seconds = 0.5) {
+  const sampleRate = 16000;
+  const silence = new Int16Array(Math.round(sampleRate * seconds));
+  const buffer = new ArrayBuffer(44 + silence.length * 2);
+  const view = new DataView(buffer);
+  const writeStr = (offset, text) => {
+    for (let i = 0; i < text.length; i += 1) view.setUint8(offset + i, text.charCodeAt(i));
+  };
+  writeStr(0, "RIFF");
+  view.setUint32(4, 36 + silence.length * 2, true);
+  writeStr(8, "WAVEfmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, "data");
+  view.setUint32(40, silence.length * 2, true);
+  for (let i = 0; i < silence.length; i += 1) view.setInt16(44 + i * 2, 0, true);
+  return buffer;
+}
 import LlmNetworkSettings from "./LlmNetworkSettings.jsx";
 import GenerationDiagnostics from "./GenerationDiagnostics.jsx";
 import TextModelSelect from "./TextModelSelect.jsx";
@@ -67,6 +93,28 @@ function persistedProviderConfig(config) {
 
 function resultToneClass(tone) {
   return tone ? ` is-${tone}` : "";
+}
+
+/* 单例 <audio>：新试听先停掉上一段，一次点击只播一次。
+ * 之前每次点击都 new Audio，旧播放不会停，快速点几次就叠好几层声音。 */
+let ttsPreviewAudio = null;
+function playTtsPreviewWav(base64) {
+  return new Promise((resolve, reject) => {
+    if (ttsPreviewAudio) {
+      try { ttsPreviewAudio.pause(); } catch { /* ignore */ }
+      ttsPreviewAudio = null;
+    }
+    const audio = new Audio(`data:audio/wav;base64,${base64}`);
+    audio.loop = false;
+    ttsPreviewAudio = audio;
+    const cleanup = () => { if (ttsPreviewAudio === audio) ttsPreviewAudio = null; };
+    audio.onended = () => { cleanup(); resolve(); };
+    audio.onerror = () => { cleanup(); reject(new Error("音频解码/播放失败")); };
+    audio.play().then(() => { /* 已开始播放，等 onended */ }).catch((error) => {
+      cleanup();
+      reject(error);
+    });
+  });
 }
 
 export default function ApiSettings({ onBack, configReadError = "", active = true }) {
@@ -286,19 +334,37 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
   };
 
   const saveAndTestAsr = async () => {
-    /* 本地 ASR 不需要火山 Key：直接探一次本地服务就算"保存并测试"。 */
+    /* 本地 ASR 不需要火山 Key：保存偏好 + 预热所选引擎 + 报状态。 */
     if (asrProvider === "local") {
-      setAsrState((current) => ({ ...current, pending: true, tone: "muted", message: "正在测试本地 ASR…" }));
+      setAsrState((current) => ({ ...current, pending: true, tone: "muted", message: "正在保存并测试本地 ASR…" }));
       const started = performance.now();
+      const engine = localAsrEngine || "sensevoice";
       try {
-        const response = await fetch(`${String(localAsrEndpoint).replace(/\/+$/, "")}/health`, { cache: "no-store" });
-        const health = await response.json();
+        /* 之前只 fetch /health 从不保存：引擎选择只留在 localStorage，
+         * 真实识别链路（读 ~/.hachimo-local-asr.json）永远拿到旧引擎。 */
+        await invoke("local_asr_save_prefs", {
+          provider: "local",
+          endpoint: localAsrEndpoint,
+          engine,
+        });
+        const base = String(localAsrEndpoint).replace(/\/+$/, "");
+        const response = await fetch(`${base}/health`, { cache: "no-store" });
+        let health = await response.json();
+        if (!health.loaded || health.engineLoaded !== engine) {
+          /* 预热/切换到所选引擎（qwen3 冷加载约 7-19s，属正常）。 */
+          await fetch(`${base}/stt?engine=${encodeURIComponent(engine)}`, {
+            method: "POST",
+            headers: { "Content-Type": "audio/wav" },
+            body: buildSilenceWav(0.5),
+          }).catch(() => null);
+          health = await fetch(`${base}/health`, { cache: "no-store" }).then((r) => r.json());
+        }
         setAsrState((current) => ({
           ...current,
           configured: true,
           pending: false,
           tone: "success",
-          message: `本地 ASR 已就绪：${health.engineLoaded || health.engine || "sensevoice"}${
+          message: `已保存并就绪：${health.engineLoaded || health.engine || engine}${
             health.loaded ? "（已加载）" : "（未加载）"} · ${Math.round(performance.now() - started)}ms`,
         }));
       } catch (error) {
@@ -306,7 +372,7 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
           ...current,
           pending: false,
           tone: "error",
-          message: `本地 ASR 连接失败：${String(error)}`,
+          message: `本地 ASR 保存/连接失败：${String(error)}`,
         }));
       }
       return;
@@ -483,19 +549,17 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
                       text: "你好，我是本地语音合成测试。",
                       voice: ttsVoice,
                     });
-                    /* 真的把声音播出来：之前只显示字节数，用户听不到。 */
-                    let played = "未播放";
-                    try {
-                      const audio = new Audio(`data:audio/wav;base64,${result.wavBase64}`);
-                      await audio.play();
-                      played = "正在播放";
-                    } catch (playError) {
-                      played = `播放失败：${String(playError)}`;
-                    }
+                    /* 真的把声音播出来；播完才解锁按钮，期间再点无效。 */
                     setTtsProbe({
-                      pending: false,
-                      message: `合成成功：${result.voice} · ${result.bytes} 字节 · ${result.ms}ms · ${played}`,
+                      pending: true,
+                      message: `合成成功：${result.voice} · ${result.bytes} 字节 · ${result.ms}ms · 正在播放…`,
                     });
+                    try {
+                      await playTtsPreviewWav(result.wavBase64);
+                      setTtsProbe({ pending: false, message: `已播放完成（${result.voice} · ${result.ms}ms 合成）` });
+                    } catch (playError) {
+                      setTtsProbe({ pending: false, message: `合成成功但播放失败：${String(playError)}` });
+                    }
                   } catch (error) {
                     setTtsProbe({ pending: false, message: `合成失败：${String(error)}` });
                   }
@@ -559,8 +623,19 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
                   className="ui-control"
                   value={localAsrEngine}
                   onChange={(event) => {
-                    setLocalAsrEngine(event.target.value);
-                    window.localStorage.setItem("hachimo.localAsrEngine", event.target.value);
+                    const engine = event.target.value;
+                    setLocalAsrEngine(engine);
+                    window.localStorage.setItem("hachimo.localAsrEngine", engine);
+                    /* 关键：引擎必须立刻落盘到 ~/.hachimo-local-asr.json——
+                     * 所有真实识别链路（设备 PTT / 流式识别）读的是这份文件，
+                     * 只写 localStorage 的话选了也等于没选。 */
+                    invoke("local_asr_save_prefs", {
+                      provider: "local",
+                      endpoint: localAsrEndpoint,
+                      engine,
+                    }).catch((error) => {
+                      setLocalAsrProbe({ pending: false, message: `保存引擎偏好失败：${String(error)}` });
+                    });
                   }}
                 >
                   <option value="sensevoice">SenseVoice（快，0.2 秒 / 900MB）</option>
@@ -574,37 +649,24 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
                 onClick={async () => {
                   setLocalAsrProbe({ pending: true, message: "正在连接本地 ASR…" });
                   try {
+                    /* 测试前先把当前选择落盘，保证"测试的就是保存的"。 */
+                    await invoke("local_asr_save_prefs", {
+                      provider: "local",
+                      endpoint: localAsrEndpoint,
+                      engine: localAsrEngine || "sensevoice",
+                    });
                     const base = String(localAsrEndpoint).replace(/\/+$/, "");
                     /* 用 fetch 直连，避免 Tauri 命令注册在不同构建里不一致 */
                     const response = await fetch(base + "/health", { cache: "no-store" });
                     let raw = await response.json();
-                    /* 服务端是懒加载 + 闲置 10 分钟自动卸载：未加载时发 0.5s
-                     * 静音把引擎拉进内存再报状态，别把正常懒加载显示成故障。 */
-                    if (!raw.loaded) {
-                      const sampleRate = 16000;
-                      const silence = new Int16Array(sampleRate / 2); // 0.5s 静音
-                      const buffer = new ArrayBuffer(44 + silence.length * 2);
-                      const view = new DataView(buffer);
-                      const writeStr = (offset, text) => {
-                        for (let i = 0; i < text.length; i += 1) view.setUint8(offset + i, text.charCodeAt(i));
-                      };
-                      writeStr(0, "RIFF");
-                      view.setUint32(4, 36 + silence.length * 2, true);
-                      writeStr(8, "WAVEfmt ");
-                      view.setUint32(16, 16, true);
-                      view.setUint16(20, 1, true);
-                      view.setUint16(22, 1, true);
-                      view.setUint32(24, sampleRate, true);
-                      view.setUint32(28, sampleRate * 2, true);
-                      view.setUint16(32, 2, true);
-                      view.setUint16(34, 16, true);
-                      writeStr(36, "data");
-                      view.setUint32(40, silence.length * 2, true);
-                      for (let i = 0; i < silence.length; i += 1) view.setInt16(44 + i * 2, 0, true);
+                    /* 服务端是懒加载 + 引擎切换（qwen3/sensevoice 共存会互踢）：
+                     * 未加载或加载的不是所选引擎时，发 0.5s 静音把所选引擎
+                     * 拉进内存再报状态，别把正常懒加载/引擎切换显示成故障。 */
+                    if (!raw.loaded || raw.engineLoaded !== (localAsrEngine || "sensevoice")) {
                       await fetch(`${base}/stt?engine=${encodeURIComponent(localAsrEngine || "sensevoice")}`, {
                         method: "POST",
                         headers: { "Content-Type": "audio/wav" },
-                        body: buffer,
+                        body: buildSilenceWav(0.5),
                       }).catch(() => null);
                       raw = await fetch(base + "/health", { cache: "no-store" }).then((r) => r.json());
                     }

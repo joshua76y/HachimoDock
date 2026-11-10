@@ -205,22 +205,31 @@ fn call(topic: &str, payload: serde_json::Value, host: &str) -> Result<String, S
 }
 
 /// 把自定义提示音推到设备：begin → 分片 → end → play。
+///
+/// 必须 spawn_blocking：Tauri v2 的同步命令跑在主线程上，这里全是
+/// 阻塞 TCP + sleep，直接写会把整个 UI 冻住（试听/下发期间界面卡死）。
 #[tauri::command]
-pub fn prompt_sound_upload(event: String, host: String) -> Result<String, String> {
-    let wav = read_custom(&event)?;
+pub async fn prompt_sound_upload(event: String, host: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || prompt_sound_upload_blocking(&event, &host))
+        .await
+        .map_err(|e| format!("提示音下发任务失败：{e}"))?
+}
+
+fn prompt_sound_upload_blocking(event: &str, host: &str) -> Result<String, String> {
+    let wav = read_custom(event)?;
     if wav.len() <= 44 {
         return Err("自定义音为空，请先选择文件".into());
     }
-    call("sound/upload/begin", serde_json::json!({ "event": event }), &host)?;
+    call("sound/upload/begin", serde_json::json!({ "event": event }), host)?;
     let mut sent = 0usize;
     for chunk in wav.chunks(CHUNK_BYTES) {
         let encoded = base64_encode(chunk);
-        call("sound/upload/chunk", serde_json::json!({ "data": encoded }), &host)?;
+        call("sound/upload/chunk", serde_json::json!({ "data": encoded }), host)?;
         sent += 1;
         std::thread::sleep(Duration::from_millis(CHUNK_GAP_MS));
     }
-    call("sound/upload/end", serde_json::json!({}), &host)?;
-    let ack = call("sound/play", serde_json::json!({ "event": event }), &host)?;
+    call("sound/upload/end", serde_json::json!({}), host)?;
+    let ack = call("sound/play", serde_json::json!({ "event": event }), host)?;
     Ok(format!(
         "{event}: {} 字节 / {sent} 片已写入设备；播放应答 {}",
         wav.len(),
@@ -250,14 +259,19 @@ pub fn prompt_sound_save_bytes(event: String, bytes: Vec<u8>) -> Result<PromptSo
 
 /// 试听当前设置的音效：让设备自己播（自定义 WAV 或内置 preset），
 /// 这是用户实际听到的声音；内置音是固件合成的，PC 上没有字节。
+/// 同样 spawn_blocking，避免阻塞主线程（同 prompt_sound_upload）。
 #[tauri::command]
-pub fn prompt_sound_preview(event: String, host: String) -> Result<String, String> {
-    let ack = call("sound/play", serde_json::json!({ "event": event }), &host)?;
-    if ack.contains("\"ok\":true") {
-        Ok(format!("{event}：设备正在播放当前音效"))
-    } else {
-        Err(format!("{event}：设备播放失败（{ack}）"))
-    }
+pub async fn prompt_sound_preview(event: String, host: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let ack = call("sound/play", serde_json::json!({ "event": event }), &host)?;
+        if ack.contains("\"ok\":true") {
+            Ok(format!("{event}：设备正在播放当前音效"))
+        } else {
+            Err(format!("{event}：设备播放失败（{ack}）"))
+        }
+    })
+    .await
+    .map_err(|e| format!("提示音试听任务失败：{e}"))?
 }
 
 /// 当前提示音目录，界面用来显示落在哪。

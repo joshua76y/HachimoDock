@@ -3610,6 +3610,83 @@ fn handle_incoming_usb_message(
                     println!("[usb-device-input] forward ok");
                 }
                 Err(error) => {
+                    println!("[usb-device-input] forward FAILED: {error}");
+                    /* 目标 Agent 不可用时（如 Codex CLI 失效）自动回退到
+                     * 一个 ready 的 Agent 重发一次，而不是把语音文字丢掉。
+                     * bus 的 AGENT_UNAVAILABLE 会被桥包成通用
+                     * AGENT_BUS_INJECT_HTTP_ERROR，所以两者都要匹配。 */
+                    let fallback = if error.contains("AGENT_UNAVAILABLE")
+                        || error.contains("AGENT_BUS_INJECT_HTTP_ERROR")
+                    {
+                        /* 回退优先级贴合本机工作流：WorkBuddy 最常用，
+                         * 其次 Claude Code / DeepSeek，再其它。 */
+                        const FALLBACK_AGENT_PRIORITY: [&str; 5] = [
+                            "workbuddy",
+                            "claude-code",
+                            "deepseek-harness",
+                            "codex",
+                            "openclaw",
+                        ];
+                        fetch_bridge_agent_status()
+                            .ok()
+                            .flatten()
+                            .and_then(|status| {
+                                status.get("adapters").and_then(|value| value.as_array()).cloned()
+                            })
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter_map(|item| {
+                                let ready = item.get("ready").and_then(|value| value.as_bool()) == Some(true);
+                                let id = item
+                                    .get("agentId")
+                                    .and_then(|value| value.as_str())
+                                    .unwrap_or_default()
+                                    .to_string();
+                                (ready && !id.is_empty() && id != route_agent_id).then_some(id)
+                            })
+                            .min_by_key(|id| {
+                                FALLBACK_AGENT_PRIORITY
+                                    .iter()
+                                    .position(|candidate| candidate == id)
+                                    .unwrap_or(FALLBACK_AGENT_PRIORITY.len())
+                            })
+                    } else {
+                        None
+                    };
+                    if let Some(fallback_agent_id) = fallback {
+                        println!("[usb-device-input] retrying forward with fallback agent: {fallback_agent_id}");
+                        match forward_usb_agent_input_to_bridge(
+                            &payload,
+                            &agent_input,
+                            &fallback_agent_id,
+                            &route_session_id,
+                        ) {
+                            Ok(response) => {
+                                let message = format!(
+                                    "目标 {route_agent_id} 不可用，已改发到 {fallback_agent_id}"
+                                );
+                                let _ = emitter.emit(
+                                    "usb-input-action-result",
+                                    serde_json::json!({
+                                        "ok": true,
+                                        "pending": false,
+                                        "view": input_view,
+                                        "utteranceId": voice_utterance_id,
+                                        "text": input_text,
+                                        "agentId": fallback_agent_id,
+                                        "sessionId": route_session_id,
+                                        "message": message,
+                                        "response": response,
+                                    }),
+                                );
+                                println!("[usb-device-input] fallback forward ok");
+                                return;
+                            }
+                            Err(retry_error) => {
+                                println!("[usb-device-input] fallback forward FAILED: {retry_error}");
+                            }
+                        }
+                    }
                     let error_message = error.to_string();
                     let lower = error_message.to_ascii_lowercase();
                     let transient = lower.contains("error sending request for url")
@@ -5875,6 +5952,18 @@ fn ensure_bridge_runtime_blocking(
                 stop_managed_bridge(&runtime_paths.pid_path);
                 thread::sleep(Duration::from_millis(180));
                 pid = None;
+            } else if !probe_agent_bus_running(DEFAULT_AGENT_BUS_PORT) {
+                // Half-dead stack: HTTP port answers but the in-process
+                // agent-session-bus is gone. Voice/text injection would fail
+                // with AGENT_BUS_INJECT_HTTP_ERROR forever, because the
+                // health probe above only watches 23333. Replace the stack.
+                eprintln!(
+                    "[bridge-runtime] managed bridge {existing_pid} is alive but agent-session-bus is down; replacing the stack"
+                );
+                stop_managed_bridge(&runtime_paths.pid_path);
+                thread::sleep(Duration::from_millis(180));
+                pid = None;
+                running = false;
             }
         }
     }

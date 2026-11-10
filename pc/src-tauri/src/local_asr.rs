@@ -210,11 +210,48 @@ pub fn local_asr_health(endpoint: Option<String>) -> Result<Health, String> {
     if health.loaded {
         return Ok(health);
     }
-    ensure_loaded(&base, DEFAULT_ENGINE)
+    /* 预热必须用用户实际选择的引擎：固定用 DEFAULT_ENGINE 会把
+     * qwen3 选择"证明"成 sensevoice，设置页于是永远显示错的引擎。 */
+    let (_, engine) = saved_prefs();
+    ensure_loaded(&base, &engine)
+}
+
+/// 读取已保存的识别偏好（endpoint + engine）。文件缺失或字段为空时
+/// 回落到默认值——与 local_provider_prefs 的语义保持一致。
+pub fn saved_prefs() -> (String, String) {
+    let home = match std::env::var("HOME") {
+        Ok(home) => home,
+        Err(_) => return (DEFAULT_ENDPOINT.to_string(), DEFAULT_ENGINE.to_string()),
+    };
+    let path = std::path::Path::new(&home).join(".hachimo-local-asr.json");
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return (DEFAULT_ENDPOINT.to_string(), DEFAULT_ENGINE.to_string());
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return (DEFAULT_ENDPOINT.to_string(), DEFAULT_ENGINE.to_string());
+    };
+    let endpoint = value
+        .get("endpoint")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .unwrap_or(DEFAULT_ENDPOINT)
+        .to_string();
+    let engine = value
+        .get("engine")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .unwrap_or(DEFAULT_ENGINE)
+        .to_string();
+    (endpoint, engine)
 }
 
 /// 设置页保存语音识别来源。写 `~/.hachimo-local-asr.json`，识别器每次开麦
 /// 前读一次，因此切换后下一句就生效，不需要重启客户端。
+///
+/// 必须读-改-写：这份文件同时存 TTS 偏好（ttsProvider/localTtsVoice）。
+/// 之前整文件覆写，保存 ASR 会把 TTS 设置抹掉（实测发生过）。
 #[tauri::command]
 pub fn local_asr_save_prefs(
     provider: String,
@@ -223,12 +260,22 @@ pub fn local_asr_save_prefs(
 ) -> Result<(), String> {
     let home = std::env::var("HOME").map_err(|_| "无法定位 HOME 目录".to_string())?;
     let path = std::path::Path::new(&home).join(".hachimo-local-asr.json");
-    let payload = serde_json::json!({
-        "provider": provider,
-        "endpoint": endpoint.unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
-        "engine": engine.unwrap_or_else(|| DEFAULT_ENGINE.to_string()),
-    });
-    std::fs::write(&path, payload.to_string())
+    let mut value: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(map) = value.as_object_mut() {
+        map.insert("provider".into(), serde_json::json!(provider));
+        map.insert(
+            "endpoint".into(),
+            serde_json::json!(endpoint.unwrap_or_else(|| DEFAULT_ENDPOINT.to_string())),
+        );
+        map.insert(
+            "engine".into(),
+            serde_json::json!(engine.unwrap_or_else(|| DEFAULT_ENGINE.to_string())),
+        );
+    }
+    std::fs::write(&path, value.to_string())
         .map_err(|e| format!("保存语音识别偏好失败：{e}"))
 }
 

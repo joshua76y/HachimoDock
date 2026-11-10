@@ -85,6 +85,7 @@ fn deliver_to_conversation(app: &tauri::AppHandle, text: &str) {
         "voiceUtteranceId": format!("wifi-ptt-{stamp}"),
         "requestId": format!("p4-wifi-ptt-{stamp}"),
     });
+    eprintln!("[device-voice-bridge] recognized text delivered via input/action: {text}");
     crate::handle_incoming_usb_message(app, "input/action".to_string(), payload);
 }
 
