@@ -18,8 +18,8 @@ import {
   resolveGlobalExitEvents,
 } from "./button-config.js";
 
-test("device button config model advances to v10 physical-key naming", () => {
-  assert.equal(DEVICE_BUTTON_CONFIG_MODEL_VERSION, 10);
+test("device button config model advances to v11 four-key physical naming", () => {
+  assert.equal(DEVICE_BUTTON_CONFIG_MODEL_VERSION, 11);
 });
 
 test("the exact shipped v7 board map migrates SW1/SW3 without changing custom maps", () => {
@@ -47,7 +47,7 @@ test("the exact shipped v7 board map migrates SW1/SW3 without changing custom ma
   );
 
   assert.equal(migration.migrated, true);
-  assert.equal(migration.response.config.version, 10);
+  assert.equal(migration.response.config.version, 11);
   assert.equal(
     migration.response.config.bindings.find((binding) => binding.event === "button.sw1.short_press")?.action,
     "page_enter",

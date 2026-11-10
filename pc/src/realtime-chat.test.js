@@ -120,20 +120,20 @@ test("SW2 long press defaults to one realtime toggle and respects explicit overr
   const builderSource = dashboard.slice(dashboard.indexOf("export function buildBoardButtonConfigBindings"), dashboard.indexOf("function createButtonConfigRequestId"));
   const build = new Function("buttonControlRowsForRuntime", "clampButtonActionValue", `${builderSource.replace("export function", "function")}; return buildBoardButtonConfigBindings;`)(() => [row], (v) => v);
   assert.deepEqual(build({}, {}, "esp-p4"), [
-    { event: "button.sw2.long_press", action: "realtime_chat" },
-    { event: "button.sw2.hold", action: "disabled" },
+    { event: "button.2.long_press", action: "realtime_chat" },
+    { event: "button.2.hold", action: "disabled" },
   ]);
   assert.deepEqual(build({ p4_sw2_long: "disabled" }, {}, "esp-p4"), [
-    { event: "button.sw2.long_press", action: "disabled" },
-    { event: "button.sw2.hold", action: "disabled" },
+    { event: "button.2.long_press", action: "disabled" },
+    { event: "button.2.hold", action: "disabled" },
   ]);
   assert.deepEqual(build({ p4_sw2_long: "voice_ptt" }, {}, "esp-p4", true), [
-    { event: "button.sw2.long_press", action: "disabled" },
-    { event: "button.sw2.hold", action: "voice_ptt" },
+    { event: "button.2.long_press", action: "disabled" },
+    { event: "button.2.hold", action: "voice_ptt" },
   ]);
   const firmware = read("firmware/main/pet_p4_input.c");
-  assert.ok(firmware.includes('add_default_binding(config, "button.sw2.long_press", "realtime_chat", "")'));
-  assert.ok(firmware.includes('add_default_binding(config, "button.sw2.hold", "disabled", "")'));
+  assert.ok(firmware.includes('add_default_binding(config, "button.2.long_press", "realtime_chat", "")'));
+  assert.ok(firmware.includes('add_default_binding(config, "button.2.hold", "disabled", "")'));
 });
 
 test("API settings persist the LLM and Doubao TTS credentials and the modal previews through Rust", () => {

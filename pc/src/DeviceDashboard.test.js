@@ -289,15 +289,17 @@ test("ESP32-P4 exposes button presses plus all four joystick directions", () => 
   assert.match(dashboard, /p4_encoder_ccw:\s*"session_previous"/);
   assert.match(dashboard, /p4_joystick_up:\s*"session_previous"/);
   assert.match(dashboard, /p4_joystick_down:\s*"session_next"/);
-  assert.match(dashboard, /event:\s*"button\.sw1\.short_press"/);
-  assert.match(dashboard, /event:\s*"button\.sw1\.long_press"/);
-  assert.match(dashboard, /holdEvent:\s*"button\.sw1\.hold"/);
-  assert.match(dashboard, /event:\s*"button\.sw2\.short_press"/);
-  assert.match(dashboard, /event:\s*"button\.sw2\.long_press"/);
-  assert.match(dashboard, /holdEvent:\s*"button\.sw2\.hold"/);
-  assert.match(dashboard, /event:\s*"button\.sw3\.short_press"/);
-  assert.match(dashboard, /event:\s*"button\.sw3\.long_press"/);
-  assert.match(dashboard, /holdEvent:\s*"button\.sw3\.hold"/);
+  assert.match(dashboard, /event:\s*"button\.1\.short_press"/);
+  assert.match(dashboard, /event:\s*"button\.1\.long_press"/);
+  assert.match(dashboard, /holdEvent:\s*"button\.1\.hold"/);
+  assert.match(dashboard, /event:\s*"button\.2\.short_press"/);
+  assert.match(dashboard, /event:\s*"button\.2\.long_press"/);
+  assert.match(dashboard, /holdEvent:\s*"button\.2\.hold"/);
+  assert.match(dashboard, /event:\s*"button\.3\.short_press"/);
+  assert.match(dashboard, /event:\s*"button\.3\.long_press"/);
+  assert.match(dashboard, /holdEvent:\s*"button\.3\.hold"/);
+  assert.match(dashboard, /event:\s*"button\.4\.short_press"/);
+  assert.match(dashboard, /id: "p4_sw4_hold",[\s\S]*?event:\s*"button\.4\.hold",\s*voiceTriggerId:\s*"sw4\.hold",\s*defaultAction:\s*"voice_ptt"/);
   assert.match(dashboard, /event:\s*"button\.encoder\.short_press"/);
   assert.match(dashboard, /event:\s*"button\.encoder\.long_press"/);
   assert.match(dashboard, /holdEvent:\s*"button\.encoder\.hold"/);
@@ -464,7 +466,7 @@ test("voice enablement binds a real hardware PTT action and applies it immediate
 
   assert.match(source, /export function applyVoiceEnabledForRuntime/);
   assert.match(source, /next\.buttonActions\[selectedRow\.id\]|\? "voice_ptt"/);
-  assert.match(source, /P4_DEFAULT_VOICE_TRIGGER = "sw1\.hold"/);
+  assert.match(source, /P4_DEFAULT_VOICE_TRIGGER = "sw4\.hold"/);
   assert.match(source, /resolveButtonConfigForRuntime\(requestedConfigInput, usb\.runtime\)/);
   assert.match(source, /const requestedRuntimeVoiceEnabled = requested\.voiceEnabled/);
   assert.match(source, /const updateVoiceEnabled = useCallback/);
@@ -865,7 +867,7 @@ test("board button config sends twelve visible gestures as sixteen internal bind
 
   assert.match(source, /VOICE_BUTTON_OPTIONS/);
   assert.match(source, /trigger:\s*"encoder_button\.hold"/);
-  assert.match(source, /P4_DEFAULT_VOICE_TRIGGER = "sw1\.hold"/);
+  assert.match(source, /P4_DEFAULT_VOICE_TRIGGER = "sw4\.hold"/);
   assert.doesNotMatch(source, /top_button\.hold/);
   assert.match(source, /voiceConfig/);
   assert.match(source, /onApplyVoiceConfig/);
