@@ -27,22 +27,23 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const ASR_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// App 启动时调用一次；失败只打日志，不影响主程序。
-pub fn start() {
-    std::thread::spawn(|| {
-        if let Err(error) = serve() {
+pub fn start(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        if let Err(error) = serve(app) {
             eprintln!("[device-voice-bridge] {error}");
         }
     });
 }
 
-fn serve() -> Result<(), String> {
+fn serve(app: tauri::AppHandle) -> Result<(), String> {
     let listener =
         TcpListener::bind(BIND_ADDR).map_err(|e| format!("监听 {BIND_ADDR} 失败：{e}"))?;
     eprintln!("[device-voice-bridge] listening on http://{BIND_ADDR}/voice");
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                std::thread::spawn(move || handle_connection(stream));
+                let app = app.clone();
+                std::thread::spawn(move || handle_connection(app, stream));
             }
             Err(_) => continue,
         }
@@ -50,18 +51,41 @@ fn serve() -> Result<(), String> {
     Ok(())
 }
 
-fn handle_connection(mut stream: TcpStream) {
+fn handle_connection(app: tauri::AppHandle, mut stream: TcpStream) {
     let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
     let _ = stream.set_write_timeout(Some(READ_TIMEOUT));
     let (status, body) = match read_request(&mut stream) {
         Ok(Some(wav)) => match transcribe(&wav) {
-            Ok(text) => (200, serde_json::json!({"ok": true, "text": text})),
+            Ok(text) => {
+                deliver_to_conversation(&app, &text);
+                (200, serde_json::json!({"ok": true, "text": text}))
+            }
             Err(error) => (200, serde_json::json!({"ok": false, "error": error})),
         },
         Ok(None) => (404, serde_json::json!({"ok": false, "error": "not found"})),
         Err(error) => (400, serde_json::json!({"ok": false, "error": error})),
     };
     respond(&mut stream, status, &body);
+}
+
+/// 识别出的文字必须"传送出去"：走与 USB 麦克风相同的 input/action 投递线
+/// （实时对话进行中则进对话，否则进入跟随 Agent 的草稿/发送链路）。
+/// 设备本地气泡由固件自己的 speech/text 负责，这里补上 PC 侧的下游。
+fn deliver_to_conversation(app: &tauri::AppHandle, text: &str) {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or_default();
+    let payload = serde_json::json!({
+        "view": "voice_input",
+        "state": text,
+        "type": "voice_ptt_streaming_stt",
+        "event": "device.microphone.hold",
+        "transport": "wifi-http",
+        "voiceUtteranceId": format!("wifi-ptt-{stamp}"),
+        "requestId": format!("p4-wifi-ptt-{stamp}"),
+    });
+    crate::handle_incoming_usb_message(app, "input/action".to_string(), payload);
 }
 
 /// 读一个请求。返回 Ok(None) 表示不是 POST /voice（交给 404），

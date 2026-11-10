@@ -52,6 +52,16 @@ export default function PromptSounds() {
     }
   };
 
+  const preview = async (event) => {
+    setStatus({ pending: true, message: `正在让设备试播 ${event}…` });
+    try {
+      const message = await invoke("prompt_sound_preview", { event, host });
+      setStatus({ pending: false, message });
+    } catch (error) {
+      setStatus({ pending: false, message: `试听失败：${String(error)}` });
+    }
+  };
+
   const reset = async (event) => {
     try {
       await invoke("prompt_sound_reset", { event }).catch(() => {});
@@ -81,6 +91,9 @@ export default function PromptSounds() {
                 <td>{label}</td>
                 <td className="muted small">{custom ? `自定义 ${entry?.bytes ?? 0} B` : "内置音"}</td>
                 <td style={{ display: "flex", gap: 8 }}>
+                  <button type="button" className="ui-button" disabled={status.pending} onClick={() => preview(event)}>
+                    试听
+                  </button>
                   <label className="ui-button" style={{ cursor: "pointer" }}>
                     选文件
                     <input

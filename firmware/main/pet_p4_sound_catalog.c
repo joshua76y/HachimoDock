@@ -22,17 +22,19 @@ typedef struct {
 } sound_event_t;
 
 /* 顺序与 PC 端一致：录音开始/结束、识别成功/失败、发送成功、任务完成/失败、
- * 电量偏低、网络断开。preset 只是「没有自定义音时」的兜底，改编号要同步固件。 */
+ * 电量偏低、网络断开。preset 只是「没有自定义音时」的兜底，改编号要同步固件。
+ * preset 必须落在 0..PET_SFX_PRESETS-1（tap/beep/chirp/low/water/page），
+ * 之前映射到 6/7/8 的三个事件越界必然播放失败，已改回有效编号。 */
 static const sound_event_t kEvents[] = {
-  {"record_start", 1},
-  {"record_stop", 2},
-  {"asr_ok", 3},
-  {"asr_fail", 4},
-  {"send_ok", 5},
-  {"task_done", 6},
-  {"task_fail", 4},
-  {"low_battery", 7},
-  {"wifi_lost", 8},
+  {"record_start", 0},   /* tap: 60ms 短叩 */
+  {"record_stop", 1},    /* beep: 120ms 干净单音 */
+  {"asr_ok", 2},         /* chirp: 180ms 上扬 */
+  {"asr_fail", 3},       /* low: 300ms 低鸣 */
+  {"send_ok", 2},        /* chirp */
+  {"task_done", 2},      /* chirp */
+  {"task_fail", 3},      /* low */
+  {"low_battery", 3},    /* low */
+  {"wifi_lost", 5},      /* page: 80ms 纸噪 */
 };
 
 #define SOUND_EVENT_COUNT (sizeof(kEvents) / sizeof(kEvents[0]))

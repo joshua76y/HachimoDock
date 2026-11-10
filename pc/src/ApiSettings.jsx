@@ -483,9 +483,18 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
                       text: "你好，我是本地语音合成测试。",
                       voice: ttsVoice,
                     });
+                    /* 真的把声音播出来：之前只显示字节数，用户听不到。 */
+                    let played = "未播放";
+                    try {
+                      const audio = new Audio(`data:audio/wav;base64,${result.wavBase64}`);
+                      await audio.play();
+                      played = "正在播放";
+                    } catch (playError) {
+                      played = `播放失败：${String(playError)}`;
+                    }
                     setTtsProbe({
                       pending: false,
-                      message: `合成成功：${result.voice} · ${result.bytes} 字节 · ${result.ms}ms`,
+                      message: `合成成功：${result.voice} · ${result.bytes} 字节 · ${result.ms}ms · ${played}`,
                     });
                   } catch (error) {
                     setTtsProbe({ pending: false, message: `合成失败：${String(error)}` });
@@ -565,9 +574,40 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
                 onClick={async () => {
                   setLocalAsrProbe({ pending: true, message: "正在连接本地 ASR…" });
                   try {
+                    const base = String(localAsrEndpoint).replace(/\/+$/, "");
                     /* 用 fetch 直连，避免 Tauri 命令注册在不同构建里不一致 */
-                    const response = await fetch(String(localAsrEndpoint).replace(/\/+$/, "") + "/health", { cache: "no-store" });
-                    const raw = await response.json();
+                    const response = await fetch(base + "/health", { cache: "no-store" });
+                    let raw = await response.json();
+                    /* 服务端是懒加载 + 闲置 10 分钟自动卸载：未加载时发 0.5s
+                     * 静音把引擎拉进内存再报状态，别把正常懒加载显示成故障。 */
+                    if (!raw.loaded) {
+                      const sampleRate = 16000;
+                      const silence = new Int16Array(sampleRate / 2); // 0.5s 静音
+                      const buffer = new ArrayBuffer(44 + silence.length * 2);
+                      const view = new DataView(buffer);
+                      const writeStr = (offset, text) => {
+                        for (let i = 0; i < text.length; i += 1) view.setUint8(offset + i, text.charCodeAt(i));
+                      };
+                      writeStr(0, "RIFF");
+                      view.setUint32(4, 36 + silence.length * 2, true);
+                      writeStr(8, "WAVEfmt ");
+                      view.setUint32(16, 16, true);
+                      view.setUint16(20, 1, true);
+                      view.setUint16(22, 1, true);
+                      view.setUint32(24, sampleRate, true);
+                      view.setUint32(28, sampleRate * 2, true);
+                      view.setUint16(32, 2, true);
+                      view.setUint16(34, 16, true);
+                      writeStr(36, "data");
+                      view.setUint32(40, silence.length * 2, true);
+                      for (let i = 0; i < silence.length; i += 1) view.setInt16(44 + i * 2, 0, true);
+                      await fetch(`${base}/stt?engine=${encodeURIComponent(localAsrEngine || "sensevoice")}`, {
+                        method: "POST",
+                        headers: { "Content-Type": "audio/wav" },
+                        body: buffer,
+                      }).catch(() => null);
+                      raw = await fetch(base + "/health", { cache: "no-store" }).then((r) => r.json());
+                    }
                     const health = { engine: raw.engineLoaded || raw.engine || "sensevoice", loaded: !!raw.loaded, latencyMs: 0 };
                     setLocalAsrProbe({
                       pending: false,

@@ -22,6 +22,8 @@ void pet_p4_audio_fruit_sound(unsigned events,unsigned volume,bool active);
  * capture, realtime conversation, streams and music always win; never queued. */
 void pet_p4_audio_sfx_set(bool active,unsigned volume);
 bool pet_p4_audio_sfx_trigger(unsigned preset);
+/* sound/play 的显式播放：绕过环境音效开关，其余门禁相同。 */
+bool pet_p4_audio_prompt_sfx_trigger(unsigned preset);
 
 /* 播放事件提示音：有 /spiffs/sounds/<event>.wav 就用它，返回 false 表示没有。 */
 bool pet_p4_audio_prompt_play(const char *event);

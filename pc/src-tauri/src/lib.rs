@@ -11670,8 +11670,8 @@ pub fn run() {
             let handle = app.handle().clone();
             start_usb_auto_connect(usb_for_auto, handle.clone());
             /* 设备 PTT 桥接：固件把整段录音 POST 到 :8901/voice，由这里
-             * 转给本地 ASR。App 启动即监听，与 USB/WiFi 音频链路互补。 */
-            device_voice_bridge::start();
+             * 转给本地 ASR，并把识别文字送进对话/Agent 投递线。 */
+            device_voice_bridge::start(app.handle().clone());
             start_p4_ready_migration(handle.clone());
             // Pull up the MQTT bridge so the moment a board comes online we
             // can capture its `hello` and write the device binding without
@@ -11710,6 +11710,7 @@ pub fn run() {
             local_tts::local_tts_save_prefs,
             llm_models::list_openai_models,
             prompt_sounds::prompt_sound_upload,
+            prompt_sounds::prompt_sound_preview,
             prompt_sounds::prompt_sound_save_bytes,
             prompt_sounds::prompt_sound_catalog,
             prompt_sounds::prompt_sound_reset,

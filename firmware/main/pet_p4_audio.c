@@ -738,6 +738,17 @@ bool pet_p4_audio_sfx_trigger(unsigned preset) {
   atomic_fetch_or(&g_sfx_pending,1u<<preset);
   return true;
 }
+
+/* 显式通知（sound/play 试听、提示音内置兜底）不受环境音效开关约束：
+ * 用户点名要播的声音必须出声，只让位给录音/对话/扬声器未就绪。
+ * 与 g_sfx_pending 分开记账，sfx_drain_step 里无条件渲染。 */
+static atomic_uint g_prompt_sfx_pending;
+bool pet_p4_audio_prompt_sfx_trigger(unsigned preset) {
+  if(preset>=PET_SFX_PRESETS||atomic_load(&g_capture_requested)
+     ||atomic_load(&g_conversation)||!pet_p4_audio_playback_ready())return false;
+  atomic_fetch_or(&g_prompt_sfx_pending,1u<<preset);
+  return true;
+}
 #if PET_P4_SEQUENCE || PET_P4_SAMPLES
 #include "pet_p4_component_media_clients.h"
 /* Track C: sequencer + one-shot samples ride the sfx drain step. Program/PCM copies
@@ -883,9 +894,12 @@ static bool sfx_drain_step(uint8_t *pcm) {
   bool blocked=atomic_load(&g_capture_requested)||atomic_load(&g_capture_active)
     ||atomic_load(&g_conversation)||atomic_load(&g_stream_active)||atomic_load(&g_music);
   bool enabled=atomic_load(&g_sfx_enabled)||CEXT_ENABLED()||prompt_pending();
+  bool prompt_sfx_requested=atomic_load(&g_prompt_sfx_pending)!=0;
   unsigned pending=atomic_exchange(&g_sfx_pending,0);
-  if(blocked||!enabled){pet_sfx_reset(&g_sfx_core);(void)cext_mix_step((int16_t*)pcm,true);xSemaphoreGiveRecursive(g_stream_lock);return false;}
+  unsigned prompt_sfx_bits=atomic_exchange(&g_prompt_sfx_pending,0);
+  if(blocked||(!enabled&&!prompt_sfx_requested)){pet_sfx_reset(&g_sfx_core);(void)cext_mix_step((int16_t*)pcm,true);xSemaphoreGiveRecursive(g_stream_lock);return false;}
   for(unsigned p=0;p<PET_SFX_PRESETS;p++)if(pending&(1u<<p)&&atomic_load(&g_sfx_enabled))pet_sfx_trigger(&g_sfx_core,p);
+  for(unsigned p=0;p<PET_SFX_PRESETS;p++)if(prompt_sfx_bits&(1u<<p))pet_sfx_trigger(&g_sfx_core,p);
   if(!pet_sfx_active(&g_sfx_core)&&!CEXT_PENDING()&&!prompt_pending()){xSemaphoreGiveRecursive(g_stream_lock);return false;}
   PET_AUDIO_REALTIME_SCOPE(sfx_work);
   if (pet_resources_device_realtime_begin(&sfx_work) != PET_RESOURCE_OK) {

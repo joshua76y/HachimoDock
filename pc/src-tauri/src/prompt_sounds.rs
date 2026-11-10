@@ -187,9 +187,21 @@ fn call(topic: &str, payload: serde_json::Value, host: &str) -> Result<String, S
     stream.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
     stream.write_all(b"\n").map_err(|e| e.to_string())?;
     let mut reader = BufReader::new(stream);
-    let mut response = String::new();
-    reader.read_line(&mut response).map_err(|e| format!("等待 ack 超时：{e}"))?;
-    Ok(response)
+    /* 每条新连接设备会先推一条 hello 招呼行；要跳过它读到真正的 ack。 */
+    for _ in 0..32 {
+        let mut response = String::new();
+        let n = reader
+            .read_line(&mut response)
+            .map_err(|e| format!("等待 ack 超时：{e}"))?;
+        if n == 0 {
+            return Err("设备在 ack 前关闭了连接".into());
+        }
+        if response.contains("\"topic\":\"hello\"") {
+            continue;
+        }
+        return Ok(response);
+    }
+    Err("设备只回了 hello，没有业务 ack".into())
 }
 
 /// 把自定义提示音推到设备：begin → 分片 → end → play。
@@ -234,6 +246,18 @@ fn base64_encode(data: &[u8]) -> String {
 #[tauri::command]
 pub fn prompt_sound_save_bytes(event: String, bytes: Vec<u8>) -> Result<PromptSoundEntry, String> {
     save_custom(&event, &bytes)
+}
+
+/// 试听当前设置的音效：让设备自己播（自定义 WAV 或内置 preset），
+/// 这是用户实际听到的声音；内置音是固件合成的，PC 上没有字节。
+#[tauri::command]
+pub fn prompt_sound_preview(event: String, host: String) -> Result<String, String> {
+    let ack = call("sound/play", serde_json::json!({ "event": event }), &host)?;
+    if ack.contains("\"ok\":true") {
+        Ok(format!("{event}：设备正在播放当前音效"))
+    } else {
+        Err(format!("{event}：设备播放失败（{ack}）"))
+    }
 }
 
 /// 当前提示音目录，界面用来显示落在哪。

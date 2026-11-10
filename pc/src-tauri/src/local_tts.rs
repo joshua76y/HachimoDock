@@ -105,10 +105,13 @@ pub fn local_tts_voices() -> Vec<String> {
 #[tauri::command]
 pub fn local_tts_preview(text: String, voice: Option<String>) -> Result<LocalTtsPreview, String> {
     let result = synthesize(&text, voice.as_deref(), None)?;
+    use base64::Engine as _;
     Ok(LocalTtsPreview {
         bytes: result.wav.len(),
         voice: result.voice,
         ms: result.ms,
+        /* 试听按钮要真的能听到声音：把 WAV 带回前端用 <audio> 播。 */
+        wav_base64: base64::engine::general_purpose::STANDARD.encode(result.wav),
     })
 }
 
@@ -118,6 +121,7 @@ pub struct LocalTtsPreview {
     pub bytes: usize,
     pub voice: String,
     pub ms: u64,
+    pub wav_base64: String,
 }
 
 #[cfg(test)]

@@ -4225,7 +4225,8 @@ bool pet_p4_handle_line_with_reply(
     if (!ok && event) {
       unsigned preset = 0;
       if (pet_p4_sound_catalog_preset(event, &preset)) {
-        ok = pet_p4_audio_sfx_trigger(preset);
+        /* 显式点名播放：即使环境音效开关未开也要出声。 */
+        ok = pet_p4_audio_prompt_sfx_trigger(preset);
       }
     }
     send_protocol_ack(send_line, ctx, topic, payload, ok,

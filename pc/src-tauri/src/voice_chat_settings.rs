@@ -224,6 +224,10 @@ pub fn load() -> Result<(VoiceChatSettings, &'static str), String> {
     if settings.llm_api_key.trim().is_empty() {
         settings.llm_api_key = settings.llm_api_keys.get(&credential_scope(&settings)).cloned().unwrap_or_default();
     }
+    /* 本地 OMLX：没存 Key 就用网关出厂令牌，保证请求能过 401 这关。 */
+    if settings.llm_api_key.trim().is_empty() && settings.llm_provider == "omlx" {
+        settings.llm_api_key = "1234".into();
+    }
     apply_llm_defaults(&mut settings);
     settings.tts_resource_id = TTS_DEFAULT_RESOURCE_ID.to_string();
     Ok((settings, "local"))
@@ -294,8 +298,10 @@ pub fn status() -> Result<VoiceChatSettingsStatus, String> {
     let (tts_key, tts_uses_asr_key) = resolve_tts_key(&settings);
     Ok(VoiceChatSettingsStatus {
         llm_web_search: settings.llm_web_search.unwrap_or(true),
-        llm_configured: !settings.llm_api_key.trim().is_empty(),
-        tts_configured: !tts_key.is_empty(),
+        /* 本地 OMLX 不需要云端凭据（空 Key 时已兜底出厂令牌）。 */
+        llm_configured: !settings.llm_api_key.trim().is_empty() || settings.llm_provider == "omlx",
+        /* 本地 TTS（macOS say）不需要火山 Key，不能按云端凭据判定。 */
+        tts_configured: !tts_key.is_empty() || crate::local_tts::provider_is_local(),
         llm_provider: settings.llm_provider.clone(),
         tts_uses_asr_key,
         llm_base_url: settings.llm_base_url.clone(),

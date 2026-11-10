@@ -90,6 +90,7 @@
           "prompt_sound_catalog",
           "prompt_sound_save_bytes",
           "prompt_sound_upload",
+          "prompt_sound_preview",
           "prompt_sound_reset",
           "ensure_device_voice_runtime",
           "ensure_voice_runtime",
