@@ -236,6 +236,8 @@ static bool action_is_allowed(const char *action) {
     "realtime_chat",
     "agent_enter",
     "agent_prompt",
+    "agent_next",
+    "agent_previous",
     "session_next",
     "session_previous",
     "session_clear",

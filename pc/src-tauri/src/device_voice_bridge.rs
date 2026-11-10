@@ -17,6 +17,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::Mutex;
 use std::time::Duration;
 
 const BIND_ADDR: &str = "0.0.0.0:8901";
@@ -25,6 +26,94 @@ const MAX_BODY: usize = 16 * 1024 * 1024;
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// 本地 ASR 冷加载 + 识别的最坏情况（Qwen3 冷启动约 19s）。
 const ASR_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// WiFi PTT 目标冻结（round-5，对齐 USB 路径 DeviceVoiceContext 语义）：
+/// 固件在按下语音键瞬间 POST /voice/begin，这里快照「当时跟随的 Agent」；
+/// 录完投递前若跟随目标已变化，则丢弃本次识别文本，宁可丢字也不写错地方。
+#[derive(Clone, Debug)]
+struct VoiceBeginSnapshot {
+    agent_id: String,
+    at_ms: u128,
+}
+
+static VOICE_BEGIN_SNAPSHOT: Mutex<Option<VoiceBeginSnapshot>> = Mutex::new(None);
+
+/// 快照有效窗口：录音上限 60s + 传输/识别余量。
+const VOICE_BEGIN_SNAPSHOT_TTL_MS: u128 = 120_000;
+
+fn now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or_default()
+}
+
+/// 当前跟随的 Agent（与 PC 前端「跟随」同一数据源：bridge profile）。
+fn followed_agent_id() -> String {
+    let profile = crate::get_bridge_profile_path()
+        .ok()
+        .and_then(|path| crate::read_bridge_profile(&path).ok())
+        .flatten();
+    match profile {
+        Some(raw) => {
+            let profile = crate::normalize_bridge_profile(raw);
+            if !profile.selected_agent_id.is_empty() {
+                profile.selected_agent_id
+            } else {
+                profile
+                    .enabled_agents
+                    .first()
+                    .cloned()
+                    .unwrap_or_default()
+            }
+        }
+        None => String::new(),
+    }
+}
+
+fn store_voice_begin_snapshot() {
+    let snapshot = VoiceBeginSnapshot {
+        agent_id: followed_agent_id(),
+        at_ms: now_ms(),
+    };
+    bridge_log(&format!(
+        "voice/begin -> froze follow target \"{}\"",
+        snapshot.agent_id
+    ));
+    if let Ok(mut guard) = VOICE_BEGIN_SNAPSHOT.lock() {
+        *guard = Some(snapshot);
+    }
+}
+
+/// 录完投递前的 target_is_current 校验。返回 false 表示跟随目标在录音
+/// 期间被切换，本次文本应当丢弃（与原项目语义一致：宁弃勿错投）。
+fn voice_target_is_current() -> bool {
+    let snapshot = match VOICE_BEGIN_SNAPSHOT.lock() {
+        Ok(guard) => guard.clone(),
+        Err(_) => return true,
+    };
+    let Some(snapshot) = snapshot else {
+        return true; // 旧固件没有 begin 通知：保持原行为直接投递
+    };
+    if now_ms().saturating_sub(snapshot.at_ms) > VOICE_BEGIN_SNAPSHOT_TTL_MS {
+        return true; // 过期快照（比如悬空的 begin）：不拦
+    }
+    if snapshot.agent_id.is_empty() {
+        return true; // begin 时无法确定目标：不拦
+    }
+    let current = followed_agent_id();
+    if current.is_empty() {
+        return true; // 投递时无法确定目标：不拦
+    }
+    let same = snapshot.agent_id == current;
+    if !same {
+        bridge_log(&format!(
+            "voice dropped: follow target changed during recording (\"{}\" -> \"{}\")",
+            snapshot.agent_id, current
+        ));
+    }
+    same
+}
 
 /// 每次设备 PTT 请求都落一行日志。eprintln 在 GUI 启动下看不到，
 /// 排查「按了语音键没反应」必须有一份能读的记录：
@@ -80,15 +169,29 @@ fn handle_connection(app: tauri::AppHandle, mut stream: TcpStream) {
     let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
     let _ = stream.set_write_timeout(Some(READ_TIMEOUT));
     let (status, body) = match read_request(&mut stream) {
-        Ok(Some(wav)) => match transcribe(&wav) {
+        Ok(Some((path, body))) if path == "/voice/begin" => {
+            store_voice_begin_snapshot();
+            (200, serde_json::json!({"ok": true}))
+        }
+        Ok(Some((_path, wav))) => match transcribe(&wav) {
             Ok(text) => {
                 bridge_log(&format!(
                     "POST /voice from {peer} bytes={} -> ok text=\"{}\"",
                     wav.len(),
                     text.chars().take(60).collect::<String>()
                 ));
-                deliver_to_conversation(&app, &text);
-                (200, serde_json::json!({"ok": true, "text": text}))
+                if voice_target_is_current() {
+                    deliver_to_conversation(&app, &text);
+                    (200, serde_json::json!({"ok": true, "text": text}))
+                } else {
+                    (
+                        200,
+                        serde_json::json!({
+                            "ok": false,
+                            "error": "跟随的 Agent 在录音期间已切换，本次语音未投递"
+                        }),
+                    )
+                }
             }
             Err(error) => {
                 bridge_log(&format!(
@@ -132,8 +235,8 @@ fn deliver_to_conversation(app: &tauri::AppHandle, text: &str) {
 }
 
 /// 读一个请求。返回 Ok(None) 表示不是 POST /voice（交给 404），
-/// Ok(Some(wav)) 表示拿到了完整 body。
-fn read_request(stream: &mut TcpStream) -> Result<Option<Vec<u8>>, String> {
+/// Ok(Some((path, body))) 表示拿到了完整 body。
+fn read_request(stream: &mut TcpStream) -> Result<Option<(String, Vec<u8>)>, String> {
     let mut buf = Vec::with_capacity(1024);
     let mut chunk = [0u8; 4096];
     // 1. 读到头部结束
@@ -184,7 +287,7 @@ fn read_request(stream: &mut TcpStream) -> Result<Option<Vec<u8>>, String> {
         body.extend_from_slice(&chunk[..n]);
     }
     body.truncate(content_length);
-    Ok(Some(body))
+    Ok(Some((path.to_string(), body)))
 }
 
 fn find_header_end(buf: &[u8]) -> Option<usize> {

@@ -4901,6 +4901,8 @@ fn is_allowed_button_config_action(action: &str) -> bool {
             | "volume_adjust"
             | "agent_enter"
             | "agent_prompt"
+            | "agent_next"
+            | "agent_previous"
             | "session_next"
             | "session_previous"
             | "session_clear"
@@ -15275,6 +15277,8 @@ mod tests {
         assert!(is_allowed_button_config_event("joystick.down"));
         assert!(is_allowed_button_config_action("session_next"));
         assert!(is_allowed_button_config_action("session_previous"));
+        assert!(is_allowed_button_config_action("agent_next"));
+        assert!(is_allowed_button_config_action("agent_previous"));
         assert!(is_allowed_button_config_action("session_clear"));
         assert!(is_allowed_button_config_action("dsh_interrupt"));
         assert!(is_allowed_button_config_action("miniapp_screen_tap"));

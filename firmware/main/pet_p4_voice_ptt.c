@@ -50,6 +50,13 @@
 #define PTT_NVS_KEY_URL "url"
 #define PTT_URL_DEFAULT "http://192.168.1.40:8901/voice"
 
+/* round-5 目标冻结：按下瞬间向 PC 发 POST <base>/voice/begin，
+ * PC 侧快照当前跟随的 Agent；录完投递前若目标已切换则丢弃本次文本，
+ * 与 USB 流式路径 DeviceVoiceContext 的 target_is_current 语义对齐。
+ * 通知是尽力而为：失败/超时不影响录音主链路。 */
+#define PTT_BEGIN_TIMEOUT_MS 2000
+#define PTT_BEGIN_TASK_STACK (6 * 1024)
+
 static pet_p4_voice_ptt_submit_fn g_submit_line;
 TaskHandle_t g_ptt_task_handle;   /* header 里 extern，worker 提交时用于唤醒 */
 static char g_url[128];
@@ -101,6 +108,46 @@ bool pet_p4_voice_ptt_capturing(void) {
   return atomic_load_explicit(&g_capturing, memory_order_acquire);
 }
 
+/* 后台通知任务：POST <base>/voice/begin，用完自删。arg = heap 内 url 副本 */
+static void ptt_begin_post_task(void *arg) {
+  char *url = (char *) arg;
+  esp_http_client_config_t cfg = {
+    .url = url,
+    .timeout_ms = PTT_BEGIN_TIMEOUT_MS,
+    .method = HTTP_METHOD_POST,
+    .buffer_size = 1024,
+  };
+  esp_http_client_handle_t client = esp_http_client_init(&cfg);
+  if (client) {
+    esp_err_t err = esp_http_client_open(client, 0);
+    if (err == ESP_OK) {
+      esp_http_client_fetch_headers(client);
+      esp_http_client_read(client, NULL, 0); /* 吃掉响应，允许连接复用语义收尾 */
+    }
+    ESP_LOGD(TAG, "voice/begin notify: %s", esp_err_to_name(err));
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+  } else {
+    ESP_LOGD(TAG, "voice/begin client init failed");
+  }
+  free(url);
+  vTaskDelete(NULL);
+}
+
+/* 由 g_url 推导 begin 通知端点：…/voice -> …/voice/begin */
+static char *ptt_begin_url_dup(void) {
+  const size_t len = strlen(g_url);
+  char *url = (char *) malloc(len + 16);
+  if (!url) return NULL;
+  if (len >= 6 && strcmp(g_url + len - 6, "/voice") == 0) {
+    memcpy(url, g_url, len - 6);
+    memcpy(url + len - 6, "/voice/begin", 13);
+  } else {
+    snprintf(url, len + 16, "%s/begin", g_url);
+  }
+  return url;
+}
+
 /* 按住开始：WiFi 在线才接管；返回 false 由调用方回退 USB 流式 */
 bool pet_p4_voice_ptt_begin(bool session_queue_empty) {
   if (!pet_p4_wifi_is_connected()) return false;
@@ -121,6 +168,14 @@ bool pet_p4_voice_ptt_begin(bool session_queue_empty) {
     return false;
   }
   ESP_LOGI(TAG, "local ptt session start");
+  /* 目标冻结通知：capture 成功后再发，失败不影响录音 */
+  char *begin_url = ptt_begin_url_dup();
+  if (begin_url) {
+    if (xTaskCreate(ptt_begin_post_task, "ptt-begin", PTT_BEGIN_TASK_STACK,
+                    begin_url, 4, NULL) != pdPASS) {
+      free(begin_url);
+    }
+  }
   return true;
 }
 

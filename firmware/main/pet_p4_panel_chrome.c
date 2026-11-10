@@ -335,6 +335,8 @@ static void redraw(const char *clock, const char *date, const char *net,
       else if (!strcmp(action, "realtime_chat")) names[i] = "对话";
       else if (!strcmp(action, "session_next")) names[i] = "下一个";
       else if (!strcmp(action, "session_previous")) names[i] = "上一个";
+      else if (!strcmp(action, "agent_next")) names[i] = "下个Agent";
+      else if (!strcmp(action, "agent_previous")) names[i] = "上个Agent";
       else if (!strcmp(action, "disabled")) names[i] = "—";
       else names[i] = "已绑";
     }

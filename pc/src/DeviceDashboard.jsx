@@ -35,6 +35,7 @@
 
 import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { RefreshCw } from "lucide-react";
 import DeviceGuideModal from "./DeviceGuideModal.jsx";
 import {
@@ -117,8 +118,8 @@ export const DEFAULT_BUTTON_ACTIONS = {
   p4_encoder_ccw: "session_previous",
   p4_joystick_up: "session_previous",
   p4_joystick_down: "session_next",
-  p4_boot_short: "disabled",
-  p4_boot_long: "disabled",
+  p4_boot_short: "agent_next",
+  p4_boot_long: "agent_previous",
 };
 
 export const P4_VOICE_BUTTON_OPTIONS = [
@@ -133,8 +134,10 @@ export const BUTTON_FUNCTION_OPTIONS = [
   { id: "agent_prompt", label: "发送自定义指令", detail: "按下对应手势后，将该按钮下方填写的指令直接发送给当前 Code Agent。" },
   { id: "voice_ptt", label: "语音输入", detail: "绑定到长按：按住说话，松开追加到输入框，确认后发送。" },
   { id: "realtime_chat", label: "实时对话", detail: "在宠物界面触发后开始聊天，再次触发结束。组件运行时请先返回宠物界面。" },
-  { id: "session_previous", label: "上一个", detail: "宠物界面切换到上一个会话气泡；组件中心切换到上一个组件。" },
-  { id: "session_next", label: "下一个", detail: "宠物界面切换到下一个会话气泡；组件中心切换到下一个组件。" },
+  { id: "session_previous", label: "上一个会话", detail: "宠物界面切换到上一个会话气泡；组件中心切换到上一个组件。" },
+  { id: "session_next", label: "下一个会话", detail: "宠物界面切换到下一个会话气泡；组件中心切换到下一个组件。" },
+  { id: "agent_next", label: "下一个 Agent", detail: "在本机检测到的 Agent 之间循环切换跟随目标（设备与 PC 同步切换）。" },
+  { id: "agent_previous", label: "上一个 Agent", detail: "在本机检测到的 Agent 之间反向循环切换跟随目标。" },
   { id: "session_clear", label: "清空主页会话", detail: "清除设备主页当前显示的全部会话；新会话或新活动会自动重新显示。" },
   { id: "dsh_interrupt", label: "打断 DSH 当前任务", detail: "仅在跟随 DeepSeek Harness 时可用：取消当前正在执行的回合。" },
   { id: "component_center", label: "切换宠物/组件", detail: "切换宠物界面和组件列表；组件运行时请先返回。" },
@@ -169,6 +172,8 @@ const P4_CUSTOM_ACTION_OPTIONS = [
   "realtime_chat",
   "session_previous",
   "session_next",
+  "agent_next",
+  "agent_previous",
   "session_clear",
   "dsh_interrupt",
   "component_center",
@@ -193,9 +198,10 @@ export const P4_BUTTON_CONTROL_ROWS = [
    * 不再显示 button.encoder.*（旋钮按压）行，避免同一键重复出现两个设置。 */
   { id: "p4_encoder_press", controlId: "p4_joystick", label: "摇杆K 短按", event: "button.k.short_press", defaultAction: "page_enter", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
   { id: "p4_encoder_long", controlId: "p4_joystick", label: "摇杆K 长按", event: "button.k.long_press", holdEvent: "button.k.hold", voiceTriggerId: "encoder_button.hold", defaultAction: "disabled", voiceFallbackAction: "disabled", actionOptions: ["voice_ptt", ...P4_CUSTOM_ACTION_OPTIONS], supportsValue: true },
-  /* BOOT 侧键 B：固件事件 button.b.*，此前在 PC 端完全没有配置入口。 */
-  { id: "p4_boot_short", controlId: "p4_boot", label: "B键 短按", event: "button.b.short_press", defaultAction: "disabled", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
-  { id: "p4_boot_long", controlId: "p4_boot", label: "B键 长按", event: "button.b.long_press", holdEvent: "button.b.hold", defaultAction: "disabled", voiceFallbackAction: "disabled", actionOptions: ["voice_ptt", ...P4_CUSTOM_ACTION_OPTIONS], supportsValue: true },
+  /* BOOT 侧键 B：固件事件 button.b.*，此前在 PC 端完全没有配置入口。
+   * round-5：B 键默认绑定 Agent 循环切换（多 Agent 依次切换跟随目标）。 */
+  { id: "p4_boot_short", controlId: "p4_boot", label: "B键 短按", event: "button.b.short_press", defaultAction: "agent_next", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
+  { id: "p4_boot_long", controlId: "p4_boot", label: "B键 长按", event: "button.b.long_press", holdEvent: "button.b.hold", defaultAction: "agent_previous", voiceFallbackAction: "disabled", actionOptions: ["voice_ptt", ...P4_CUSTOM_ACTION_OPTIONS], supportsValue: true },
 ];
 
 const LEGACY_P4_DEFAULT_BUTTON_ACTIONS = {
@@ -796,9 +802,88 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
     realtimeChat,
     appearanceSync,
     setUsageHelp,
+    applyDesktopPet,
+    agentOptions,
+    agentAppearanceMap,
+    appearances,
   } = useDeviceContext();
   const selectedAgentId = currentDisplay.agentId;
   const { push } = useToast();
+
+  // ---------- Multi-agent cyclic follow switch (round-5, RLCD-style) ----------
+  // The device button (default: B short = next / B long = previous) emits
+  // input/event with action agent_next / agent_previous. We cycle over the
+  // detected agents and reuse the existing verified follow pipeline.
+  const agentCycleRef = useRef(null);
+  agentCycleRef.current = { selectedAgentId, agentOptions, agentAppearanceMap, appearances, applyDesktopPet, appearanceSyncPending: appearanceSync.pending, push };
+  useEffect(() => {
+    let disposed = false;
+    const unlisteners = [];
+    listen("usb-message", (event) => {
+      const envelope = event?.payload && typeof event.payload === "object" ? event.payload : {};
+      if (envelope.topic !== "input/event") return;
+      const payload = envelope.payload && typeof envelope.payload === "object" ? envelope.payload : {};
+      const action = String(payload.action || "");
+      const direction = action === "agent_next" ? 1 : action === "agent_previous" ? -1 : 0;
+      if (!direction) return;
+      const ctx = agentCycleRef.current;
+      if (ctx.appearanceSyncPending) {
+        ctx.push({
+          tone: "warning",
+          title: "正在处理上一次切换",
+          message: "请等待当前跟随切换完成后再切换 Agent。",
+          ttl: 3_000,
+        });
+        return;
+      }
+      const detected = (ctx.agentOptions || []).filter((agent) => agent?.detected && agent?.id);
+      if (detected.length < 2) {
+        ctx.push({
+          tone: "warning",
+          title: "没有可切换的 Agent",
+          message: "本机只检测到一个 Agent，无法循环切换。",
+          ttl: 3_000,
+        });
+        return;
+      }
+      const currentIndex = detected.findIndex((agent) => agent.id === ctx.selectedAgentId);
+      const target = detected[(currentIndex + direction + detected.length) % detected.length] || detected[0];
+      if (!target || target.id === ctx.selectedAgentId) return;
+      const appearanceId = ctx.agentAppearanceMap?.[target.id] || "";
+      const appearance = (ctx.appearances || []).find((record) => record.id === appearanceId)
+        || (ctx.appearances || [])[0];
+      if (!appearance?.id) {
+        ctx.push({
+          tone: "warning",
+          title: `无法切换到 ${target.label}`,
+          message: "没有可用的形象素材。",
+          ttl: 3_000,
+        });
+        return;
+      }
+      ctx.push({
+        tone: "info",
+        title: `切换跟随 → ${target.label}`,
+        message: "正在通过已验证的 USB 管线切换跟随目标…",
+        ttl: 3_000,
+      });
+      ctx.applyDesktopPet(target.id, appearance, {}).catch((error) => {
+        ctx.push({
+          tone: "error",
+          title: "Agent 切换失败",
+          message: String(error?.message || error).slice(0, 120),
+          ttl: 5_000,
+        });
+      });
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisteners.push(stop);
+    }).catch(() => {});
+    return () => {
+      disposed = true;
+      unlisteners.forEach((stop) => { try { stop(); } catch { /* ignore */ } });
+    };
+  }, []);
 
   const [voiceState, voiceDispatch] = useReducer(voiceReducer, VOICE_INITIAL_STATE);
   const onDeviceVoiceAudioActivity = useCallback((activity) => {

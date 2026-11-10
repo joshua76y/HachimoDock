@@ -19,6 +19,7 @@ import {
   pickFirstDetectedAgentId,
   sanitizeAgentAppearanceMap,
   shouldConfirmChannelSwitch,
+  toAgentSet,
   toSingleAgentSet,
 } from "./agent-appearance-config.js";
 
@@ -122,6 +123,15 @@ test("channel switch warnings only appear when changing the current followed cha
   assert.equal(shouldConfirmChannelSwitch(map, "claude-code", new Set(["claude-code"])), false);
   assert.equal(shouldConfirmChannelSwitch(map, "codex", new Set(["claude-code"])), true);
   assert.deepEqual(assignedAgentIds(map, "claude-code"), ["claude-code"]);
+  assert.deepEqual(assignedAgentIds(map, "claude-code", ["codex", "workbuddy"]), [
+    "claude-code",
+    "codex",
+    "workbuddy",
+  ]);
+  assert.deepEqual(assignedAgentIds(map, "codex", ["codex", "claude-code"]), [
+    "codex",
+    "claude-code",
+  ]);
   assert.equal(shouldConfirmChannelSwitch({}, "claude-code"), false);
 });
 
@@ -151,6 +161,21 @@ test("toSingleAgentSet respects stored order without preferring any specific age
   assert.deepEqual([...toSingleAgentSet(["claude-code", "codex"])], ["claude-code"]);
   assert.deepEqual([...toSingleAgentSet("openclaw")], ["openclaw"]);
   assert.deepEqual([...toSingleAgentSet([])], []);
+});
+
+test("toAgentSet keeps the full multi-agent set in stored order without duplicates", () => {
+  assert.deepEqual([...toAgentSet(["openclaw", "codex"])], ["openclaw", "codex"]);
+  assert.deepEqual([...toAgentSet("openclaw")], ["openclaw"]);
+  assert.deepEqual([...toAgentSet(["codex", "codex", "", null, "workbuddy"])], ["codex", "workbuddy"]);
+  assert.deepEqual([...toAgentSet([])], []);
+});
+
+test("loadEnabledAgents preserves the full stored multi-agent set", () => {
+  installStorage({
+    [ENABLED_AGENTS_STORAGE_KEY]: JSON.stringify(["workbuddy", "codex", "claude-code"]),
+  });
+
+  assert.deepEqual([...loadEnabledAgents()], ["workbuddy", "codex", "claude-code"]);
 });
 
 test("pickFirstDetectedAgentId prefers the currently followed agent when it is detected", () => {

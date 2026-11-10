@@ -308,8 +308,10 @@ test("ESP32-P4 exposes button presses plus all four joystick directions", () => 
   assert.match(dashboard, /event:\s*"joystick\.up"/);
   assert.match(dashboard, /event:\s*"joystick\.down"/);
   assert.match(visibleOptions[1], /id: "agent_prompt", label: "发送自定义指令"[\s\S]*id: "voice_ptt", label: "语音输入"/);
-  assert.match(visibleOptions[1], /id: "session_previous", label: "上一个"/);
-  assert.match(visibleOptions[1], /id: "session_next", label: "下一个"/);
+  assert.match(visibleOptions[1], /id: "session_previous", label: "上一个会话"/);
+  assert.match(visibleOptions[1], /id: "session_next", label: "下一个会话"/);
+  assert.match(visibleOptions[1], /id: "agent_next", label: "下一个 Agent"/);
+  assert.match(visibleOptions[1], /id: "agent_previous", label: "上一个 Agent"/);
   assert.match(dashboard, /直接发送给当前 Code Agent/);
   assert.match(visibleOptions[1], /id: "component_center", label: "切换宠物\/组件"/);
   assert.match(visibleOptions[1], /id: "page_enter", label: "确认"/);
@@ -376,8 +378,10 @@ test("SW2 toggles top-level pages while previous and next stay inside the curren
   const rust = readRepoFile("src-tauri", "src", "lib.rs");
   const firmware = readRepoFile("..", "firmware", "main", "pet_p4_input.c");
 
-  assert.match(dashboard, /label: "上一个"/);
-  assert.match(dashboard, /label: "下一个"/);
+  assert.match(dashboard, /label: "上一个会话"/);
+  assert.match(dashboard, /label: "下一个会话"/);
+  assert.match(dashboard, /label: "下一个 Agent"/);
+  assert.match(dashboard, /label: "上一个 Agent"/);
   assert.match(dashboard, /label: "切换宠物\/组件"/);
   assert.doesNotMatch(panel, /P4 目标会话/);
   assert.doesNotMatch(panel, /p4-session-config/);

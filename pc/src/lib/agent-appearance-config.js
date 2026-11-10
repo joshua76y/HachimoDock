@@ -47,7 +47,7 @@ export const FIXED_AGENT_OPTIONS = [
 export function loadEnabledAgents() {
   try {
     const raw = localStorage.getItem(ENABLED_AGENTS_STORAGE_KEY);
-    if (raw) return toSingleAgentSet(JSON.parse(raw));
+    if (raw) return toAgentSet(JSON.parse(raw));
   } catch {}
   return null;
 }
@@ -75,6 +75,23 @@ export function toSingleAgentSet(value) {
   const values = typeof value === "string" ? [value] : Array.isArray(value) ? value : [...(value || [])];
   const first = values[0];
   return first ? new Set([first]) : new Set();
+}
+
+/**
+ * Multi-agent support (round-5): keep every enabled agent, preserving the
+ * stored order and de-duplicating. The first entry stays the default display
+ * target, so callers should keep the selected/followed agent first.
+ */
+export function toAgentSet(value) {
+  const values = typeof value === "string" ? [value] : Array.isArray(value) ? value : [...(value || [])];
+  const seen = new Set();
+  const ordered = [];
+  for (const item of values) {
+    if (typeof item !== "string" || !item || seen.has(item)) continue;
+    seen.add(item);
+    ordered.push(item);
+  }
+  return new Set(ordered);
 }
 
 export function pickFirstDetectedAgentId(agents = [], preferredAgentId = "") {
@@ -123,8 +140,21 @@ export function saveAgentAppearanceMap(map) {
   localStorage.setItem(AGENT_APPEARANCE_MAP_STORAGE_KEY, JSON.stringify(map));
 }
 
-export function assignedAgentIds(agentAppearanceMap, enabledAgents = null) {
-  const active = activeDesktopAssignment(agentAppearanceMap, enabledAgents);
+/**
+ * Multi-agent support (round-5): the enabled set now contains every detected
+ * agent (plus the requested one), with the requested agent first so it stays
+ * the default display/follow target. `detectedAgentIds` is optional; callers
+ * without a scan result fall back to the historical single-agent behavior.
+ */
+export function assignedAgentIds(agentAppearanceMap, agentId = "", detectedAgentIds = null) {
+  const detected = Array.isArray(detectedAgentIds)
+    ? detectedAgentIds.filter((id) => typeof id === "string" && id)
+    : [];
+  if (detected.length > 0) {
+    const ordered = [agentId, ...detected.filter((id) => id !== agentId)];
+    return agentId ? ordered : detected;
+  }
+  const active = activeDesktopAssignment(agentAppearanceMap, agentId);
   return active.agentId ? [active.agentId] : [];
 }
 

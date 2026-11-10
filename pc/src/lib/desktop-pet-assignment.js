@@ -139,7 +139,12 @@ export async function applyDesktopPetAssignment({
   }
 
   const nextMap = assignAppearanceToAgent(agentAppearanceMap, agentId, appearance.id);
-  const enabledAgents = assignedAgentIds(nextMap, agentId);
+  // Multi-agent (round-5): enable every detected agent so the follow switch
+  // (device button / UI) can cycle between them without re-running detection.
+  const detectedAgentIds = (agentOptions || [])
+    .filter((agent) => agent?.detected && typeof agent?.id === "string")
+    .map((agent) => agent.id);
+  const enabledAgents = assignedAgentIds(nextMap, agentId, detectedAgentIds);
   const channelLabel = channelLabelForId(agentOptions, agentId);
   const storedAppearanceId = readActiveAppearanceId();
   const activeAppearanceId = currentAppearanceId || storedAppearanceId;
@@ -194,10 +199,18 @@ export async function applyDesktopPetAssignment({
   const selectedAgentId = profile.selectedAgentId || profileEnabledAgents[0] || "";
   const previousSource = profileEnabledAgents.find((id) => id && id !== agentId)
     || (selectedAgentId && selectedAgentId !== agentId ? selectedAgentId : "");
+  // Multi-agent (round-5): switching the follow target between already-enabled
+  // adapters does not require a bridge restart — all adapters run from bridge
+  // startup and the firmware channel switch is owned by
+  // dispatch_remote_cli_binding. Restart only when the enabled set itself
+  // changed (a newly detected agent) or the target was missing from it.
+  const enabledSetChanged =
+    enabledAgents.length !== profileEnabledAgents.length
+    || enabledAgents.some((id) => !profileEnabledAgents.includes(id));
   const followChanged =
     selectedAgentId !== agentId ||
     !profileEnabledAgents.includes(agentId) ||
-    profileEnabledAgents.some((id) => id && id !== agentId);
+    enabledSetChanged;
   let notice = appearanceChanged
     ? `已将「${appearance.name}」设为 ${channelLabel} 渠道桌宠。`
     : `已切换设备跟随主体为 ${channelLabel}，沿用「${appearance.name}」，无需重新传输素材。`;
@@ -318,7 +331,10 @@ export async function applyDesktopPetAssignment({
     localStorage.setItem(ACTIVE_APPEARANCE_KEY, appearance.id);
   } catch {}
 
-  if (followChanged) {
+  // Multi-agent (round-5): a pure follow-target change between already-enabled
+  // adapters must NOT restart the bridge — the restart resets the voice
+  // injection queue mid-flight. Only a changed enabled set needs the restart.
+  if (enabledSetChanged) {
     try {
       await invoke("ensure_bridge_runtime", { input: { forceRestart: true } });
     } catch {

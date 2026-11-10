@@ -71,12 +71,18 @@ export const DeviceContext = createContext(null);
 const EMPTY_USAGE_HELP = buildUsageHelp();
 
 function bridgeEnabledAgents(profile) {
+  // Multi-agent (round-5): keep the full enabled set, with the followed agent
+  // first so deriveCurrentDisplay keeps resolving to the follow target.
   const selectedAgentId = profile?.selectedAgentId || "";
-  if (selectedAgentId) return new Set([selectedAgentId]);
   const enabled = Array.isArray(profile?.enabledAgents)
-    ? profile.enabledAgents.filter(Boolean)
+    ? profile.enabledAgents.filter((id) => typeof id === "string" && id)
     : [];
-  return enabled.length > 0 ? new Set([enabled[0]]) : null;
+  const ordered = [
+    ...enabled.filter((id) => id === selectedAgentId),
+    ...enabled.filter((id) => id !== selectedAgentId),
+  ];
+  if (selectedAgentId && !ordered.includes(selectedAgentId)) ordered.unshift(selectedAgentId);
+  return ordered.length > 0 ? new Set(ordered) : null;
 }
 
 export function DeviceContextProvider({ binding: bindingProp, onBindingChange, children }) {
@@ -459,7 +465,10 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
           isCurrent,
         });
         setAgentAppearanceMap(nextMap);
-        const enabled = new Set(assignedAgentIds(nextMap, agentId));
+        const detectedAgentIds = (agentOptions || [])
+          .filter((agent) => agent?.detected && typeof agent?.id === "string")
+          .map((agent) => agent.id);
+        const enabled = new Set(assignedAgentIds(nextMap, agentId, detectedAgentIds));
         setEnabledAgents(enabled);
         setBridgeSelectedAgentId(agentId);
         saveAgentAppearanceMap(nextMap);
