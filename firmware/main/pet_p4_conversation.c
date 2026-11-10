@@ -70,7 +70,14 @@ bool pet_p4_conversation_update(pet_p4_runtime_state_t *s, const char *id,
     s->conversation_cue_count = 0;
     memset(s->conversation_cues, 0, sizeof(s->conversation_cues));
   }
-  caption(s, text, user, final, now_ms);
+  /* 空文本的 phase 更新（如 thinking HUD）只切状态，不清掉刚上屏的
+   * 用户识别字幕——否则 caption 会在毫秒级被 hud("") 覆盖，用户永远
+   * 看不到自己说了什么。 */
+  if (text[0]) {
+    caption(s, text, user, final, now_ms);
+  } else {
+    s->last_update_ms++;
+  }
   return true;
 }
 

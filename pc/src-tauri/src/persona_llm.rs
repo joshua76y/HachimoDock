@@ -194,7 +194,10 @@ where F: FnMut(&str), E: FnMut(crate::web_search::Event) {
     let mut search_used = false;
     let mut quote_calls = 0;
     let mut read_only_results = false;
-    let reply_contract = desktop.is_some();
+    /* 本地小模型不参与桌面派发决策契约：attach 会让 tools 非空，
+     * 首轮被迫等 15s 决策超时——本地模型首 token 就要 15s+，
+     * 每轮必撞超时播兜底话术，对话永远完不成。 */
+    let reply_contract = desktop.is_some() && !local_model;
     let mut decision_repairs = 0;
     let mut tools_attempted = false;
     let generation = crate::smart_home::cancellation_generation();

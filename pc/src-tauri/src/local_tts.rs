@@ -220,19 +220,25 @@ fn probe_voices_parallel(inventory: &[(String, String)]) -> Vec<VoiceAvailabilit
 
 /// 设置页下拉：只保留能真正发声的音色（探测结果带缓存）。
 /// 前端在全部音色里挑，`available=false` 的直接不显示。
+/// 必须异步：首次探测要跑十几秒 `say` 子进程，同步命令会阻塞
+/// Tauri 主线程把整个 UI 冻住（表现为"切换页面卡很久"）。
 #[tauri::command]
-pub fn local_tts_voices() -> Vec<VoiceAvailability> {
-    let inventory = voice_inventory();
-    if inventory.is_empty() {
-        return vec![VoiceAvailability { name: DEFAULT_VOICE.to_string(), available: true }];
-    }
-    let hash = md5_hex(&format!("{inventory:?}"));
-    if let Some(cached) = voice_cache_load(&hash) {
-        return cached;
-    }
-    let voices = probe_voices_parallel(&inventory);
-    voice_cache_save(&hash, &voices);
-    voices
+pub async fn local_tts_voices() -> Result<Vec<VoiceAvailability>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let inventory = voice_inventory();
+        if inventory.is_empty() {
+            return vec![VoiceAvailability { name: DEFAULT_VOICE.to_string(), available: true }];
+        }
+        let hash = md5_hex(&format!("{inventory:?}"));
+        if let Some(cached) = voice_cache_load(&hash) {
+            return cached;
+        }
+        let voices = probe_voices_parallel(&inventory);
+        voice_cache_save(&hash, &voices);
+        voices
+    })
+    .await
+    .map_err(|e| format!("音色探测任务失败：{e}"))
 }
 
 /// 轻量 FNV-1a：只为给音色清单生成缓存键，不追求密码学强度。
@@ -245,17 +251,25 @@ fn md5_hex(input: &str) -> String {
     format!("{hash:016x}")
 }
 
+/// 同样异步化：合成要起 `say` 子进程，同步会冻 UI。
 #[tauri::command]
-pub fn local_tts_preview(text: String, voice: Option<String>) -> Result<LocalTtsPreview, String> {
-    let result = synthesize(&text, voice.as_deref(), None)?;
-    use base64::Engine as _;
-    Ok(LocalTtsPreview {
-        bytes: result.wav.len(),
-        voice: result.voice,
-        ms: result.ms,
-        /* 试听按钮要真的能听到声音：把 WAV 带回前端用 <audio> 播。 */
-        wav_base64: base64::engine::general_purpose::STANDARD.encode(result.wav),
+pub async fn local_tts_preview(
+    text: String,
+    voice: Option<String>,
+) -> Result<LocalTtsPreview, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = synthesize(&text, voice.as_deref(), None)?;
+        use base64::Engine as _;
+        Ok(LocalTtsPreview {
+            bytes: result.wav.len(),
+            voice: result.voice,
+            ms: result.ms,
+            /* 试听按钮要真的能听到声音：把 WAV 带回前端用 <audio> 播。 */
+            wav_base64: base64::engine::general_purpose::STANDARD.encode(result.wav),
+        })
     })
+    .await
+    .map_err(|e| format!("TTS 合成任务失败：{e}"))?
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

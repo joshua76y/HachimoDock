@@ -567,9 +567,12 @@ function enrichPayloadMetrics(metricsTracker, payload) {
   return metricsTracker.apply(payload, nowMs);
 }
 
+// 状态快照超过这个时间没更新就视为空闲（防 log monitor 漏发结束事件把
+// 会话永久卡在 working，导致硬件输入队列永远不注入）。
+const AGENT_STATE_STALE_MS = 90 * 1000;
+
 class LocalStatePublisher {
-  constructor(config) {
-    this.config = config;
+  constructor(config) {    this.config = config;
     this.latestStateBySource = new Map();
     this.enabledSources = new Set(
       (Array.isArray(config.enabledSources) ? config.enabledSources : [])
@@ -595,12 +598,24 @@ class LocalStatePublisher {
   }
 
   getSourceState(sourceId) {
-    return this.latestStateBySource.get(normalizeAgentId(sourceId || "")) || "";
+    const entry = this.latestStateBySource.get(normalizeAgentId(sourceId || ""));
+    if (!entry) return "";
+    if (typeof entry === "object" && entry !== null) {
+      // 陈旧状态保护：log monitor 漏发结束事件会让会话永远卡在 working，
+      // 硬件输入队列会因此永不注入、只能等 TTL 过期丢字。快照太久没更新
+      // 就按空闲处理，宁可打断一次也不要把设备语音吞掉。
+      if (Date.now() - entry.at > AGENT_STATE_STALE_MS) return "";
+      return entry.state;
+    }
+    return entry;
   }
 
   publishSource(payload) {
     const source = normalizeAgentId(payload.source || "unknown");
-    this.latestStateBySource.set(source, normalizeStatus(payload.state) || "");
+    this.latestStateBySource.set(source, {
+      state: normalizeStatus(payload.state) || "",
+      at: Date.now(),
+    });
     this._writeLocalState(source, payload);
   }
 
@@ -1754,7 +1769,9 @@ function syncHooks(port, autoStart, options = {}) {
 }
 
 function isAgentBusyState(state) {
-  return state === "working" || state === "speaking" || state === "waiting_user";
+  // waiting_user 意味着上一轮已结束、正在等用户输入——此时设备语音应
+  // 立即注入，而不是继续排队（否则没人再触发注入，队列只能等 TTL 过期）。
+  return state === "working" || state === "speaking";
 }
 
 function createLatestHardwareInputQueue(options = {}) {

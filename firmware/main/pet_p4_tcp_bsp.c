@@ -193,9 +193,15 @@ static void tcp_listener_task(void *arg) {
       vTaskDelay(pdMS_TO_TICKS(200));
       continue;
     }
-    /* keepalive，PC 端异常掉电也能及时释放 */
+    /* keepalive，PC 端异常掉电也能及时释放。
+     * 必须显式调短：lwip 默认 keepidle 2 小时，半开连接会一直占住
+     * 单客户端位，新连接全部被拒（表现为 3333 全部超时，提示音/指令失灵）。 */
     int keep = 1;
     setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &keep, sizeof(keep));
+    int keepidle = 10, keepintvl = 5, keepcnt = 3;
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle));
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl));
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt));
     struct timeval tv = { .tv_sec = 30, .tv_usec = 0 };
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     /* 单客户端：已有连接则拒绝新连接 */

@@ -300,9 +300,9 @@ test("ESP32-P4 exposes button presses plus all four joystick directions", () => 
   assert.match(dashboard, /holdEvent:\s*"button\.3\.hold"/);
   assert.match(dashboard, /event:\s*"button\.4\.short_press"/);
   assert.match(dashboard, /id: "p4_sw4_hold",[\s\S]*?event:\s*"button\.4\.hold",\s*voiceTriggerId:\s*"sw4\.hold",\s*defaultAction:\s*"voice_ptt"/);
-  assert.match(dashboard, /event:\s*"button\.encoder\.short_press"/);
-  assert.match(dashboard, /event:\s*"button\.encoder\.long_press"/);
-  assert.match(dashboard, /holdEvent:\s*"button\.encoder\.hold"/);
+  assert.match(dashboard, /event:\s*"button\.k\.short_press"/); // 摇杆中键与 K 键同体
+  assert.match(dashboard, /event:\s*"button\.k\.long_press"/);
+  assert.match(dashboard, /holdEvent:\s*"button\.k\.hold"/);
   assert.match(dashboard, /event:\s*"knob\.rotate_cw"/);
   assert.match(dashboard, /event:\s*"knob\.rotate_ccw"/);
   assert.match(dashboard, /event:\s*"joystick\.up"/);
