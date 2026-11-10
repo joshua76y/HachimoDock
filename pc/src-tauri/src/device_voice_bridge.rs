@@ -19,6 +19,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Mutex;
 use std::time::Duration;
+use tauri::Emitter;
 
 const BIND_ADDR: &str = "0.0.0.0:8901";
 /// 设备录音上限 60s × 16kHz × 2字节 ≈ 2MB；留足余量防滥用。
@@ -115,6 +116,193 @@ fn voice_target_is_current() -> bool {
     same
 }
 
+/// ASR 识别完成后不再直接投递：先生成「待确认草稿」，PC 端与设备屏都显示
+/// 识别文字，用户按发送（摇杆右/确认键）才真正注入 Agent，按取消
+/// （摇杆左/返回键）丢弃。这既满足用户要求，也避开 input/action 链路上
+/// realtime_chat 等前置分支的静默吞字。
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct VoiceDraft {
+    pub text: String,
+    pub agent_id: String,
+    pub utterance_id: String,
+    pub at_ms: u128,
+}
+
+/// 草稿有效窗口（录音上限 + 确认操作时间）。
+pub const VOICE_DRAFT_TTL_MS: u128 = 180_000;
+
+static VOICE_DRAFT: Mutex<Option<VoiceDraft>> = Mutex::new(None);
+
+pub fn current_draft() -> Option<VoiceDraft> {
+    let mut guard = VOICE_DRAFT.lock().ok()?;
+    let draft = guard.clone()?;
+    if now_ms().saturating_sub(draft.at_ms) > VOICE_DRAFT_TTL_MS {
+        *guard = None;
+        return None;
+    }
+    Some(draft)
+}
+
+pub fn draft_status() -> serde_json::Value {
+    match current_draft() {
+        Some(draft) => serde_json::json!({
+            "ok": true,
+            "pending": true,
+            "text": draft.text,
+            "agentId": draft.agent_id,
+            "utteranceId": draft.utterance_id,
+            "tsMs": draft.at_ms as u64,
+        }),
+        None => serde_json::json!({"ok": true, "pending": false}),
+    }
+}
+
+fn emit_voice_event(app: &tauri::AppHandle, event: &str, payload: serde_json::Value) {
+    let _ = app.emit(event, payload.clone());
+    bridge_log(&format!("emit {event}: {}", payload.to_string().chars().take(140).collect::<String>()));
+}
+
+pub fn create_draft(app: &tauri::AppHandle, text: &str, agent_id: &str) -> VoiceDraft {
+    let stamp = now_ms();
+    let draft = VoiceDraft {
+        text: text.trim().to_string(),
+        agent_id: agent_id.to_string(),
+        utterance_id: format!("wifi-draft-{stamp}"),
+        at_ms: stamp,
+    };
+    if let Ok(mut guard) = VOICE_DRAFT.lock() {
+        *guard = Some(draft.clone());
+    }
+    emit_voice_event(
+        app,
+        "voice-draft-ready",
+        serde_json::json!({
+            "text": draft.text,
+            "agentId": draft.agent_id,
+            "utteranceId": draft.utterance_id,
+            "tsMs": stamp as u64,
+        }),
+    );
+    bridge_log(&format!(
+        "voice draft ready (agent=\"{}\", {} chars) — awaiting send/cancel",
+        draft.agent_id,
+        draft.text.chars().count()
+    ));
+    draft
+}
+
+pub fn clear_draft(app: &tauri::AppHandle, reason: &str) {
+    let existed = VOICE_DRAFT.lock().ok().and_then(|mut guard| guard.take()).is_some();
+    if existed {
+        emit_voice_event(app, "voice-draft-cleared", serde_json::json!({"reason": reason}));
+        bridge_log(&format!("voice draft cleared: {reason}"));
+    }
+}
+
+pub fn submit_draft(app: &tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let draft = match VOICE_DRAFT.lock() {
+        Ok(mut guard) => guard.take(),
+        Err(_) => None,
+    }
+    .ok_or_else(|| "没有待发送的语音草稿".to_string())?;
+    if now_ms().saturating_sub(draft.at_ms) > VOICE_DRAFT_TTL_MS {
+        clear_draft(app, "草稿已超时");
+        return Err("语音草稿已超时，请重新说一次".to_string());
+    }
+    // 目标冻结：待确认期间切换了跟随 Agent 就拒绝发送（宁弃勿错投）。
+    let current = followed_agent_id();
+    if !current.is_empty() && current != draft.agent_id {
+        clear_draft(app, "跟随的 Agent 已切换");
+        return Err(format!(
+            "跟随的 Agent 已从 {} 切换到 {}，草稿已取消",
+            draft.agent_id, current
+        ));
+    }
+    if draft.text.is_empty() {
+        clear_draft(app, "草稿为空");
+        return Err("语音草稿为空".to_string());
+    }
+    bridge_log(&format!(
+        "voice draft submitting -> agent=\"{}\" text=\"{}\"",
+        draft.agent_id,
+        draft.text.chars().take(60).collect::<String>()
+    ));
+    emit_voice_event(app, "voice-draft-cleared", serde_json::json!({"reason": "submitted"}));
+    // Agent 注入可能耗时数分钟（CLI 冷启动 + 整轮回复）。同步等待会让
+    // 「发送」按钮和摇杆手势卡死，因此后台执行，结果经事件回报前端。
+    let app = app.clone();
+    let text = draft.text.clone();
+    let agent_id = draft.agent_id.clone();
+    std::thread::spawn(move || {
+        match crate::deliver_voice_draft_to_agent(&text, &agent_id) {
+            Ok(response) => {
+                let queued = response.get("queued").and_then(|v| v.as_bool()).unwrap_or(false);
+                let message = if queued {
+                    format!(
+                        "已提交，但 {} 正忙：桥最多重试 3 次（约 10 秒）。若未送达请切换 Agent 或查看 ~/.claw-pet/logs/status-bridge.log",
+                        agent_id
+                    )
+                } else {
+                    format!("已发送到 {}", agent_id)
+                };
+                emit_voice_event(&app, "voice-draft-result", serde_json::json!({
+                    "ok": true, "queued": queued, "message": message,
+                    "agentId": agent_id, "text": text,
+                }));
+                bridge_log(&format!("voice draft injected ok: {message}"));
+            }
+            Err(error) => {
+                emit_voice_event(&app, "voice-draft-result", serde_json::json!({
+                    "ok": false, "message": error, "agentId": agent_id, "text": text,
+                }));
+                bridge_log(&format!("voice draft inject FAILED: {error}"));
+            }
+        }
+    });
+    Ok(serde_json::json!({
+        "ok": true,
+        "submitted": true,
+        "agentId": draft.agent_id,
+        "text": draft.text,
+    }))
+}
+
+pub fn cancel_draft(app: &tauri::AppHandle, reason: &str) -> bool {
+    let existed = current_draft().is_some();
+    clear_draft(app, reason);
+    existed
+}
+
+/// 设备手势快选：草稿存在时把左右摇杆 / 确认 / 返回解释为发送 / 取消，
+/// 并阻止这些按键继续走会话切换等原有动作。返回 true 表示已消费。
+pub fn try_draft_gesture(app: &tauri::AppHandle, topic: &str, payload: &serde_json::Value) -> bool {
+    if topic != "input/event" && topic != "input/action" {
+        return false;
+    }
+    if current_draft().is_none() {
+        return false;
+    }
+    let action = payload.get("action").and_then(|v| v.as_str()).unwrap_or_default();
+    let send = matches!(action, "session_next" | "page_enter" | "voice_draft_send");
+    let cancel = matches!(action, "session_previous" | "page_back" | "voice_draft_cancel");
+    if !send && !cancel {
+        return false;
+    }
+    if send {
+        if let Err(error) = submit_draft(app) {
+            emit_voice_event(app, "voice-draft-result", serde_json::json!({
+                "ok": false, "message": error,
+            }));
+        }
+    } else {
+        clear_draft(app, "设备取消");
+        emit_voice_event(app, "voice-draft-result", serde_json::json!({
+            "ok": true, "cancelled": true, "message": "已取消语音草稿",
+        }));
+    }
+    true
+}
+
 /// 每次设备 PTT 请求都落一行日志。eprintln 在 GUI 启动下看不到，
 /// 排查「按了语音键没反应」必须有一份能读的记录：
 /// 设备有没有连上来、发了多大、识别结果/错误是什么。
@@ -173,6 +361,18 @@ fn handle_connection(app: tauri::AppHandle, mut stream: TcpStream) {
             store_voice_begin_snapshot();
             (200, serde_json::json!({"ok": true}))
         }
+        // 本机诊断/自动化入口：仅 127.0.0.1 可调用，等价于 PC 端「发送」/
+        // 「取消」按钮，便于验证草稿链路，不向局域网暴露。
+        Ok(Some((path, _))) if path == "/voice/submit" && peer.starts_with("127.0.0.1") => {
+            match submit_draft(&app) {
+                Ok(value) => (200, value),
+                Err(error) => (200, serde_json::json!({"ok": false, "error": error})),
+            }
+        }
+        Ok(Some((path, _))) if path == "/voice/cancel" && peer.starts_with("127.0.0.1") => {
+            let existed = cancel_draft(&app, "本机取消");
+            (200, serde_json::json!({"ok": true, "hadDraft": existed}))
+        }
         Ok(Some((_path, wav))) => match transcribe(&wav) {
             Ok(text) => {
                 bridge_log(&format!(
@@ -181,8 +381,9 @@ fn handle_connection(app: tauri::AppHandle, mut stream: TcpStream) {
                     text.chars().take(60).collect::<String>()
                 ));
                 if voice_target_is_current() {
-                    deliver_to_conversation(&app, &text);
-                    (200, serde_json::json!({"ok": true, "text": text}))
+                    let agent_id = followed_agent_id();
+                    create_draft(&app, &text, &agent_id);
+                    (200, serde_json::json!({"ok": true, "text": text, "draft": true}))
                 } else {
                     (
                         200,
@@ -211,27 +412,6 @@ fn handle_connection(app: tauri::AppHandle, mut stream: TcpStream) {
         }
     };
     respond(&mut stream, status, &body);
-}
-
-/// 识别出的文字必须"传送出去"：走与 USB 麦克风相同的 input/action 投递线
-/// （实时对话进行中则进对话，否则进入跟随 Agent 的草稿/发送链路）。
-/// 设备本地气泡由固件自己的 speech/text 负责，这里补上 PC 侧的下游。
-fn deliver_to_conversation(app: &tauri::AppHandle, text: &str) {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or_default();
-    let payload = serde_json::json!({
-        "view": "voice_input",
-        "state": text,
-        "type": "voice_ptt_streaming_stt",
-        "event": "device.microphone.hold",
-        "transport": "wifi-http",
-        "voiceUtteranceId": format!("wifi-ptt-{stamp}"),
-        "requestId": format!("p4-wifi-ptt-{stamp}"),
-    });
-    eprintln!("[device-voice-bridge] recognized text delivered via input/action: {text}");
-    crate::handle_incoming_usb_message(app, "input/action".to_string(), payload);
 }
 
 /// 读一个请求。返回 Ok(None) 表示不是 POST /voice（交给 404），

@@ -78,6 +78,9 @@ class CodexAdapter extends BaseAdapter {
     // keep this list in lock-step with lib.rs::detect_codex
     return [
       `${home}/.local/bin/codex`,
+      // GUI-launched bridge processes inherit a minimal PATH; QClaw's private
+      // npm prefix is a common install location for codex on this machine.
+      `${home}/Library/Application Support/QClaw/npm-global/bin/codex`,
       ...macosCodexDesktopFiles(this._env),
       ...windowsCliFiles(this._env, "codex"),
     ];
@@ -88,6 +91,7 @@ class CodexAdapter extends BaseAdapter {
     return [
       `${home}/.npm-global/bin`,
       `${home}/.local/bin`,
+      `${home}/Library/Application Support/QClaw/npm-global/bin`,
       ...windowsCliDirs(this._env),
     ];
   }

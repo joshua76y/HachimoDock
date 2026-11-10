@@ -57,6 +57,7 @@ import { useExitProtection } from "./lib/exit-protection.js";
 import ChannelMatrixCard from "./dashboard/ChannelMatrixCard.jsx";
 import BoardButtonPanel from "./dashboard/BoardButtonPanel.jsx";
 import VoiceAssistantPanel, { buildVoiceSummary, formatVoiceSessionOption } from "./dashboard/VoiceAssistantPanel.jsx";
+import VoiceDraftCard from "./dashboard/VoiceDraftCard.jsx";
 import {voiceRuntimeTarget,createVoiceRuntimePoller} from "./dashboard/voice-runtime-target.js";
 import RealtimeChatPanel, { realtimeStateLabel } from "./dashboard/RealtimeChatPanel.jsx";
 import { isRecoveringAsr } from "./lib/realtime-feedback.js";
@@ -72,6 +73,7 @@ import { observeAppearanceFromMenu, appearanceObservationError } from "./lib/app
 import { BUILTIN_TERRIER_APPEARANCE_ID } from "./lib/builtin-appearances.js";
 import { ensureBridgeRuntime } from "./lib/bridge-runtime.js";
 import { fetchAgentBusStatus } from "./lib/agent-bus-client.js";
+import { cycleAgentIds } from "./lib/cycle-agent-config.js";
 export {
   buildP4ConversationQueue,
   buildP4DeviceSessionTransportPayload,
@@ -836,13 +838,22 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
         });
         return;
       }
-      const detected = (ctx.agentOptions || []).filter((agent) => agent?.detected && agent?.id);
+      const detectedIds = (ctx.agentOptions || [])
+        .filter((agent) => agent?.detected && agent?.id)
+        .map((agent) => agent.id);
+      // round-6：只有 PC 端勾选的 agent 参与循环，未勾选（即使已安装）跳过。
+      const cycleIds = cycleAgentIds(detectedIds);
+      const detected = cycleIds
+        .map((id) => (ctx.agentOptions || []).find((agent) => agent?.id === id))
+        .filter(Boolean);
       if (detected.length < 2) {
         ctx.push({
           tone: "warning",
           title: "没有可切换的 Agent",
-          message: "本机只检测到一个 Agent，无法循环切换。",
-          ttl: 3_000,
+          message: cycleIds.length === 0
+            ? "请先在「Agent与形象」里勾选要循环跟随的 Agent。"
+            : "当前只有 1 个 Agent 被勾选参与循环。",
+          ttl: 4_000,
         });
         return;
       }
@@ -1629,6 +1640,8 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
       <Card>
         <DeviceStatusBar />
       </Card>
+
+      <VoiceDraftCard />
 
       {realtimeChat?.error && !isRecoveringAsr(realtimeChat) && <div role="alert" className="message-banner message-banner--error">
         实时对话失败：{realtimeChat.error}。详情与诊断日志见下方「实时对话」。

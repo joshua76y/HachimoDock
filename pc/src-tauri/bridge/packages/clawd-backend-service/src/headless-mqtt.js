@@ -1781,12 +1781,12 @@ function createLatestHardwareInputQueue(options = {}) {
   const timers = new Map();
   let stopped = false;
 
-  const schedule = (agentId) => {
+  const schedule = (agentId, delayMs = retryMs) => {
     if (stopped || timers.has(agentId)) return;
     const timer = setTimeout(() => {
       timers.delete(agentId);
       void drain(agentId);
-    }, retryMs);
+    }, Math.max(10, Number(delayMs) || retryMs));
     timer.unref?.();
     timers.set(agentId, timer);
   };
@@ -1812,8 +1812,21 @@ function createLatestHardwareInputQueue(options = {}) {
     } catch (error) {
       const retryable = error?.code === "AGENT_BUSY" || options.isBusy?.(agentId);
       if (retryable && Date.now() - entry.queuedAt <= ttlMs) {
+        // 每次 drain 都可能真正启动一次 CLI（claude -p 等）。盲目按 500ms
+        // 重试会不断 spawn 子进程，且用户要等满 5 分钟 TTL 才知道失败。
+        // 最多重试 3 次、每次退避 3s，之后明确报错，不静默吞字。
+        entry.attempts = (entry.attempts || 0) + 1;
+        if (entry.attempts > 3) {
+          log("warn", "queued hardware input gave up after repeated busy", {
+            agentId,
+            attempts: entry.attempts,
+            error: String(error?.message || error),
+          });
+          options.onError?.(agentId, entry.value, error);
+          return;
+        }
         if (!pending.has(agentId)) pending.set(agentId, entry);
-        schedule(agentId);
+        schedule(agentId, 3_000);
         return;
       }
       options.onError?.(agentId, entry.value, error);

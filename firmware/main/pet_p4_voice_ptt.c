@@ -241,7 +241,9 @@ static void ptt_show_text(const char *text, size_t pcm_len) {
   cJSON_AddStringToObject(payload, "displayTitle", title);
   cJSON_AddStringToObject(payload, "displayContent", text);
   cJSON_AddStringToObject(payload, "status", "done");
-  cJSON_AddStringToObject(payload, "statusText", "local asr");
+  /* round-6：识别文字先上屏成为「待确认草稿」，摇杆右/确认键发送，
+   * 摇杆左/返回键取消；PC 端同时显示可点击的发送/取消按钮。 */
+  cJSON_AddStringToObject(payload, "statusText", "待发送：右摇杆/确认发送 · 左摇杆/返回取消");
   cJSON_AddNumberToObject(payload, "tsMs", (double) (esp_timer_get_time() / 1000ULL));
   char *payload_str = cJSON_PrintUnformatted(payload);
   cJSON_Delete(payload);

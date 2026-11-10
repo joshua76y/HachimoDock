@@ -3220,6 +3220,86 @@ fn forward_usb_agent_input_to_bridge(
     Err("usb device input inject failed while bridge was unavailable".to_string())
 }
 
+/// WiFi-PTT 草稿确认后的分发口（round-6）。
+/// WorkBuddy / DeepSeek Harness 的 agent-session-bus 适配器明确不支持后台
+/// 注入（WorkBuddyAdapter.inject() 恒返回 AGENT_INPUT_UNSUPPORTED），它们
+/// 必须走原项目的「桌面可见输入框」AX 路径；其余 agent 走总线注入。
+/// 不再经过 handle_incoming_usb_message：那条链路的 realtime_chat、草稿确认、
+/// resolve_usb_inject_target（陈旧的 p4_session_binding）会截胡或投错 Agent。
+pub(crate) fn deliver_voice_draft_to_agent(
+    text: &str,
+    agent_id: &str,
+) -> Result<serde_json::Value, String> {
+    if matches!(agent_id, "workbuddy" | "deepseek-harness") {
+        #[cfg(target_os = "macos")]
+        {
+            // 从 HachimiDock 里点「发送」会把焦点留在 HachimiDock，AX 就定位
+            // 不到目标输入框。先把目标桌面客户端带到前台再注入。
+            let app_name = if agent_id == "workbuddy" { "WorkBuddy" } else { "DeepSeek Harness" };
+            let script = format!("tell application \"{app_name}\" to activate");
+            let _ = std::process::Command::new("osascript")
+                .args(["-e", &script])
+                .output();
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        let bridge = codex_composer::CodexComposerBridge::start_current_task_for(agent_id)
+            .map_err(|error| format!("{} 前台输入框未就绪：{}", agent_id, error))?;
+        let mode = bridge.dispatch_task(text)?;
+        return Ok(serde_json::json!({
+            "ok": true,
+            "via": "visible-composer",
+            "mode": mode,
+            "agentId": agent_id,
+        }));
+    }
+    direct_inject_agent_input(text, agent_id)
+}
+
+pub(crate) fn direct_inject_agent_input(
+    text: &str,
+    agent_id: &str,
+) -> Result<serde_json::Value, String> {
+    let input = UsbAgentInput {
+        text: text.trim().to_string(),
+        view: "voice_input",
+        button_event: "button.wifi.ptt.draft".to_string(),
+        source: "wifi-ptt-draft",
+        input_type: "voice-text",
+        action_type: "voice_ptt_streaming_stt".to_string(),
+    };
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or_default();
+    let payload = serde_json::json!({
+        "view": "voice_input",
+        "state": input.text,
+        "type": "voice_ptt_streaming_stt",
+        "transport": "wifi-http-draft",
+        "requestId": format!("wifi-draft-{stamp}"),
+    });
+    // claude-code 的 "auto" 会 resume 最近一次会话；陈旧/挂起的 session 会让
+    // CLI 长时间不返回，桥把请求排队直到 5 分钟 TTL 静默丢字（实测）。
+    // 设备语音每轮用新会话，先保证「一定发得过去」。
+    let session_id = if agent_id == "claude-code" { "new" } else { "auto" };
+    forward_usb_agent_input_to_bridge(&payload, &input, agent_id, session_id)
+}
+
+#[tauri::command]
+fn voice_draft_status() -> serde_json::Value {
+    crate::device_voice_bridge::draft_status()
+}
+
+#[tauri::command]
+fn voice_draft_submit(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    crate::device_voice_bridge::submit_draft(&app)
+}
+
+#[tauri::command]
+fn voice_draft_cancel(app: tauri::AppHandle) -> bool {
+    crate::device_voice_bridge::cancel_draft(&app, "PC 端取消")
+}
+
 fn handle_incoming_usb_message(
     emitter: &tauri::AppHandle,
     topic: String,
@@ -3397,6 +3477,12 @@ fn handle_incoming_usb_message(
         "usb-message",
         serde_json::json!({"topic": topic, "payload": payload}),
     );
+
+    // 待确认语音草稿期间，左右摇杆 / 确认 / 返回被解释为发送 / 取消，
+    // 且不再往下走会话切换等原有动作（用户要求「快速选择」）。
+    if crate::device_voice_bridge::try_draft_gesture(emitter, &topic, &payload) {
+        return;
+    }
 
     if confirm_pending_device_voice_draft(&topic, &payload) {
         return;
@@ -11885,6 +11971,9 @@ pub fn run() {
             ensure_voice_runtime,
             stop_voice_runtime,
             detect_local_agents,
+            voice_draft_status,
+            voice_draft_submit,
+            voice_draft_cancel,
             download_bytes,
             http_request_text,
             check_ffmpeg_available,

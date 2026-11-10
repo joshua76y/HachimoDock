@@ -66,6 +66,9 @@ class ClaudeCodeAdapter extends BaseAdapter {
       ...macosClaudeDesktopCliFiles(this._env),
       `${home}/.local/bin/claude`,
       `${home}/.claude/local/claude`,
+      // GUI-launched bridge processes inherit a minimal PATH; QClaw's private
+      // npm prefix is a common install location for claude on this machine.
+      `${home}/Library/Application Support/QClaw/npm-global/bin/claude`,
       ...windowsCliFiles(this._env, "claude"),
     ];
   }
@@ -78,6 +81,7 @@ class ClaudeCodeAdapter extends BaseAdapter {
       `${home}/.npm-global/bin`,
       `${home}/.local/bin`,
       `${home}/.claude/local`,
+      `${home}/Library/Application Support/QClaw/npm-global/bin`,
       ...windowsCliDirs(this._env),
     ];
   }

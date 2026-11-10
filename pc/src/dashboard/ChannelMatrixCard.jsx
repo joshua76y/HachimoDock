@@ -22,6 +22,11 @@ import {
   appearanceById,
   channelLabelForId,
 } from "../lib/agent-appearance-config.js";
+import {
+  effectiveCheckedIds,
+  saveCycleAgentSelection,
+  CYCLE_AGENTS_UPDATED_EVENT,
+} from "../lib/cycle-agent-config.js";
 import { BUILTIN_TERRIER_APPEARANCE_ID } from "../lib/builtin-appearances.js";
 import {
   APPEARANCE_SYNC_CANCELLED_MESSAGE,
@@ -109,6 +114,33 @@ export default function ChannelMatrixCard() {
 
   const visibleAgents = useMemo(() => agentOptions.filter((agent) => agent?.id), [agentOptions]);
   const activeAgentId = currentDisplay.agentId;
+  const detectedIds = useMemo(
+    () => visibleAgents.filter((agent) => agent.detected === true).map((agent) => agent.id),
+    [visibleAgents],
+  );
+  const [checkedCycleIds, setCheckedCycleIds] = useState(
+    () => effectiveCheckedIds(detectedIds),
+  );
+  // Keep the checkbox set in sync with fresh CLI scans; the user's explicit
+  // unchecked choices are preserved by effectiveCheckedIds().
+  useEffect(() => {
+    const refresh = () => setCheckedCycleIds(effectiveCheckedIds(detectedIds));
+    refresh();
+    window.addEventListener(CYCLE_AGENTS_UPDATED_EVENT, refresh);
+    return () => window.removeEventListener(CYCLE_AGENTS_UPDATED_EVENT, refresh);
+  }, [detectedIds.join("|")]);
+
+  const toggleCycle = useCallback((agentId) => {
+    setCheckedCycleIds((current) => {
+      const next = new Set(current);
+      if (next.has(agentId)) next.delete(agentId);
+      else next.add(agentId);
+      // Persist in detected-agent order so the cycle order is deterministic.
+      const ordered = detectedIds.filter((id) => next.has(id));
+      saveCycleAgentSelection(ordered);
+      return new Set(ordered);
+    });
+  }, [detectedIds]);
 
   const appearanceForAgent = useCallback(
     (agentId) => {
@@ -321,6 +353,19 @@ export default function ChannelMatrixCard() {
                 aria-current={isFollowed ? "true" : undefined}
               >
                 <div className="channel-row__channel">
+                  <label
+                    className="channel-row__cycle-check"
+                    title={isDetected ? "勾选后该 Agent 参与设备按键循环跟随" : "未检测到客户端或 CLI，不能参与循环"}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checkedCycleIds.has(agent.id)}
+                      disabled={!isDetected}
+                      onChange={() => toggleCycle(agent.id)}
+                      aria-label={`循环跟随包含 ${agent.label}`}
+                    />
+                    <span>循环</span>
+                  </label>
                   <span className="channel-row__icon"><Icon size={16} /></span>
                   <div className="channel-row__label">
                     <strong>{agent.label}</strong>
