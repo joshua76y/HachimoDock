@@ -642,7 +642,11 @@ where F: FnMut(&str) {
         "count":body["tools"].as_array().map_or(0,Vec::len),
         "chars":body["messages"].as_array().map_or(0,|messages|messages.iter().map(|m|m["content"].as_str().map_or(0,|s|s.chars().count())).sum::<usize>()),
         "state":if body["thinking"]["type"]=="disabled" {"thinking_disabled"} else {"provider_default"}}));
-    let client = crate::llm_network::client(REQUEST_TIMEOUT)?;
+    let client = if endpoint_is_local(cfg) {
+        crate::llm_network::local_client(REQUEST_TIMEOUT)?
+    } else {
+        crate::llm_network::client(REQUEST_TIMEOUT)?
+    };
     let response = client
         .post(cfg.completions_url())
         .bearer_auth(cfg.api_key.trim())
@@ -687,7 +691,16 @@ where F: FnMut(&str) {
             }
             let value: Value = serde_json::from_str(data)
                 .map_err(|_| "对话流数据损坏，未执行本次模型返回的工具")?;
-            if value["choices"][0]["finish_reason"]=="length" {return Err("大模型输出达到长度上限，本轮工具未执行".into());}
+            if value["choices"][0]["finish_reason"]=="length" {
+                // 长度截断只对工具调用致命（参数不完整无法执行）。纯文本轮
+                // 本地小模型常撞 max_tokens 上限（实测 oMLX 每轮 finish=length），
+                // 直接收尾并保留已生成的回复，否则整轮白等还报错。
+                if calls.is_empty() {
+                    crate::realtime_chat_log::record(diagnostic_session,"model_stream_complete",json!({"elapsedMs":started.elapsed().as_millis(),"count":0,"stage":"length_truncated"}));
+                    return Ok((full,Vec::new()));
+                }
+                return Err("大模型输出达到长度上限，本轮工具未执行".into());
+            }
             if value["choices"][0]["finish_reason"].as_str().is_some_and(|reason|!matches!(reason,"stop"|"tool_calls")) {
                 return Err("大模型未正常完成本轮输出，未执行本轮工具".into());
             }

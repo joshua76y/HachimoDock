@@ -743,6 +743,10 @@ bool pet_p4_audio_sfx_trigger(unsigned preset) {
  * 用户点名要播的声音必须出声，只让位给录音/对话/扬声器未就绪。
  * 与 g_sfx_pending 分开记账，sfx_drain_step 里无条件渲染。 */
 static atomic_uint g_prompt_sfx_pending;
+/* 提示音专用音量：g_sfx_volume 只有小程序运行时才被 pet_p4_miniapp_sfx_process
+ * 赋值，平时为 0——提示音（内置 preset 与自定义 WAV）若借用它会渲染成
+ * 零振幅静音，sound/play 应答 ok 却听不到任何声音。 */
+static atomic_uint g_prompt_volume;
 bool pet_p4_audio_prompt_sfx_trigger(unsigned preset) {
   if(preset>=PET_SFX_PRESETS||atomic_load(&g_capture_requested)
      ||atomic_load(&g_conversation)||!pet_p4_audio_playback_ready())return false;
@@ -851,7 +855,7 @@ static bool prompt_mix_step(int16_t *pcm, size_t frames) {
   }
   if (!got) return false;
   const int16_t *src = (const int16_t *) raw;
-  const int32_t volume = (int32_t) atomic_load(&g_sfx_volume);
+  const int32_t volume = (int32_t) atomic_load(&g_prompt_volume);
   const size_t count = got / 2;
   for (size_t i = 0; i < count; i += 1) {
     int32_t mixed = (int32_t) pcm[i] + (int32_t) src[i] * volume / 100;
@@ -905,7 +909,11 @@ static bool sfx_drain_step(uint8_t *pcm) {
   if (pet_resources_device_realtime_begin(&sfx_work) != PET_RESOURCE_OK) {
     xSemaphoreGiveRecursive(g_stream_lock); return false;
   }
-  pet_sfx_render(&g_sfx_core,(int16_t*)pcm,320,atomic_load(&g_sfx_volume));
+  /* 点名提示音不被小程序音效音量(平时为0)压成静音：取两者较大值。 */
+  unsigned prompt_render_volume=atomic_load(&g_sfx_volume);
+  if(prompt_sfx_requested&&prompt_render_volume<atomic_load(&g_prompt_volume))
+    prompt_render_volume=atomic_load(&g_prompt_volume);
+  pet_sfx_render(&g_sfx_core,(int16_t*)pcm,320,prompt_render_volume);
   (void)cext_mix_step((int16_t*)pcm,false);
   (void)prompt_mix_step((int16_t*)pcm,320);
   if(esp_codec_dev_write(g_speaker,pcm,640)!=ESP_OK)pet_sfx_reset(&g_sfx_core);
@@ -1260,6 +1268,7 @@ esp_err_t pet_p4_audio_init(
           == pdPASS) {
       pet_p4_behavior_init(&g_playback_behavior);
       atomic_store_explicit(&g_playback_ready, true, memory_order_release);
+      atomic_store(&g_prompt_volume, 80);
       initialized = true;
       ESP_LOGI(TAG, "ES8311 speaker ready: %d Hz, %d-bit mono volume=%d%s",
                PET_P4_AUDIO_SAMPLE_RATE, PET_P4_AUDIO_BITS_PER_SAMPLE,

@@ -173,6 +173,19 @@ pub fn download_client(timeout: Duration) -> Result<reqwest::Client, String> {
     build_cloud_client(&load()?, Some(timeout), CloudTransport::Download)
 }
 
+/// 本机端点（127.0.0.1/localhost/*.local）专用：强制直连。
+/// reqwest 的 macOS 系统代理发现不遵循"例外列表"，本机流量会被推进
+/// 系统代理（实测 127.0.0.1:9876 建立了到 7897 端口代理的连接）；
+/// 本地模型必须绕开一切代理与证书注入，直连才可靠。
+pub fn local_client(timeout: Duration) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(timeout)
+        .build()
+        .map_err(|_| "本地模型网络客户端初始化失败".into())
+}
+
 /// Extend trust only for the optional Node community installer invocation.
 /// Keep this file alive until npx exits; no keys or proxy overrides are exported.
 pub fn community_ca_file() -> Result<Option<tempfile::NamedTempFile>, String> {
