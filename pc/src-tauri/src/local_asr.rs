@@ -201,10 +201,16 @@ mod tests {
 }
 
 /// 设置页「测试连接」用：探测本地服务是否在跑、模型是否已加载。
+/// 引擎闲置约 10 分钟会被服务端自动卸载（省内存），这里顺手预热，
+/// 让界面显示「已加载」而不是让用户把正常的懒加载当成故障。
 #[tauri::command]
 pub fn local_asr_health(endpoint: Option<String>) -> Result<Health, String> {
     let base = endpoint.unwrap_or_else(|| DEFAULT_ENDPOINT.to_string());
-    ensure_ready(&base)
+    let health = ensure_ready(&base)?;
+    if health.loaded {
+        return Ok(health);
+    }
+    ensure_loaded(&base, DEFAULT_ENGINE)
 }
 
 /// 设置页保存语音识别来源。写 `~/.hachimo-local-asr.json`，识别器每次开麦
@@ -285,4 +291,18 @@ pub fn ensure_ready(endpoint: &str) -> Result<Health, String> {
         }
     }
     Err(last)
+}
+
+/// 把引擎拉进内存：服务端是懒加载 + 闲置卸载，first use 前主动发一段
+/// 0.5s 静音把加载成本付掉（SenseVoice 约 0.7s）。服务端冷加载失败时
+/// 这里会带回真实错误，而不是留给下一次识别报模糊的失败。
+pub fn ensure_loaded(endpoint: &str, engine: &str) -> Result<Health, String> {
+    let engine = if engine.trim().is_empty() { DEFAULT_ENGINE } else { engine.trim() };
+    let health = ensure_ready(endpoint)?;
+    if health.loaded && health.engine == engine {
+        return Ok(health);
+    }
+    let silence = pcm_to_wav(&vec![0u8; 8000], 16000, 1); // 0.5s @16k
+    let _ = transcribe_wav(endpoint, engine, &silence, Duration::from_secs(30));
+    ensure_ready(endpoint)
 }

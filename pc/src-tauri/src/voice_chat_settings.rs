@@ -421,11 +421,20 @@ fn catalog_settings(settings: VoiceChatSettings, input: VoiceChatSettingsInput) 
         return Err("请先填写自定义接口地址".into());
     }
     apply_llm_defaults(&mut settings);
+    /* 本地 OMLX 网关出厂令牌；用户没存 Key 时兜底，避免目录永远 401。 */
+    if settings.llm_api_key.trim().is_empty() && settings.llm_provider == "omlx" {
+        settings.llm_api_key = "1234".into();
+    }
     if settings.llm_api_key.trim().is_empty() { return Err("请先保存或填写这家服务的 API Key".into()); }
     let url = reqwest::Url::parse(&settings.llm_base_url).map_err(|_| "接口地址无效")?;
-    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some()
+    if !url.username().is_empty() || url.password().is_some()
         || url.query().is_some() || url.fragment().is_some() {
-        return Err("模型目录需要不含凭据的 HTTPS 接口地址".into());
+        return Err("模型目录需要不含凭据的接口地址".into());
+    }
+    /* 本机环回服务（本地 OMLX 等）允许 http；远端仍强制 HTTPS。 */
+    let loopback = matches!(url.host_str(), Some("127.0.0.1") | Some("localhost") | Some("::1"));
+    if url.scheme() != "https" && !loopback {
+        return Err("模型目录需要 HTTPS 接口地址（本机 http 服务除外）".into());
     }
     Ok(settings)
 }
@@ -716,7 +725,33 @@ mod tests {
         let preset = llm_preset("mimo").unwrap();
         assert_eq!(preset.base_url, "https://api.xiaomimimo.com/v1");
         assert_eq!(preset.model, "mimo-v2.6-flash");
-        assert_eq!(LLM_PRESETS.len(), 3);
+        let omlx = llm_preset("omlx").unwrap();
+        assert_eq!(omlx.base_url, "http://127.0.0.1:9876/v1");
+        assert_eq!(omlx.model, "Qwen3-VL-4B-Instruct-MLX-4bit");
+        assert_eq!(LLM_PRESETS.len(), 4);
+    }
+
+    #[test]
+    fn local_omlx_catalog_passes_loopback_http_and_defaults_token() {
+        // 本地 OMLX 是 http://127.0.0.1:9876/v1：环回 http 必须放行，
+        // 且没存 Key 时兜底 OMLX 出厂令牌，否则模型目录永远 401。
+        let settings = catalog_settings(
+            VoiceChatSettings::default(),
+            VoiceChatSettingsInput { llm_provider: Some("omlx".into()), ..Default::default() },
+        ).expect("loopback http catalog must pass");
+        assert_eq!(settings.llm_base_url, "http://127.0.0.1:9876/v1");
+        assert_eq!(settings.llm_api_key, "1234");
+        // 远端 http 仍拒绝
+        let error = catalog_settings(
+            VoiceChatSettings::default(),
+            VoiceChatSettingsInput {
+                llm_provider: Some("custom".into()),
+                llm_base_url: Some("http://api.example.com/v1".into()),
+                llm_api_key: Some("k".into()),
+                ..Default::default()
+            },
+        ).expect_err("remote http must be rejected");
+        assert!(error.contains("HTTPS"));
     }
 
     #[test]
