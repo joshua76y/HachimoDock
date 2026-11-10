@@ -10,6 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// 设备可播放的统一格式：16 kHz / 单声道 / 16bit PCM。
 pub const DEVICE_SAMPLE_RATE: u32 = 16_000;
@@ -165,4 +166,83 @@ mod tests {
         assert_eq!(list.entries.len(), SOUND_EVENTS.len());
         assert!(list.entries.iter().all(|item| !item.label.is_empty()));
     }
+}
+
+/* ── 下发到设备 ───────────────────────────────────────────────────
+ * 设备只接受"逐帧等 ack"的节奏：1KB 分片 + 40ms 间隔 + 10s 等待。
+ * 队列只有 8 深，灌太快会把会话打断（实测 36 帧必须这样发）。 */
+const DEVICE_TCP_PORT: u16 = 3333;
+const CHUNK_BYTES: usize = 1024;
+const CHUNK_GAP_MS: u64 = 40;
+
+fn call(topic: &str, payload: serde_json::Value, host: &str) -> Result<String, String> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpStream;
+    let mut stream = TcpStream::connect((host, DEVICE_TCP_PORT))
+        .map_err(|e| format!("连接设备 {host}:{DEVICE_TCP_PORT} 失败：{e}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|e| e.to_string())?;
+    let line = serde_json::json!({ "topic": topic, "payload": payload }).to_string();
+    stream.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
+    stream.write_all(b"\n").map_err(|e| e.to_string())?;
+    let mut reader = BufReader::new(stream);
+    let mut response = String::new();
+    reader.read_line(&mut response).map_err(|e| format!("等待 ack 超时：{e}"))?;
+    Ok(response)
+}
+
+/// 把自定义提示音推到设备：begin → 分片 → end → play。
+#[tauri::command]
+pub fn prompt_sound_upload(event: String, host: String) -> Result<String, String> {
+    let wav = read_custom(&event)?;
+    if wav.len() <= 44 {
+        return Err("自定义音为空，请先选择文件".into());
+    }
+    call("sound/upload/begin", serde_json::json!({ "event": event }), &host)?;
+    let mut sent = 0usize;
+    for chunk in wav.chunks(CHUNK_BYTES) {
+        let encoded = base64_encode(chunk);
+        call("sound/upload/chunk", serde_json::json!({ "data": encoded }), &host)?;
+        sent += 1;
+        std::thread::sleep(Duration::from_millis(CHUNK_GAP_MS));
+    }
+    call("sound/upload/end", serde_json::json!({}), &host)?;
+    let ack = call("sound/play", serde_json::json!({ "event": event }), &host)?;
+    Ok(format!(
+        "{event}: {} 字节 / {sent} 片已写入设备；播放应答 {}",
+        wav.len(),
+        if ack.contains("\"ok\":true") { "ok" } else { "failed" }
+    ))
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for piece in data.chunks(3) {
+        let b = [piece[0], *piece.get(1).unwrap_or(&0), *piece.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(TABLE[(n >> 18) as usize & 63] as char);
+        out.push(TABLE[(n >> 12) as usize & 63] as char);
+        out.push(if piece.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if piece.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
+/// 设置页选文件后把字节交给后端：校验格式并写入自定义目录。
+#[tauri::command]
+pub fn prompt_sound_save_bytes(event: String, bytes: Vec<u8>) -> Result<PromptSoundEntry, String> {
+    save_custom(&event, &bytes)
+}
+
+/// 当前提示音目录，界面用来显示落在哪。
+#[tauri::command]
+pub fn prompt_sound_catalog() -> Result<PromptSoundCatalog, String> {
+    catalog()
+}
+
+#[tauri::command]
+pub fn prompt_sound_reset(event: String) -> Result<PromptSoundEntry, String> {
+    reset_to_builtin(&event)
 }

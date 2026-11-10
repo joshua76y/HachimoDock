@@ -6,6 +6,7 @@
  */
 
 import React, { useEffect, useMemo, useState } from "react";
+import PromptSounds from "./PromptSounds.jsx";
 import { invoke } from "@tauri-apps/api/core";
 import {
   AlertCircle,
@@ -494,6 +495,7 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
                 试听本地语音
               </button>
               {ttsProbe.message && <p className="usage-help__notice">{ttsProbe.message}</p>}
+          <PromptSounds />
             </>
           )}
 
