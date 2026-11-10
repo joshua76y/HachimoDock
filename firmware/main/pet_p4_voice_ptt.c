@@ -243,9 +243,7 @@ static void ptt_show_text(const char *text, size_t pcm_len) {
   cJSON_AddStringToObject(payload, "displayTitle", title);
   cJSON_AddStringToObject(payload, "displayContent", text);
   cJSON_AddStringToObject(payload, "status", "done");
-  /* round-6：识别文字先上屏成为「待确认草稿」，摇杆右/确认键发送，
-   * 摇杆左/返回键取消；PC 端同时显示可点击的发送/取消按钮。 */
-  cJSON_AddStringToObject(payload, "statusText", "待发送：右摇杆/确认发送 · 左摇杆/返回取消");
+  cJSON_AddStringToObject(payload, "statusText", "local asr");
   cJSON_AddNumberToObject(payload, "tsMs", (double) (esp_timer_get_time() / 1000ULL));
   char *payload_str = cJSON_PrintUnformatted(payload);
   cJSON_Delete(payload);
@@ -260,30 +258,8 @@ static void ptt_show_text(const char *text, size_t pcm_len) {
   cJSON_free(payload_str);
 }
 
-/* 草稿确认模式的设备屏幕提示：一条独立的 speech/text 气泡，明确写出
- * 识别文字与两个选项。协议队列发送，和 PTT 本地识别气泡同一渲染路径。 */
-static void ptt_draft_bubble(const char *title, const char *content, const char *status) {
-  if (!g_submit_line) return;
-  cJSON *payload = cJSON_CreateObject();
-  if (!payload) return;
-  cJSON_AddStringToObject(payload, "displayTitle", title ? title : "");
-  cJSON_AddStringToObject(payload, "displayContent", content ? content : "");
-  cJSON_AddStringToObject(payload, "status", "done");
-  cJSON_AddStringToObject(payload, "statusText", status ? status : "");
-  cJSON_AddNumberToObject(payload, "tsMs", (double) (esp_timer_get_time() / 1000ULL));
-  char *payload_str = cJSON_PrintUnformatted(payload);
-  cJSON_Delete(payload);
-  if (!payload_str) return;
-  char *line = (char *) malloc(strlen(payload_str) + 64);
-  if (line) {
-    snprintf(line, strlen(payload_str) + 64,
-             "{\"topic\":\"speech/text\",\"payload\":%s}", payload_str);
-    (void) g_submit_line(line);
-    free(line);
-  }
-  cJSON_free(payload_str);
-}
-
+/* 草稿确认模式：不再额外弹气泡覆盖识别文字。屏幕提示改为 renderer 在
+ * 识别框上方画的一条极轻的「←✕ / ✓→」标记，见 draw_voice_draft_hint()。 */
 bool pet_p4_voice_ptt_draft_active(void) {
   if (!atomic_load_explicit(&g_draft_active, memory_order_acquire)) return false;
   const uint64_t now = (uint64_t) (esp_timer_get_time() / 1000ULL);
@@ -296,16 +272,13 @@ bool pet_p4_voice_ptt_draft_active(void) {
 }
 
 void pet_p4_voice_ptt_set_draft(bool active, const char *text, const char *hint) {
+  (void) hint;
   atomic_store_explicit(&g_draft_active, active, memory_order_release);
   if (active) {
     /* 与 PC 端 VOICE_DRAFT_TTL_MS(180s) 对齐；PC 失联时自动恢复原按键设定 */
     const uint64_t now = (uint64_t) (esp_timer_get_time() / 1000ULL);
     atomic_store_explicit(&g_draft_until_ms, now + 180000ULL, memory_order_relaxed);
-    char content[256];
-    snprintf(content, sizeof(content), "%s", hint && hint[0]
-      ? hint : "摇杆右/确认=发送 · 摇杆左/返回=取消");
-    ptt_draft_bubble("语音待确认", content, text ? text : "");
-    ESP_LOGI(TAG, "voice draft mode ON (screen hint shown)");
+    ESP_LOGI(TAG, "voice draft mode ON (lightweight hint above caption)");
   } else {
     ESP_LOGI(TAG, "voice draft mode OFF (%s)", text ? text : "");
   }

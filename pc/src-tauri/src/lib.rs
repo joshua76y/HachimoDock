@@ -11798,6 +11798,13 @@ pub fn run() {
                 eprintln!("[desktop-tray] unavailable; keeping foreground close/exit behavior: {}",error);
             }
             desktop_window::fit(app.handle(),true);
+            // 辅助功能授权按 ad-hoc 签名的 cdhash 记录；每次重建/替换 App
+            // 二进制后旧授权会失效。启动时主动检查并弹系统授权对话框、
+            // 自动路由到辅助功能设置页，避免「发送时才发现权限问题」。
+            #[cfg(target_os = "macos")]
+            if !codex_composer::CodexComposerBridge::accessibility_permission_granted() {
+                let _ = codex_composer::CodexComposerBridge::request_accessibility_permission();
+            }
             let bundled=app.path().resource_dir()?.join("builtin-clawpkgs");
             #[cfg(debug_assertions)]
             let bundled=if bundled.is_dir(){bundled}else{PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../builtin-clawpkgs")};

@@ -14,6 +14,7 @@
  */
 
 #include "pet_p4_renderer.h"
+#include "pet_p4_voice_ptt.h"
 #include "pet_p4_compact_underlay.h"
 #include "pet_p4_fs_activity.h"
 #include "pet_p4_frame_gate.h"
@@ -3497,6 +3498,21 @@ static void main_compact_underlay_prepare(bool drew_asset, bool compact_requeste
   if (!compact_requested) pet_compact_underlay_forget(&g_main_compact_underlay);
 }
 
+/* round-7：语音草稿待确认时，在识别框「上方」画一条极轻的标记条。
+ * 不做新气泡、不占用识别文字区域；内容只有「←✕ / ✓→」两组符号。
+ * ← → × √ 均在设备 GB2312 字库内，不依赖额外字形。 */
+static void draw_voice_draft_hint(int x, int y, int w) {
+  if (!pet_p4_voice_ptt_draft_active()) return;
+  const int h = 26;
+  const int hint_y = y - h - 6;
+  if (hint_y < 4 || w < 120) return;
+  fill_round_rect(x, hint_y, w, h, 8, rgb565(244, 246, 245));
+  draw_text_line_vcenter("←×", x + 12, hint_y, h, 72,
+    rgb565(184, 62, 56), 1, false);
+  draw_text_line_vcenter("√→", x + w - 84, hint_y, h, 72,
+    rgb565(32, 148, 94), 1, false);
+}
+
 static void draw_bubble(const pet_p4_runtime_state_t *state,
     const pet_p4_view_model_t *view, unsigned long long now_ms) {
   if (view && !view->show_bubble) return;
@@ -3524,6 +3540,7 @@ static void draw_bubble(const pet_p4_runtime_state_t *state,
     bool realtime = view && view->realtime_conversation;
     uint16_t selection = realtime ? rgb565(42, 119, 225) : rgb565(25, 151, 99);
     pet_p4_view_status_t status = view ? view->status : PET_P4_VIEW_STATUS_IDLE;
+    draw_voice_draft_hint(x, y, w);
     if (!realtime) draw_session_card_panel(x, y, w, h, PET_P4_SESSION_CARD_RADIUS, true, selection);
     if (realtime) {
       // Same card geometry, surface and shadow; replace only the selected outline.
@@ -3600,6 +3617,7 @@ static void draw_bubble(const pet_p4_runtime_state_t *state,
       elapsed_us_clamped(content_started, esp_timer_get_time()));
     return;
   }
+  draw_voice_draft_hint(x, y, w);
   draw_home_white_panel(x, y, w, h, 16, outline);
   fill_round_rect(x + 10, y + 14, 4, h - 28, 2, accent);
   if (!(text.pixels && renderer_bubble_draw_pinned(&text, PET_BUBBLE_COMPACT, 0, g_framebuffer,
