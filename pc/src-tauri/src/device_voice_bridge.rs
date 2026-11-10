@@ -162,6 +162,25 @@ fn emit_voice_event(app: &tauri::AppHandle, event: &str, payload: serde_json::Va
     bridge_log(&format!("emit {event}: {}", payload.to_string().chars().take(140).collect::<String>()));
 }
 
+/// 通知设备进入/退出「语音草稿确认模式」：期间设备本地屏蔽左右摇杆等
+/// 原有设定，并在屏幕上显示发送/取消提示。走原生 USB/TCP 协议行，
+/// 设备不在线时只记日志，不影响 PC 端草稿。
+fn notify_device_draft(app: &tauri::AppHandle, active: bool, text: &str) {
+    use tauri::Manager;
+    let Some(manager) = app.try_state::<crate::usb_serial::UsbSerialManager>() else {
+        return;
+    };
+    let payload = serde_json::json!({
+        "active": active,
+        "text": text,
+        "hint": "语音待确认：摇杆右/确认=发送 · 摇杆左/返回=取消",
+    });
+    match manager.send("voice/draft", &payload) {
+        Ok(()) => bridge_log(&format!("voice/draft notify active={active} sent")),
+        Err(error) => bridge_log(&format!("voice/draft notify active={active} failed: {error}")),
+    }
+}
+
 pub fn create_draft(app: &tauri::AppHandle, text: &str, agent_id: &str) -> VoiceDraft {
     let stamp = now_ms();
     let draft = VoiceDraft {
@@ -183,6 +202,7 @@ pub fn create_draft(app: &tauri::AppHandle, text: &str, agent_id: &str) -> Voice
             "tsMs": stamp as u64,
         }),
     );
+    notify_device_draft(app, true, &draft.text);
     bridge_log(&format!(
         "voice draft ready (agent=\"{}\", {} chars) — awaiting send/cancel",
         draft.agent_id,
@@ -194,6 +214,7 @@ pub fn create_draft(app: &tauri::AppHandle, text: &str, agent_id: &str) -> Voice
 pub fn clear_draft(app: &tauri::AppHandle, reason: &str) {
     let existed = VOICE_DRAFT.lock().ok().and_then(|mut guard| guard.take()).is_some();
     if existed {
+        notify_device_draft(app, false, reason);
         emit_voice_event(app, "voice-draft-cleared", serde_json::json!({"reason": reason}));
         bridge_log(&format!("voice draft cleared: {reason}"));
     }
@@ -227,6 +248,7 @@ pub fn submit_draft(app: &tauri::AppHandle) -> Result<serde_json::Value, String>
         draft.agent_id,
         draft.text.chars().take(60).collect::<String>()
     ));
+    notify_device_draft(app, false, "submitted");
     emit_voice_event(app, "voice-draft-cleared", serde_json::json!({"reason": "submitted"}));
     // Agent 注入可能耗时数分钟（CLI 冷启动 + 整轮回复）。同步等待会让
     // 「发送」按钮和摇杆手势卡死，因此后台执行，结果经事件回报前端。
@@ -285,20 +307,24 @@ pub fn try_draft_gesture(app: &tauri::AppHandle, topic: &str, payload: &serde_js
     let action = payload.get("action").and_then(|v| v.as_str()).unwrap_or_default();
     let send = matches!(action, "session_next" | "page_enter" | "voice_draft_send");
     let cancel = matches!(action, "session_previous" | "page_back" | "voice_draft_cancel");
-    if !send && !cancel {
-        return false;
-    }
     if send {
         if let Err(error) = submit_draft(app) {
             emit_voice_event(app, "voice-draft-result", serde_json::json!({
                 "ok": false, "message": error,
             }));
         }
-    } else {
+    } else if cancel {
         clear_draft(app, "设备取消");
         emit_voice_event(app, "voice-draft-result", serde_json::json!({
             "ok": true, "cancelled": true, "message": "已取消语音草稿",
         }));
+    } else if topic == "input/event" && action != "voice_ptt" {
+        // 草稿确认窗口内暂时屏蔽其余所有按键的原有设定（PC 侧），
+        // 设备侧 apply_local_action 也已同步屏蔽；两者都不再广播事件。
+        bridge_log(&format!("voice draft: swallowed device action \"{action}\""));
+        return true;
+    } else {
+        return false;
     }
     true
 }

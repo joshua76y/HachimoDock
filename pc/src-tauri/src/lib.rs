@@ -3473,16 +3473,17 @@ fn handle_incoming_usb_message(
         }
     }
 
+    // 待确认语音草稿期间，左右摇杆 / 确认 / 返回被解释为发送 / 取消。
+    // 必须在 emit("usb-message") 之前拦截：前端 useP4SessionSync 监听该事件，
+    // 若先广播，session_next/previous 仍会切会话，等于「原有设定被激活」。
+    if crate::device_voice_bridge::try_draft_gesture(emitter, &topic, &payload) {
+        return;
+    }
+
     let _ = emitter.emit(
         "usb-message",
         serde_json::json!({"topic": topic, "payload": payload}),
     );
-
-    // 待确认语音草稿期间，左右摇杆 / 确认 / 返回被解释为发送 / 取消，
-    // 且不再往下走会话切换等原有动作（用户要求「快速选择」）。
-    if crate::device_voice_bridge::try_draft_gesture(emitter, &topic, &payload) {
-        return;
-    }
 
     if confirm_pending_device_voice_draft(&topic, &payload) {
         return;

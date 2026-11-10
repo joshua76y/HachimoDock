@@ -41,6 +41,12 @@ void pet_p4_voice_ptt_feed(const uint8_t *pcm, size_t len);
 /* capture 收尾（send_audio_end 内调用） */
 void pet_p4_voice_ptt_notify_end(void);
 
+/* round-6 草稿确认模式：PC 在 ASR 识别完成后下发 voice/draft active=true，
+ * 设备屏幕显示「发送/取消」提示，并暂时屏蔽左右摇杆等按键的原有本地设定；
+ * 发送/取消/超时后下发 active=false 恢复。 */
+bool pet_p4_voice_ptt_draft_active(void);
+void pet_p4_voice_ptt_set_draft(bool active, const char *text, const char *hint);
+
 /* 识别端点：NVS("pet_voice"/"url")，control/apply-voice-url 下发 */
 esp_err_t pet_p4_voice_ptt_apply_url(const char *url);
 void pet_p4_voice_ptt_get_url(char *buf, size_t len);

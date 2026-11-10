@@ -4461,6 +4461,16 @@ bool pet_p4_handle_line_with_reply(
       snprintf(detail, sizeof(detail), "voice url apply failed: %d", (int) url_err);
       send_protocol_ack(send_line, ctx, topic, payload, false, "voice_url_apply_failed", detail);
     }
+  } else if (strcmp(topic, "voice/draft") == 0) {
+    /* round-6：PC 端 ASR 草稿确认窗口。期间设备屏蔽左右摇杆等原有本地
+     * 设定并在屏幕显示「发送/取消」提示；结束后恢复。 */
+    const cJSON *active_j = cJSON_GetObjectItemCaseSensitive(payload, "active");
+    const bool active = cJSON_IsTrue(active_j);
+    const char *text = json_string(payload, "text");
+    const char *hint = json_string(payload, "hint");
+    pet_p4_voice_ptt_set_draft(active, text, hint);
+    state->last_update_ms += 1;
+    send_protocol_ack_if_requested(send_line, ctx, topic, payload);
   } else if (pet_p4_diagnostics_handle_topic_with_reply(topic, payload, state, send_line, ctx, reply)) {
     state->last_update_ms += 1;
   } else if (pet_p4_ota_handle_topic(topic, payload, send_line, ctx)) {

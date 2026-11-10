@@ -65,6 +65,8 @@ static atomic_size_t g_pcm_len;
 static atomic_bool g_capturing;        /* 本地 PTT 会话进行中（音频钩子生效区间） */
 static atomic_bool g_submit_pending;   /* 缓冲已收尾，等 worker 发送 */
 static atomic_bool g_task_started;
+static atomic_bool g_draft_active;       /* 语音草稿待确认：屏蔽摇杆原有设定 */
+static atomic_uint_least64_t g_draft_until_ms; /* 兜底自动超时，防 PC 失联永久屏蔽 */
 
 void pet_p4_voice_ptt_init(pet_p4_voice_ptt_submit_fn submit_line) {
   g_submit_line = submit_line;
@@ -256,6 +258,57 @@ static void ptt_show_text(const char *text, size_t pcm_len) {
     free(line);
   }
   cJSON_free(payload_str);
+}
+
+/* 草稿确认模式的设备屏幕提示：一条独立的 speech/text 气泡，明确写出
+ * 识别文字与两个选项。协议队列发送，和 PTT 本地识别气泡同一渲染路径。 */
+static void ptt_draft_bubble(const char *title, const char *content, const char *status) {
+  if (!g_submit_line) return;
+  cJSON *payload = cJSON_CreateObject();
+  if (!payload) return;
+  cJSON_AddStringToObject(payload, "displayTitle", title ? title : "");
+  cJSON_AddStringToObject(payload, "displayContent", content ? content : "");
+  cJSON_AddStringToObject(payload, "status", "done");
+  cJSON_AddStringToObject(payload, "statusText", status ? status : "");
+  cJSON_AddNumberToObject(payload, "tsMs", (double) (esp_timer_get_time() / 1000ULL));
+  char *payload_str = cJSON_PrintUnformatted(payload);
+  cJSON_Delete(payload);
+  if (!payload_str) return;
+  char *line = (char *) malloc(strlen(payload_str) + 64);
+  if (line) {
+    snprintf(line, strlen(payload_str) + 64,
+             "{\"topic\":\"speech/text\",\"payload\":%s}", payload_str);
+    (void) g_submit_line(line);
+    free(line);
+  }
+  cJSON_free(payload_str);
+}
+
+bool pet_p4_voice_ptt_draft_active(void) {
+  if (!atomic_load_explicit(&g_draft_active, memory_order_acquire)) return false;
+  const uint64_t now = (uint64_t) (esp_timer_get_time() / 1000ULL);
+  if (now > atomic_load_explicit(&g_draft_until_ms, memory_order_relaxed)) {
+    atomic_store_explicit(&g_draft_active, false, memory_order_release);
+    ESP_LOGW(TAG, "voice draft mode auto-expired (PC notify lost?)");
+    return false;
+  }
+  return true;
+}
+
+void pet_p4_voice_ptt_set_draft(bool active, const char *text, const char *hint) {
+  atomic_store_explicit(&g_draft_active, active, memory_order_release);
+  if (active) {
+    /* 与 PC 端 VOICE_DRAFT_TTL_MS(180s) 对齐；PC 失联时自动恢复原按键设定 */
+    const uint64_t now = (uint64_t) (esp_timer_get_time() / 1000ULL);
+    atomic_store_explicit(&g_draft_until_ms, now + 180000ULL, memory_order_relaxed);
+    char content[256];
+    snprintf(content, sizeof(content), "%s", hint && hint[0]
+      ? hint : "摇杆右/确认=发送 · 摇杆左/返回=取消");
+    ptt_draft_bubble("语音待确认", content, text ? text : "");
+    ESP_LOGI(TAG, "voice draft mode ON (screen hint shown)");
+  } else {
+    ESP_LOGI(TAG, "voice draft mode OFF (%s)", text ? text : "");
+  }
 }
 
 static void ptt_worker_task(void *arg) {

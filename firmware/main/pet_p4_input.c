@@ -1335,6 +1335,20 @@ static bool apply_local_action(
 ) {
   if (!binding || strcmp(binding->action, "disabled") == 0) return true;
   if (!state) return false;
+  /* round-6 语音草稿待确认：左右摇杆/确认/返回只发给 PC 由草稿状态机解释，
+   * 本地一律不执行会话切换、页面切换、组件切换等原有设定，避免「快选」
+   * 时顺带触发原功能。voice_ptt 不拦（重新录音会替换当前草稿）。 */
+  if (pet_p4_voice_ptt_draft_active()) {
+    static const char *const draft_swallowed[] = {
+      "session_next", "session_previous", "session_clear",
+      "page_enter", "page_back", "page_toggle", "page_main", "page_app",
+      "component_center", "agent_enter", "agent_prompt",
+      "dsh_interrupt", "miniapp_screen_tap", "miniapp_screen_long_press",
+    };
+    for (size_t i = 0; i < sizeof(draft_swallowed) / sizeof(draft_swallowed[0]); i += 1) {
+      if (strcmp(binding->action, draft_swallowed[i]) == 0) return false;
+    }
+  }
   if (strcmp(binding->action, "session_clear") == 0) {
     memset(state->session_queue, 0, sizeof(state->session_queue));
     state->session_queue_count = 0;
