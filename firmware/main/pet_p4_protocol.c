@@ -519,10 +519,12 @@ static void sound_upload_task(void *arg) {
       if (pet_p4_sound_catalog_custom_path(job.event, path, sizeof(path))) {
         s_sound_file = fopen(path, "wb");
         s_sound_written = 0;
+        ESP_LOGI("sound-up", "begin %s -> %p", path, (void *) s_sound_file);
       }
     } else if (job.kind == 1) {
       if (s_sound_file && job.data && fwrite(job.data, 1, job.len, s_sound_file) == job.len) {
         s_sound_written += job.len;
+        ESP_LOGI("sound-up", "write %u total %u", (unsigned) job.len, (unsigned) s_sound_written);
       }
     } else if (job.kind == 2) {
       if (s_sound_file) { fflush(s_sound_file); fclose(s_sound_file); s_sound_file = NULL; }
@@ -533,9 +535,9 @@ static void sound_upload_task(void *arg) {
 
 static bool sound_enqueue(uint8_t kind, const char *event, const uint8_t *data, size_t len) {
   if (!s_sound_q) {
-    s_sound_q = xQueueCreate(8, sizeof(sound_job_t));
+    s_sound_q = xQueueCreate(4, sizeof(sound_job_t));
     if (!s_sound_q) return false;
-    if (xTaskCreate(sound_upload_task, "sound-up", 4096, NULL, 4, NULL) != pdPASS) {
+    if (xTaskCreate(sound_upload_task, "sound-up", 8192, NULL, 4, NULL) != pdPASS) {
       vQueueDelete(s_sound_q); s_sound_q = NULL; return false;
     }
   }
