@@ -46,6 +46,8 @@ void pet_p4_voice_ptt_notify_end(void);
  * 发送/取消/超时后下发 active=false 恢复。 */
 bool pet_p4_voice_ptt_draft_active(void);
 void pet_p4_voice_ptt_set_draft(bool active, const char *text, const char *hint);
+/* 草稿窗口的识别文字（view model 在草稿期间强制显示它，避免被状态推送冲掉） */
+const char *pet_p4_voice_ptt_draft_text(void);
 
 /* 识别端点：NVS("pet_voice"/"url")，control/apply-voice-url 下发 */
 esp_err_t pet_p4_voice_ptt_apply_url(const char *url);

@@ -305,8 +305,15 @@ pub fn try_draft_gesture(app: &tauri::AppHandle, topic: &str, payload: &serde_js
         return false;
     }
     let action = payload.get("action").and_then(|v| v.as_str()).unwrap_or_default();
-    let send = matches!(action, "session_next" | "page_enter" | "voice_draft_send");
-    let cancel = matches!(action, "session_previous" | "page_back" | "voice_draft_cancel");
+    // 用户指定：摇杆向上=发送，向下=取消（按方向事件判定，不依赖绑定的
+    // action 名——摇杆上下默认仍绑 session_previous/next，草稿期被重映射）。
+    let event = payload.get("event").and_then(|v| v.as_str()).unwrap_or_default();
+    let send = event == "joystick.up"
+        || action == "page_enter"
+        || action == "voice_draft_send";
+    let cancel = event == "joystick.down"
+        || action == "page_back"
+        || action == "voice_draft_cancel";
     if send {
         if let Err(error) = submit_draft(app) {
             emit_voice_event(app, "voice-draft-result", serde_json::json!({

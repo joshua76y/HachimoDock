@@ -34,6 +34,7 @@
 #include "pet_p4_input.h"
 #include "pet_p4_renderer.h"
 #include "pet_p4_panel_chrome.h"
+#include "pet_p4_voice_ptt.h"
 
 static const char *TAG = "pet-p4-http";
 
@@ -86,7 +87,8 @@ static esp_err_t status_get(httpd_req_t *req) {
     "\"buttons\":{\"k1\":%d,\"k2\":%d,\"k3\":%d,\"k4\":%d,\"joyK\":%d,\"bootB\":%d},"
     "\"joystick\":{\"ready\":%s,\"x\":%d,\"y\":%d,\"cx\":%d,\"cy\":%d,"
     "\"minx\":%d,\"maxx\":%d,\"miny\":%d,\"maxy\":%d},"
-    "\"now\":%lld,\"transport\":\"wifi-http-route-b\"}",
+    "\"now\":%lld,\"transport\":\"wifi-http-route-b\","
+    "\"voiceDraft\":%s}",
     PET_P4_WIFI_HOSTNAME,
     app ? app->version : "unknown",
     chip.revision / 100, chip.revision % 100, chip.cores,
@@ -100,7 +102,8 @@ static esp_err_t status_get(httpd_req_t *req) {
     joy.ready ? "true" : "false",
     joy.current_x, joy.current_y, joy.center_x, joy.center_y,
     joy.minimum_x, joy.maximum_x, joy.minimum_y, joy.maximum_y,
-    (long long) time(NULL));
+    (long long) time(NULL),
+    pet_p4_voice_ptt_draft_active() ? "true" : "false");
   if (n >= sizeof(body)) n = sizeof(body) - 1;
   return json_reply(req, NULL, body);
 }

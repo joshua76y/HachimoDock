@@ -25,7 +25,7 @@ import socket
 import sys
 import time
 
-CHUNK = 1024
+CHUNK = 512   # 设备内部 RAM 紧张时 1KB 分片会中途 reset；512B 降低峰值
 KEEPALIVE_EVERY = 10.0
 
 

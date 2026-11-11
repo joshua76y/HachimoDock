@@ -1,5 +1,6 @@
 #include "pet_p4_view.h"
 #include "pet_p4_conversation.h"
+#include "pet_p4_voice_ptt.h"
 
 #include <string.h>
 
@@ -95,6 +96,20 @@ void pet_p4_build_view_model(const pet_p4_runtime_state_t *state, pet_p4_view_mo
   memset(out, 0, sizeof(*out));
   out->page = state && state->screen_page[0] ? state->screen_page : "main";
   out->agent = state ? state->active_agent : "";
+  /* round-8 语音草稿待确认窗口优先级最高：识别文字固定在正文，符号放在
+   * 标题行（↑ 发送 / ↓ 取消）。这样 PC 的 state 推送冲不掉文字，旋转屏
+   * 下也不会像「气泡上方横条」那样错位。 */
+  if (pet_p4_voice_ptt_draft_active()) {
+    out->page = "main";
+    out->agent = "";
+    out->title = "";   /* 标题行改由 renderer 画图形符号（字库无 ↑↓√×） */
+    out->body = pet_p4_voice_ptt_draft_text();
+    out->stats_json = "";
+    out->status = PET_P4_VIEW_STATUS_WAITING;
+    out->show_bubble = true;
+    out->compact_bubble = false;
+    return;
+  }
   if (pet_p4_conversation_active(state)) {
     /* 实时对话独占气泡：只显示当前说话方，不与 Agent 会话叠加。 */
     out->page = "main";

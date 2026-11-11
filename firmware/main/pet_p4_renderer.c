@@ -3498,19 +3498,47 @@ static void main_compact_underlay_prepare(bool drew_asset, bool compact_requeste
   if (!compact_requested) pet_compact_underlay_forget(&g_main_compact_underlay);
 }
 
-/* round-7：语音草稿待确认时，在识别框「上方」画一条极轻的标记条。
- * 不做新气泡、不占用识别文字区域；内容只有「←✕ / ✓→」两组符号。
- * ← → × √ 均在设备 GB2312 字库内，不依赖额外字形。 */
-static void draw_voice_draft_hint(int x, int y, int w) {
+/* round-8：草稿提示符号。设备字库没有 ↑ ↓ √ ×，用像素线段直接画：
+ * 绿色「↑ + 勾」= 摇杆上发送；红色「↓ + 叉」= 摇杆下取消。 */
+static void draw_px_line(int x0, int y0, int x1, int y1, int thickness, uint16_t color) {
+  int dx = x1 >= x0 ? x1 - x0 : x0 - x1;
+  int dy = y1 >= y0 ? y1 - y0 : y0 - y1;
+  int sx = x0 < x1 ? 1 : -1;
+  int sy = y0 < y1 ? 1 : -1;
+  int err = dx - dy;
+  for (;;) {
+    fill_rect(x0, y0, thickness, thickness, color);
+    if (x0 == x1 && y0 == y1) break;
+    int e2 = err * 2;
+    if (e2 > -dy) { err -= dy; x0 += sx; }
+    if (e2 < dx) { err += dx; y0 += sy; }
+  }
+}
+
+static void draw_draft_glyphs(int x, int y, int h, int w) {
   if (!pet_p4_voice_ptt_draft_active()) return;
-  const int h = 26;
-  const int hint_y = y - h - 6;
-  if (hint_y < 4 || w < 120) return;
-  fill_round_rect(x, hint_y, w, h, 8, rgb565(244, 246, 245));
-  draw_text_line_vcenter("←×", x + 12, hint_y, h, 72,
-    rgb565(184, 62, 56), 1, false);
-  draw_text_line_vcenter("√→", x + w - 84, hint_y, h, 72,
-    rgb565(32, 148, 94), 1, false);
+  if (w < 120 || h < 24) return;
+  const uint16_t send = rgb565(20, 150, 90);
+  const uint16_t cancel = rgb565(196, 54, 48);
+  const int top = y + 8;
+  const int bottom = y + h - 8;
+
+  /* 左：绿色 ↑ + 勾（发送） */
+  int ax = x + 16;
+  draw_px_line(ax, bottom, ax, top, 3, send);
+  draw_px_line(ax, top, ax - 8, top + 10, 3, send);
+  draw_px_line(ax, top, ax + 8, top + 10, 3, send);
+  draw_px_line(ax + 16, bottom - 4, ax + 22, bottom, 3, send);
+  draw_px_line(ax + 22, bottom, ax + 34, top + 4, 3, send);
+
+  /* 右：红色 ↓ + 叉（取消）。与发送符号同放在标题行左侧，旋转屏下
+   * 两个提示紧邻在识别框顶部，不再一南一北。 */
+  int bx = x + 68;
+  draw_px_line(bx, top, bx, bottom, 3, cancel);
+  draw_px_line(bx, bottom, bx - 8, bottom - 10, 3, cancel);
+  draw_px_line(bx, bottom, bx + 8, bottom - 10, 3, cancel);
+  draw_px_line(bx - 30, top + 4, bx - 18, bottom - 4, 3, cancel);
+  draw_px_line(bx - 18, top + 4, bx - 30, bottom - 4, 3, cancel);
 }
 
 static void draw_bubble(const pet_p4_runtime_state_t *state,
@@ -3540,7 +3568,6 @@ static void draw_bubble(const pet_p4_runtime_state_t *state,
     bool realtime = view && view->realtime_conversation;
     uint16_t selection = realtime ? rgb565(42, 119, 225) : rgb565(25, 151, 99);
     pet_p4_view_status_t status = view ? view->status : PET_P4_VIEW_STATUS_IDLE;
-    draw_voice_draft_hint(x, y, w);
     if (!realtime) draw_session_card_panel(x, y, w, h, PET_P4_SESSION_CARD_RADIUS, true, selection);
     if (realtime) {
       // Same card geometry, surface and shadow; replace only the selected outline.
@@ -3557,6 +3584,7 @@ static void draw_bubble(const pet_p4_runtime_state_t *state,
     if (!(text.pixels && renderer_bubble_draw_pinned(&text, PET_BUBBLE_TITLE, 0, g_framebuffer,
         x + 30, y + 10, w - 82, ink)))
       draw_text_line_vcenter(title, x + 30, y + 10, 38, w - 82, ink, 2, true);
+    draw_draft_glyphs(x, y, 46, w);
     if (body[0]) {
       if (realtime) {
         bool host_drawn = host_pages && text.pixels && renderer_bubble_draw_pinned(&text,
@@ -3617,7 +3645,6 @@ static void draw_bubble(const pet_p4_runtime_state_t *state,
       elapsed_us_clamped(content_started, esp_timer_get_time()));
     return;
   }
-  draw_voice_draft_hint(x, y, w);
   draw_home_white_panel(x, y, w, h, 16, outline);
   fill_round_rect(x + 10, y + 14, 4, h - 28, 2, accent);
   if (!(text.pixels && renderer_bubble_draw_pinned(&text, PET_BUBBLE_COMPACT, 0, g_framebuffer,
@@ -7491,7 +7518,10 @@ esp_err_t pet_p4_renderer_render(
     render_miniapp_page(state, now_ms);
   } else {
     bool realtime = view && view->realtime_conversation;
-    bool show_session_queue = !realtime && state && state->session_queue_count > 0;
+    /* 语音草稿待确认窗口优先级最高：会话卡片会让 draw_bubble 不执行，
+     * 导致识别文字和「↑√ / ↓×」提示都看不到。草稿期间强制走气泡路径。 */
+    bool show_session_queue = !realtime && state && state->session_queue_count > 0
+      && !pet_p4_voice_ptt_draft_active();
     int64_t asset_started_us = esp_timer_get_time();
     bool drew_asset = component_media_idle&&render_asset_pet_frame(state, view, now_ms);
     if(drew_asset)g_main_appearance_ready=true;
@@ -7517,7 +7547,9 @@ esp_err_t pet_p4_renderer_render(
     if(g_main_appearance_ready){
       if (view && view->show_voice_overlay) draw_standalone_voice_overlay();
       else if (!show_session_queue) draw_bubble(state, view, now_ms);
-      if (!realtime) draw_session_queue(state, now_ms);
+      /* 草稿期间会话卡片必须一并跳过：它画在气泡之后，会把识别文字和
+       * 「↑√ / ↓×」提示条整体盖掉（此前只跳过气泡，截图实证仍被覆盖）。 */
+      if (!realtime && !pet_p4_voice_ptt_draft_active()) draw_session_queue(state, now_ms);
       else g_session_overlay_cache_valid = false;
     }else g_session_overlay_cache_valid=false;
   }

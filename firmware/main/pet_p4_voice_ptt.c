@@ -67,6 +67,7 @@ static atomic_bool g_submit_pending;   /* 缓冲已收尾，等 worker 发送 */
 static atomic_bool g_task_started;
 static atomic_bool g_draft_active;       /* 语音草稿待确认：屏蔽摇杆原有设定 */
 static atomic_uint_least64_t g_draft_until_ms; /* 兜底自动超时，防 PC 失联永久屏蔽 */
+static char g_draft_text[256];           /* 草稿识别文字（渲染线程读） */
 
 void pet_p4_voice_ptt_init(pet_p4_voice_ptt_submit_fn submit_line) {
   g_submit_line = submit_line;
@@ -278,10 +279,20 @@ void pet_p4_voice_ptt_set_draft(bool active, const char *text, const char *hint)
     /* 与 PC 端 VOICE_DRAFT_TTL_MS(180s) 对齐；PC 失联时自动恢复原按键设定 */
     const uint64_t now = (uint64_t) (esp_timer_get_time() / 1000ULL);
     atomic_store_explicit(&g_draft_until_ms, now + 180000ULL, memory_order_relaxed);
-    ESP_LOGI(TAG, "voice draft mode ON (lightweight hint above caption)");
+    if (text && text[0]) {
+      snprintf(g_draft_text, sizeof(g_draft_text), "%s", text);
+    } else {
+      g_draft_text[0] = '\0';
+    }
+    ESP_LOGI(TAG, "voice draft mode ON (caption pinned)");
   } else {
+    g_draft_text[0] = '\0';
     ESP_LOGI(TAG, "voice draft mode OFF (%s)", text ? text : "");
   }
+}
+
+const char *pet_p4_voice_ptt_draft_text(void) {
+  return g_draft_text;
 }
 
 static void ptt_worker_task(void *arg) {
