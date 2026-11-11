@@ -67,7 +67,8 @@ static atomic_bool g_submit_pending;   /* 缓冲已收尾，等 worker 发送 */
 static atomic_bool g_task_started;
 static atomic_bool g_draft_active;       /* 语音草稿待确认：屏蔽摇杆原有设定 */
 static atomic_uint_least64_t g_draft_until_ms; /* 兜底自动超时，防 PC 失联永久屏蔽 */
-static char g_draft_text[256];           /* 草稿识别文字（渲染线程读） */
+static char g_draft_text[256];           /* 草稿识别文字（临界区保护） */
+static portMUX_TYPE g_draft_lock = portMUX_INITIALIZER_UNLOCKED;
 
 void pet_p4_voice_ptt_init(pet_p4_voice_ptt_submit_fn submit_line) {
   g_submit_line = submit_line;
@@ -280,19 +281,32 @@ void pet_p4_voice_ptt_set_draft(bool active, const char *text, const char *hint)
     const uint64_t now = (uint64_t) (esp_timer_get_time() / 1000ULL);
     atomic_store_explicit(&g_draft_until_ms, now + 180000ULL, memory_order_relaxed);
     if (text && text[0]) {
-      snprintf(g_draft_text, sizeof(g_draft_text), "%s", text);
+      char staged[256];
+      snprintf(staged, sizeof(staged), "%s", text);
+      taskENTER_CRITICAL(&g_draft_lock);
+      memcpy(g_draft_text, staged, sizeof(g_draft_text));
+      taskEXIT_CRITICAL(&g_draft_lock);
     } else {
+      taskENTER_CRITICAL(&g_draft_lock);
       g_draft_text[0] = '\0';
+      taskEXIT_CRITICAL(&g_draft_lock);
     }
     ESP_LOGI(TAG, "voice draft mode ON (caption pinned)");
   } else {
+    taskENTER_CRITICAL(&g_draft_lock);
     g_draft_text[0] = '\0';
+    taskEXIT_CRITICAL(&g_draft_lock);
     ESP_LOGI(TAG, "voice draft mode OFF (%s)", text ? text : "");
   }
 }
 
-const char *pet_p4_voice_ptt_draft_text(void) {
-  return g_draft_text;
+void pet_p4_voice_ptt_copy_draft_text(char *out, size_t size) {
+  if (!out || size == 0) return;
+  taskENTER_CRITICAL(&g_draft_lock);
+  size_t len = strnlen(g_draft_text, size - 1);
+  memcpy(out, g_draft_text, len);
+  out[len] = '\0';
+  taskEXIT_CRITICAL(&g_draft_lock);
 }
 
 static void ptt_worker_task(void *arg) {

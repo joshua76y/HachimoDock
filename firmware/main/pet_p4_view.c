@@ -100,10 +100,14 @@ void pet_p4_build_view_model(const pet_p4_runtime_state_t *state, pet_p4_view_mo
    * 标题行（↑ 发送 / ↓ 取消）。这样 PC 的 state 推送冲不掉文字，旋转屏
    * 下也不会像「气泡上方横条」那样错位。 */
   if (pet_p4_voice_ptt_draft_active()) {
+    /* body 必须指向生命周期稳定的缓冲：渲染线程单线程写本 static，
+     * 文字由临界区拷出，避免与协议线程的写入竞争。 */
+    static char draft_body[256];
+    pet_p4_voice_ptt_copy_draft_text(draft_body, sizeof(draft_body));
     out->page = "main";
     out->agent = "";
     out->title = "";   /* 标题行改由 renderer 画图形符号（字库无 ↑↓√×） */
-    out->body = pet_p4_voice_ptt_draft_text();
+    out->body = draft_body;
     out->stats_json = "";
     out->status = PET_P4_VIEW_STATUS_WAITING;
     out->show_bubble = true;
