@@ -4469,6 +4469,14 @@ bool pet_p4_handle_line_with_reply(
     const char *text = json_string(payload, "text");
     const char *hint = json_string(payload, "hint");
     pet_p4_voice_ptt_set_draft(active, text, hint);
+    if (!active) {
+      /* 取消/发送后识别窗口必须立刻消失：PTT 的 speech/text 仍留在
+       * current_speech 里，不清掉会变成普通气泡继续挂着。 */
+      state->current_speech[0] = '\0';
+      state->current_title[0] = '\0';
+      state->current_session_id[0] = '\0';
+      state->last_update_ms += 1;
+    }
     state->last_update_ms += 1;
     send_protocol_ack_if_requested(send_line, ctx, topic, payload);
   } else if (pet_p4_diagnostics_handle_topic_with_reply(topic, payload, state, send_line, ctx, reply)) {

@@ -213,6 +213,6 @@ test("live captions are isolated from Agent state and follow PCM playback", () =
   assert.match(view, /out->stats_json = ""/);
   const renderer = read("firmware/main/pet_p4_renderer.c");
   assert.match(renderer, /show_session_queue = !realtime/);
-  // 语音草稿待确认期间会话卡片必须跳过，否则它画在气泡之后会盖掉识别文字。
-  assert.match(renderer, /if \(!realtime && !pet_p4_voice_ptt_draft_active\(\)\) draw_session_queue/);
+  // 草稿窗口下先画会话卡片、再把草稿气泡画在最上层，避免被卡片盖住。
+  assert.match(renderer, /else if \(pet_p4_voice_ptt_draft_active\(\)\) \{/);
 });

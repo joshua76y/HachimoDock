@@ -3523,17 +3523,18 @@ static void draw_draft_glyphs(int x, int y, int h, int w) {
   const int top = y + 8;
   const int bottom = y + h - 8;
 
-  /* 左：绿色 ↑ + 勾（发送） */
-  int ax = x + 16;
+  /* 屏幕是 90° 旋转的：逻辑 x 最大的一端显示在物理顶部。留出右上角
+   * 「•••」按钮（x+w-26）的空间，符号整体往中间偏 ~90px 避免重叠。
+   * 顺序按物理自上而下：先绿色 ↑勾（发送），再红色 ↓叉（取消）。 */
+  int ax = x + w - 116;
   draw_px_line(ax, bottom, ax, top, 3, send);
   draw_px_line(ax, top, ax - 8, top + 10, 3, send);
   draw_px_line(ax, top, ax + 8, top + 10, 3, send);
   draw_px_line(ax + 16, bottom - 4, ax + 22, bottom, 3, send);
   draw_px_line(ax + 22, bottom, ax + 34, top + 4, 3, send);
 
-  /* 右：红色 ↓ + 叉（取消）。与发送符号同放在标题行左侧，旋转屏下
-   * 两个提示紧邻在识别框顶部，不再一南一北。 */
-  int bx = x + 68;
+  /* 下：红色 ↓ + 叉（取消），在发送符号下方（逻辑 x 更小） */
+  int bx = x + w - 170;
   draw_px_line(bx, top, bx, bottom, 3, cancel);
   draw_px_line(bx, bottom, bx - 8, bottom - 10, 3, cancel);
   draw_px_line(bx, bottom, bx + 8, bottom - 10, 3, cancel);
@@ -7546,11 +7547,19 @@ esp_err_t pet_p4_renderer_render(
      * first decode is queued, retain the previous page without an early bubble. */
     if(g_main_appearance_ready){
       if (view && view->show_voice_overlay) draw_standalone_voice_overlay();
-      else if (!show_session_queue) draw_bubble(state, view, now_ms);
-      /* 草稿期间会话卡片必须一并跳过：它画在气泡之后，会把识别文字和
-       * 「↑√ / ↓×」提示条整体盖掉（此前只跳过气泡，截图实证仍被覆盖）。 */
-      if (!realtime && !pet_p4_voice_ptt_draft_active()) draw_session_queue(state, now_ms);
-      else g_session_overlay_cache_valid = false;
+      else if (pet_p4_voice_ptt_draft_active()) {
+        /* 草稿窗口：先把会话卡片画掉（它只作为下层），再把草稿气泡画在
+         * 最上层。这样既不会被卡片盖住，也顺带擦掉上一帧残留。 */
+        if (!realtime) draw_session_queue(state, now_ms);
+        draw_bubble(state, view, now_ms);
+      } else if (!show_session_queue) {
+        draw_bubble(state, view, now_ms);
+        if (!realtime) draw_session_queue(state, now_ms);
+      } else if (!realtime) {
+        draw_session_queue(state, now_ms);
+      } else {
+        g_session_overlay_cache_valid = false;
+      }
     }else g_session_overlay_cache_valid=false;
   }
   const int64_t common_overlay_started_us = esp_timer_get_time();

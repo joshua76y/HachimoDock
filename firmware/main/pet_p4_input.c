@@ -1339,21 +1339,29 @@ static bool apply_local_action(
    * 本地一律不执行会话切换、页面切换、组件切换等原有设定，避免「快选」
    * 时顺带触发原功能。voice_ptt 不拦（重新录音会替换当前草稿）。 */
   if (pet_p4_voice_ptt_draft_active()) {
-    /* 用户指定：摇杆向上=发送，向下=取消。固件侧直接把这两个方向的
-     * action 覆写成草稿专用动作，PC 端无需改二进制即可识别。
-     * 其余按键的原有本地设定一律不执行。 */
-    if (strcmp(binding->event, "joystick.up") == 0) {
+    /* 用户指定：摇杆向上=发送，向下=取消。不能只看绑定的 action 名——
+     * 实测这台设备的方向键绑的是 agent_previous / agent_next。按事件名与
+     * action 双重判定，命中后覆写成草稿专用动作（PC 已部署版本认识）。 */
+    const bool up = strcmp(binding->event, "joystick.up") == 0
+      || strcmp(binding->event, "knob.rotate_ccw") == 0
+      || strcmp(binding->action, "agent_previous") == 0
+      || strcmp(binding->action, "session_previous") == 0;
+    const bool down = strcmp(binding->event, "joystick.down") == 0
+      || strcmp(binding->event, "knob.rotate_cw") == 0
+      || strcmp(binding->action, "agent_next") == 0
+      || strcmp(binding->action, "session_next") == 0;
+    if (up) {
       copy_text(action_override, action_override_size, "voice_draft_send");
       return false;
     }
-    if (strcmp(binding->event, "joystick.down") == 0) {
+    if (down) {
       copy_text(action_override, action_override_size, "voice_draft_cancel");
       return false;
     }
     static const char *const draft_swallowed[] = {
-      "session_next", "session_previous", "session_clear",
+      "session_clear",
       "page_enter", "page_back", "page_toggle", "page_main", "page_app",
-      "component_center", "agent_enter", "agent_prompt",
+      "component_center", "agent_enter", "agent_prompt", "realtime_chat",
       "dsh_interrupt", "miniapp_screen_tap", "miniapp_screen_long_press",
     };
     for (size_t i = 0; i < sizeof(draft_swallowed) / sizeof(draft_swallowed[0]); i += 1) {
