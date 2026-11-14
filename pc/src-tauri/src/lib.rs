@@ -652,7 +652,7 @@ fn validate_p4_session_transition_metadata(
     }
     let terminal = matches!(
         state,
-        "done" | "error" | "failed" | "complete" | "completed"
+        "done" | "reply_complete" | "error" | "failed" | "complete" | "completed"
     );
     if terminal_remaining_ms > 0 && !terminal {
         return Err("非终态设备会话不能携带终态保留时间".to_string());
@@ -15157,6 +15157,7 @@ mod tests {
         assert_eq!(legacy.terminal_remaining_ms, 0);
         assert!(validate_p4_session_transition_metadata("working", 0, 0).is_ok());
         assert!(validate_p4_session_transition_metadata("done", 42, 60_000).is_ok());
+        assert!(validate_p4_session_transition_metadata("reply_complete", 42, 60_000).is_ok());
         assert!(validate_p4_session_transition_metadata("error", 42, 60_001).is_err());
         assert!(validate_p4_session_transition_metadata("working", 42, 1).is_err());
         assert!(validate_p4_session_transition_metadata("done", 0, 1).is_err());
