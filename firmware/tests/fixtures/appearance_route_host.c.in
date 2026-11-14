@@ -40,6 +40,12 @@ static void observe_ack(const char *line){cJSON*r=cJSON_Parse(line);ack_ok=cJSON
 static void native_sender(const char *line,void *route){if(pet_p4_native_usb_route_current(route)){observe_ack(line);acks++;}}
 #define pet_p4_native_usb_send_json_line native_sender
 static void uart_sender(const char *line,void *route){(void)route;observe_ack(line);acks++;}
+/* The extracted main-loop guard also asks the TCP transport whether a queued
+ * TCP request still belongs to its live session.  These route cases exercise
+ * only native USB and UART callbacks; both are deliberately non-TCP, which
+ * the production predicate accepts.  TCP generation semantics are covered by
+ * p4_tcp_session_identity_test.py against the real implementation. */
+static bool pet_p4_tcp_request_current(pet_p4_send_line_fn sender,void *route){(void)sender;(void)route;return true;}
 typedef struct {char *line;}pet_p4_query_reply_t;
 typedef void *TaskHandle_t;
 static TaskHandle_t xTaskGetCurrentTaskHandle(void){return (void*)7;}
