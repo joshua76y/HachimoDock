@@ -1,7 +1,7 @@
 name: Source checks
 on:
   push:
-    branches: [main]
+    branches: [main, ESP32P4-Touch43]
   pull_request:
   workflow_dispatch:
 permissions:
@@ -76,6 +76,10 @@ jobs:
       - run: python -m pytest firmware/tests -q
       - run: python firmware/tests/protocol_contract_test.py
       - run: python firmware/tools/build_builtin_bundle.py --check
+      - name: Build the deployable ESP32-P4 V3 firmware
+        env:
+          PLATFORMIO_CORE_DIR: ${{ runner.temp }}/p4-v3-core
+        run: python -m platformio run --project-dir firmware --environment esp32_p4_evboard_v3 --disable-auto-clean
   secrets:
     runs-on: ubuntu-latest
     steps:
