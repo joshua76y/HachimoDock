@@ -132,12 +132,22 @@ where F: FnMut(&str), E: FnMut(crate::web_search::Event) {
 }
 
 pub async fn stream_chat_with_desktop<F,E>(cfg: &LlmConfig, system_prompt: &str, history: &[ChatTurn], user_text: &str,
-    session: Option<&str>, desktop: Option<crate::desktop_agent::Context>, mut on_delta: F, mut on_search: E) -> Result<String,String>
+    session: Option<&str>, desktop: Option<crate::desktop_agent::Context>, on_delta: F, on_search: E) -> Result<String,String>
+where F: FnMut(&str), E: FnMut(crate::web_search::Event) {
+    stream_chat_with_desktop_for_model_class(
+        cfg, system_prompt, history, user_text, session, desktop, endpoint_is_local(cfg), on_delta, on_search,
+    ).await
+}
+
+/* Keep the model capability decision at the public boundary. Production always
+ * derives it from the endpoint; the deterministic loopback fixture can still
+ * exercise the cloud-model desktop-decision contract without a real cloud host. */
+async fn stream_chat_with_desktop_for_model_class<F,E>(cfg: &LlmConfig, system_prompt: &str, history: &[ChatTurn], user_text: &str,
+    session: Option<&str>, desktop: Option<crate::desktop_agent::Context>, local_model: bool, mut on_delta: F, mut on_search: E) -> Result<String,String>
 where F: FnMut(&str), E: FnMut(crate::web_search::Event) {
     /* 本地小模型（127.0.0.1/localhost 端点）走精简路径：不挂家居/搜索/本地/
      * 桌面工具。34K 字符的工具上下文对本地模型是灾难——首 token 实测 15s+，
      * 用户以为对话坏了。只保留人设闲聊，prompt 缩到几 K，秒回。 */
-    let local_model = endpoint_is_local(cfg);
     let home = if local_model { Ok(false) } else { crate::smart_home::available().await };
     crate::realtime_chat_log::record("", "home_tools", json!({"ok":matches!(home, Ok(true)),"reason":match &home {Ok(true)=>"connected",Ok(false)=>if local_model {"local_model_fast_path"} else {"disconnected"},Err(_)=>"credential_error"}}));
     let home_available=matches!(home,Ok(true));
@@ -880,9 +890,12 @@ mod tests {
             });
             let cfg=LlmConfig{web_search:false,base_url:format!("http://{address}"),model:"fixture".into(),api_key:"fixture".into()};
             let mut spoken=String::new();
-            let result=tokio::time::timeout(Duration::from_secs(5),stream_chat_with_desktop(&cfg,"宠物",&[],"好的",None,
-                Some(crate::desktop_agent::Context::new("fixture-session","fixture-board",1,"好的")),|s|spoken.push_str(s),|_|{})).await.unwrap().unwrap();
-            server.await.unwrap();
+            let result=tokio::time::timeout(Duration::from_secs(5),stream_chat_with_desktop_for_model_class(&cfg,"宠物",&[],"好的",None,
+                Some(crate::desktop_agent::Context::new("fixture-session","fixture-board",1,"好的")),false,|s|spoken.push_str(s),|_|{})).await.unwrap().unwrap();
+            tokio::time::timeout(Duration::from_secs(2), server)
+                .await
+                .expect("desktop decision retry must issue every expected model request")
+                .unwrap();
             let expected=if repeated_bad {crate::voice_decision::INVALID_REPLY}else{"你要安装哪个浏览器？"};
             assert_eq!(result,expected);assert_eq!(spoken,expected);
             assert!(!spoken.contains("我派给"));
