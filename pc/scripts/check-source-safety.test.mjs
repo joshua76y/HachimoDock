@@ -35,7 +35,7 @@ test('a binary asset cannot bypass credential scanning with a null byte', () => 
 });
 
 test('a binary asset with a PEM private-key body is rejected', () => {
-  const pem = '-----BEGIN PRIVATE KEY-----\n' + 'A'.repeat(64) + '\n-----END PRIVATE KEY-----';
+  const pem = '-----BEGIN ' + 'PRIVATE KEY-----\n' + 'A'.repeat(64) + '\n-----END ' + 'PRIVATE KEY-----';
   const result = check({ 'firmware.bin': Buffer.concat([Buffer.from([0]), Buffer.from(pem)]) });
   assert.equal(result.status, 1);
   assert.match(result.output, /potential credential; value redacted/);

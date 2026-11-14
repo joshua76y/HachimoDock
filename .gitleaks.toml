@@ -12,3 +12,14 @@ id = "generic-api-key"
   regexTarget = "match"
   paths = ['''^pc/skills/petui/scripts/app_form_v3\.py$''']
   regexes = ['''^NUMERIC_KEYS='0123456789\.-'$''']
+
+[[rules]]
+id = "private-key"
+
+  [[rules.allowlists]]
+  description = "Historical source-safety test fixture; commit, path and PEM envelope are all fixed"
+  condition = "AND"
+  regexTarget = "match"
+  commits = ['''5e8be2510a5808b3404f4eddc389e8ec9475a587''']
+  paths = ['''^pc/scripts/check-source-safety\.test\.mjs$''']
+  regexes = ['''-----BEGIN PRIVATE\sKEY-----''']
