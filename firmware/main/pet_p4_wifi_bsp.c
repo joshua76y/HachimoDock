@@ -10,6 +10,7 @@
 #include "pet_p4_wifi_bsp.h"
 
 #include <time.h>
+#include <stdatomic.h>
 
 #include "esp_sntp.h"
 
@@ -32,18 +33,21 @@ static const char *TAG = "pet-p4-wifi";
 
 static bool s_connected;
 static char s_ip[32];
+static portMUX_TYPE s_status_lock = portMUX_INITIALIZER_UNLOCKED;
+static atomic_bool s_reconnect_pending;
 
 #define WIFI_NVS_NAMESPACE "pet_wifi"
 #define WIFI_SSID_MAX      33
 #define WIFI_PASS_MAX      65
 
 static bool s_started;            /* esp_wifi_init 只能调一次 */
-static bool s_has_credentials;    /* NVS 里存过凭据 */
+static atomic_bool s_has_credentials; /* NVS 里存过凭据，跨任务读取 */
+static void wifi_fill_config(wifi_config_t *wc, const char *ssid, const char *password);
 
 /* 🔴 连续失败熔断：esp_hosted_init / esp_wifi_remote_init 内部是 ESP_ERROR_CHECK，
  * 硬件异常（C6 掉线 / SDIO 接触不良）时会直接 abort() 重启，USB 也活不成。
- * 失败计数持久化到 NVS；连续 3 次启动失败后开机自动连直接跳过（保 USB 可用），
- * 拿到 IP 即清零；PC 重新下发 apply-wifi 也会清零（重新给机会）。 */
+ * 启动前持久化计数，避免驱动 abort 重启时来不及记录；初始化成功即清零。
+ * 连续 3 次失败后跳过自动连接；重新配网会清零并重新尝试。 */
 #define WIFI_FAIL_LIMIT 3
 #define WIFI_FAIL_KEY "failcnt"
 
@@ -100,23 +104,44 @@ static void sntp_start_once(void) {
   ESP_LOGI(TAG, "SNTP 校时已启动（ntp.aliyun.com / pool.ntp.org）");
 }
 
+static void wifi_set_status(bool connected, const char *ip) {
+  char next_ip[sizeof(s_ip)] = {0};
+  if (connected && ip) snprintf(next_ip, sizeof(next_ip), "%s", ip);
+  taskENTER_CRITICAL(&s_status_lock);
+  memcpy(s_ip, next_ip, sizeof(s_ip));
+  s_connected = connected;
+  taskEXIT_CRITICAL(&s_status_lock);
+}
+
+static void wifi_reconnect_task(void *arg) {
+  (void) arg;
+  vTaskDelay(pdMS_TO_TICKS(2000));
+  atomic_store_explicit(&s_reconnect_pending, false, memory_order_release);
+  if (!pet_p4_wifi_is_connected()) (void) esp_wifi_connect();
+  vTaskDelete(NULL);
+}
+
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
   (void) arg;
   if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
     esp_wifi_connect();
   } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-    s_connected = false;
-    s_ip[0] = 0;
+    wifi_set_status(false, NULL);
     ESP_LOGW(TAG, "WiFi 断开，2s 后重连");
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    esp_wifi_connect();
+    if (!atomic_exchange_explicit(&s_reconnect_pending, true, memory_order_acq_rel)) {
+      if (xTaskCreate(wifi_reconnect_task, "wifi-retry", 3072, NULL, 4, NULL) != pdPASS) {
+        atomic_store_explicit(&s_reconnect_pending, false, memory_order_release);
+        (void) esp_wifi_connect();
+      }
+    }
   } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
     ip_event_got_ip_t *ev = (ip_event_got_ip_t *) data;
-    snprintf(s_ip, sizeof(s_ip), IPSTR, IP2STR(&ev->ip_info.ip));
-    s_connected = true;
+    char ip[sizeof(s_ip)];
+    snprintf(ip, sizeof(ip), IPSTR, IP2STR(&ev->ip_info.ip));
+    wifi_set_status(true, ip);
     if (wifi_failcnt_load()) wifi_failcnt_save(0);  /* 成功一次即清零熔断计数 */
     sntp_start_once();
-    ESP_LOGI(TAG, "已联网 hostname=%s IP=%s", PET_P4_WIFI_HOSTNAME, s_ip);
+    ESP_LOGI(TAG, "已联网 hostname=%s IP=%s", PET_P4_WIFI_HOSTNAME, ip);
   }
 }
 
@@ -163,11 +188,8 @@ esp_err_t pet_p4_wifi_init(const char *ssid, const char *password) {
                                         &on_wifi_event, NULL, NULL),
     TAG, "注册 IP 事件失败");
 
-  wifi_config_t wc = {0};
-  strncpy((char *) wc.sta.ssid, ssid, sizeof(wc.sta.ssid) - 1);
-  strncpy((char *) wc.sta.password, password, sizeof(wc.sta.password) - 1);
-  wc.sta.threshold.authmode = WIFI_AUTH_OPEN;
-  wc.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
+  wifi_config_t wc;
+  wifi_fill_config(&wc, ssid, password);
 
   ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "设置 STA 模式失败");
   ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &wc), TAG, "设置 WiFi 配置失败");
@@ -190,14 +212,22 @@ esp_err_t pet_p4_wifi_init(const char *ssid, const char *password) {
 }
 
 bool pet_p4_wifi_is_connected(void) {
-  return s_connected;
+  taskENTER_CRITICAL(&s_status_lock);
+  bool connected = s_connected;
+  taskEXIT_CRITICAL(&s_status_lock);
+  return connected;
 }
 
 esp_err_t pet_p4_wifi_get_ip(char *buf, size_t len) {
-  if (!s_connected || !buf || len == 0) return ESP_ERR_INVALID_STATE;
-  strncpy(buf, s_ip, len - 1);
-  buf[len - 1] = 0;
-  return ESP_OK;
+  if (!buf || len == 0) return ESP_ERR_INVALID_STATE;
+  taskENTER_CRITICAL(&s_status_lock);
+  bool connected = s_connected;
+  if (connected) {
+    strncpy(buf, s_ip, len - 1);
+    buf[len - 1] = 0;
+  }
+  taskEXIT_CRITICAL(&s_status_lock);
+  return connected ? ESP_OK : ESP_ERR_INVALID_STATE;
 }
 
 
@@ -224,14 +254,16 @@ static esp_err_t wifi_load_credentials(char *ssid, size_t ssid_len,
   err = nvs_get_str(handle, "ssid", ssid, &a);
   if (err == ESP_OK) err = nvs_get_str(handle, "pass", pass, &b);
   nvs_close(handle);
-  if (err == ESP_OK && (!ssid[0] || !pass[0])) err = ESP_ERR_NOT_FOUND;
+  /* An empty password is valid for an open network, both now and at boot. */
+  if (err == ESP_OK && !ssid[0]) err = ESP_ERR_NOT_FOUND;
   return err;
 }
 
 static void wifi_fill_config(wifi_config_t *wc, const char *ssid, const char *password) {
   memset(wc, 0, sizeof(*wc));
-  strncpy((char *) wc->sta.ssid, ssid, sizeof(wc->sta.ssid) - 1);
-  strncpy((char *) wc->sta.password, password, sizeof(wc->sta.password) - 1);
+  /* ESP-IDF arrays also allow full-width, non-NUL-terminated SSID/PSK. */
+  strncpy((char *) wc->sta.ssid, ssid, sizeof(wc->sta.ssid));
+  strncpy((char *) wc->sta.password, password, sizeof(wc->sta.password));
   wc->sta.threshold.authmode = WIFI_AUTH_OPEN;
   wc->sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
 }
@@ -275,19 +307,20 @@ esp_err_t pet_p4_wifi_start_from_nvs(void) {
     return ESP_ERR_INVALID_STATE;
   }
   ESP_LOGI(TAG, "从 NVS 读到 WiFi 凭据，SSID=\"%s\"（历史失败 %u 次）", ssid, (unsigned) failcnt);
+  /* 驱动内部可能 abort，必须先落盘，不能等函数返回后才记录。 */
+  wifi_failcnt_save(failcnt + 1);
   err = pet_p4_wifi_init(ssid, pass);
-  if (err != ESP_OK) {
-    wifi_failcnt_save(failcnt + 1);   /* 下次开机再放弃（计数持久化跨重启） */
-  }
+  if (err == ESP_OK) wifi_failcnt_save(0);
   return err;
 }
 
 void pet_p4_wifi_describe(char *buf, size_t len) {
   if (!buf || !len) return;
   buf[0] = 0;
-  if (s_connected) {
-    const char *last = strrchr(s_ip, '.');
-    snprintf(buf, len, "WiFi %s", last ? last + 1 : s_ip);
+  char ip[sizeof(s_ip)];
+  if (pet_p4_wifi_get_ip(ip, sizeof(ip)) == ESP_OK) {
+    const char *last = strrchr(ip, '.');
+    snprintf(buf, len, "WiFi %s", last ? last + 1 : ip);
   } else if (s_has_credentials) {
     snprintf(buf, len, "WiFi ...");
   }

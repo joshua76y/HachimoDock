@@ -14,6 +14,9 @@ import {
   formatDeviceSessionContent,
   formatDeviceSessionTitle,
   isDeviceSessionTargetUnique,
+  p4SessionSwitchTarget,
+  p4SessionBindingTarget,
+  sessionsForP4AgentSwitch,
 } from "./useP4SessionSync.js";
 
 test("empty-session notices suppress a continuous input burst until five quiet seconds", () => {
@@ -51,6 +54,33 @@ test("P4 encoder cycling stays inside the exact visible Session list", () => {
   assert.equal(cycleVoiceSessionId("auto", [], 1), "auto");
 });
 
+test("P4 joystick session cycling stays within the focused Agent", () => {
+  const sessions = [
+    { id: "codex::build", agentId: "codex" },
+    { id: "claude-code::review", agentId: "claude-code" },
+    { id: "codex::test", agentId: "codex" },
+  ];
+  const codexSessions = sessionsForP4AgentSwitch(sessions, "codex");
+
+  assert.deepEqual(codexSessions.map((session) => session.id), [
+    "codex::build",
+    "codex::test",
+  ]);
+  assert.equal(
+    p4SessionSwitchTarget("codex::build", sessions, "codex", 1),
+    "codex::test",
+  );
+  assert.equal(
+    p4SessionSwitchTarget("codex::test", sessions, "codex", 1),
+    "codex::build",
+  );
+  assert.equal(
+    p4SessionSwitchTarget("codex::build", sessions, "claude-code", -1),
+    "claude-code::review",
+  );
+  assert.deepEqual(sessionsForP4AgentSwitch(sessions, "missing"), []);
+});
+
 test("P4 Session targeting uses cwd only when duplicate titles require it", () => {
   const selected = { id: "a", name: "Build", cwd: "D:/one" };
   assert.equal(formatDeviceSessionTitle(selected), "Build");
@@ -71,6 +101,20 @@ test("P4 card title accepts event-provided display metadata before ID fallback",
     "Implement routing",
   );
   assert.equal(formatDeviceSessionTitle({ id: "session-abcdef" }), "会话 session-");
+});
+
+test("a source-scoped card binds voice to its original Agent and Session while showing its Agent label", () => {
+  const session = {
+    id: "claude-code::review-42",
+    sourceSessionId: "review-42",
+    agentId: "claude-code",
+    name: "Review layout",
+  };
+  assert.deepEqual(p4SessionBindingTarget(session, "codex"), {
+    agentId: "claude-code",
+    sessionId: "review-42",
+  });
+  assert.equal(formatDeviceSessionTitle(session), "CLAUDE · Review layout");
 });
 
 test("P4 card content prefers live text, suppresses plugin payloads, and respects UTF-8 limits", () => {

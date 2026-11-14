@@ -74,7 +74,7 @@ mod firmware_transaction;
 mod firmware_begin_wait;
 mod firmware_diagnostics;
 mod firmware_chip;
-pub(crate) use firmware_chip::{bundled_resource_for_chip, chip_target_from_device, P4ChipTarget};
+pub(crate) use firmware_chip::{bundled_resource_for_chip, chip_target_from_device, validate_original_bundled_panel, P4ChipTarget};
 use firmware_chip::{firmware_chip_range, validate_firmware_chip};
 mod native_usb_protocol;
 mod transaction_waiters;
@@ -1771,10 +1771,15 @@ impl UsbFollowScope {
         } else if topic == "speech/text" {
             payload["source"].as_str().or_else(|| payload["agentId"].as_str())
         } else { return true; };
-        if !self.submitted || source.and_then(crate::normalize_agent_id).as_deref() != Some(self.agent.as_str()) {
+        let source = source.and_then(crate::normalize_agent_id);
+        if !self.submitted || source.is_none() {
             return false;
         }
-        if topic == "session/current" { return true; }
+        // The board's card queue is a unified view of all enabled Agents.
+        // Source-specific lifecycle state therefore must keep flowing even
+        // while voice insertion remains leased to one Agent/session.
+        if topic == "session/current" || topic.starts_with("state/") { return true; }
+        if source.as_deref() != Some(self.agent.as_str()) { return false; }
         if let Some(session) = self.session.as_deref() {
             return payload["sessionId"].as_str() == Some(session);
         }
@@ -2449,10 +2454,31 @@ impl UsbSerialManager {
     where
         F: Fn(String, serde_json::Value) + Send + 'static,
     {
+        self.connect_tcp_expected(host, port, None, on_message)
+    }
+
+    /// Connect Route A only after the peer HELLO proves the saved board
+    /// identity.  Auto-reconnect uses this form: an IP address is merely a
+    /// routing hint and must never become authority to select a different
+    /// board on the LAN.
+    pub fn connect_tcp_expected<F>(
+        &self,
+        host: &str,
+        port: Option<u16>,
+        expected_board_device_id: Option<&str>,
+        on_message: F,
+    ) -> Result<(), String>
+    where
+        F: Fn(String, serde_json::Value) + Send + 'static,
+    {
         let host = host.trim();
         if host.is_empty() {
             return Err("TCP 主机地址不能为空".to_string());
         }
+        let expected_board_device_id = expected_board_device_id
+            .map(validate_expected_board_device_id)
+            .transpose()?
+            .map(str::to_owned);
         let port = port.unwrap_or(TCP_DEFAULT_PORT);
         let port_name = tcp_display_name(host, port);
 
@@ -2463,18 +2489,17 @@ impl UsbSerialManager {
             if let Some(existing) = conn.as_ref() {
                 if existing.connected && existing.port_name == port_name
                     && self.inbound_owner.is_current(existing.connection_id) {
+                    if let Some(expected) = expected_board_device_id.as_deref() {
+                        if existing.board_device_id != expected {
+                            return Err(format!(
+                                "TCP 已连接的设备身份不匹配：期望 {expected}，实际 {}",
+                                existing.board_device_id
+                            ));
+                        }
+                    }
                     return Ok(());
                 }
             }
-        }
-        {
-            let (_dispatch, mut conn) = self.inbound_owner.connection(&self.connection)?;
-            if let Some(existing) = conn.as_mut() {
-                existing.cancel_reader.store(true, Ordering::SeqCst);
-                self.inbound_owner.retire(existing.connection_id);
-            }
-            *conn = None;
-            cache_usb_status(&self.status_snapshot, None);
         }
 
         let probed = probe_tcp_endpoint(host, port, SERIAL_PROBE_TIMEOUT);
@@ -2489,6 +2514,41 @@ impl UsbSerialManager {
                 return Err(error);
             }
         };
+        let discovered_board_device_id = first_json_string(
+            &probed.hello.payload,
+            &["boardDeviceId", "localDeviceId", "deviceId"],
+        );
+        if let Some(expected) = expected_board_device_id.as_deref() {
+            if discovered_board_device_id != expected {
+                let error = format!(
+                    "TCP 设备身份不匹配：期望 {expected}，实际 {discovered_board_device_id}"
+                );
+                transfer_log::record(
+                    "connection",
+                    "rejected_identity",
+                    serde_json::json!({
+                        "port": port_name,
+                        "transport": "tcp",
+                        "expectedBoardDeviceId": expected,
+                        "actualBoardDeviceId": discovered_board_device_id,
+                    }),
+                );
+                return Err(error);
+            }
+        }
+
+        // Do not retire the working control path until the candidate has
+        // completed its HELLO and (when supplied) identity verification.
+        // This keeps an active USB route alive after a bad Wi-Fi address.
+        {
+            let (_dispatch, mut conn) = self.inbound_owner.connection(&self.connection)?;
+            if let Some(existing) = conn.as_mut() {
+                existing.cancel_reader.store(true, Ordering::SeqCst);
+                self.inbound_owner.retire(existing.connection_id);
+            }
+            *conn = None;
+            cache_usb_status(&self.status_snapshot, None);
+        }
         transfer_log::record(
             "connection",
             "verified",
@@ -3034,6 +3094,20 @@ impl UsbSerialManager {
         self.send_inner(topic, payload, true, Some(board), Some(generation), None)
     }
 
+    pub(crate) fn send_voice_notice_for_connection(&self, board: &str, generation: u64, boot: &str, payload: &serde_json::Value) -> Result<(), String> {
+        if board.is_empty() || generation == 0 || boot.is_empty() {
+            return Err("voice notice requires a complete connection scope".into());
+        }
+        self.send_inner_admitted_boot("speech/text", payload, true, Some(board), Some(generation), None, None, Some(boot))
+    }
+
+    pub(crate) fn send_voice_draft_for_connection(&self, board: &str, generation: u64, boot: &str, payload: &serde_json::Value) -> Result<(), String> {
+        if board.is_empty() || generation == 0 || boot.is_empty() || !payload["active"].is_boolean() {
+            return Err("voice draft requires a complete connection scope".into());
+        }
+        self.send_inner_admitted_boot("voice/draft", payload, true, Some(board), Some(generation), None, None, Some(boot))
+    }
+
     pub(crate) fn send_audio_bridge_command_for_connection(
         &self,
         expected_board_device_id: &str,
@@ -3054,8 +3128,12 @@ impl UsbSerialManager {
         // Every holder only inspects/updates metadata; none performs IO or UI
         // work under this mutex. Contention alone must not retire valid speech.
         let Ok(scope) = self.follow_scope.lock() else { return false; };
-        scope.as_ref().filter(|scope| scope.generation.to_string() == generation && scope.board == board)
-            .is_none_or(|scope| scope.allows("session/current", &serde_json::json!({"agentId":agent})))
+        scope.as_ref()
+            .filter(|scope| scope.generation.to_string() == generation && scope.board == board)
+            .is_none_or(|scope| {
+                scope.submitted
+                    && crate::normalize_agent_id(agent).as_deref() == Some(scope.agent.as_str())
+            })
     }
 
     pub(crate) fn check_session_follow_target(
@@ -3070,10 +3148,19 @@ impl UsbSerialManager {
             || (!expected_connection.is_empty() && expected_connection != conn.connection_id.to_string())
             || (!expected_boot.is_empty() && conn.capabilities["debugBootId"].as_str() != Some(expected_boot))
         { return Err("USB session scope changed; binding not committed".into()); }
-        let scope = self.follow_scope.lock().map_err(|_| "follow scope unavailable")?;
-        if scope.as_ref().filter(|scope| scope.generation == conn.connection_id && scope.board == board)
-            .is_some_and(|scope| !scope.allows("session/current", &serde_json::json!({"agentId":agent})))
-        { return Err("stale follow agent/session; binding not committed".into()); }
+        let mut scope = self.follow_scope.lock().map_err(|_| "follow scope unavailable")?;
+        if let Some(scope) = scope.as_mut().filter(|scope| {
+            scope.generation == conn.connection_id && scope.board == board
+        }) {
+            if !scope.submitted {
+                return Err("stale follow agent/session; binding not committed".into());
+            }
+            // A queued card can deliberately move focus to another enabled
+            // Agent. Retire the old voice-session lease before accepting it;
+            // the following session/current write establishes the new lease.
+            scope.agent = agent.to_string();
+            scope.session = None;
+        }
         Ok(conn.connection_id)
     }
 
@@ -3141,6 +3228,12 @@ impl UsbSerialManager {
         &self,topic:&str,payload:&serde_json::Value,flush:bool,
         expected_board_device_id:Option<&str>,expected_connection_id:Option<u64>,write_slice_bytes:Option<usize>,program_epoch:Option<u64>,
     )->Result<(),String>{
+        self.send_inner_admitted_boot(topic,payload,flush,expected_board_device_id,expected_connection_id,write_slice_bytes,program_epoch,None)
+    }
+    fn send_inner_admitted_boot(
+        &self,topic:&str,payload:&serde_json::Value,flush:bool,
+        expected_board_device_id:Option<&str>,expected_connection_id:Option<u64>,write_slice_bytes:Option<usize>,program_epoch:Option<u64>,expected_boot:Option<&str>,
+    )->Result<(),String>{
         let owned_notes=topic=="audio/control"&&expected_connection_id.is_some()&&payload.get("captureOwner").is_some();
         let preempt_on_send = !owned_notes&&((topic=="audio/conversation"&&payload["enabled"]==true)
             ||(topic=="audio/control"&&payload["action"]=="start")
@@ -3162,6 +3255,9 @@ impl UsbSerialManager {
         };
         let conn = connection_guard.as_mut().ok_or("Not connected")?;
         self.refresh_pending_hello(conn);
+        if expected_boot.is_some_and(|boot| conn.capabilities["debugBootId"].as_str() != Some(boot)) {
+            return Err("USB device boot changed; voice notice not submitted".into());
+        }
         if conn.cancel_reader.load(Ordering::Acquire) || !self.inbound_owner.is_current(conn.connection_id) {
             return Err("USB connection retired; request not submitted".into());
         }
@@ -3218,7 +3314,11 @@ impl UsbSerialManager {
                 // only a new explicit binding submission can reopen it.
                 *scope = Some(UsbFollowScope { generation: conn.connection_id, board: conn.board_device_id.clone(),
                     agent: agent.clone(), session: None, submitted: false });
-            } else if scope.as_ref().is_some_and(|s| !s.allows(topic, payload)) {
+            } else if scope.as_ref().is_some_and(|s| {
+                if expected_boot.is_some() && topic == "voice/draft" {
+                    !s.allows("session/current", payload)
+                } else { !s.allows(topic, payload) }
+            }) {
                 return Err("stale follow agent/session; state not submitted".into());
             }
         }
@@ -3238,6 +3338,11 @@ impl UsbSerialManager {
             return Err("语音通道使用中，稍后更新组件数据".into());
         }
         let mut payload = payload.clone();
+        if expected_boot.is_some() && topic == "speech/text" {
+            // Session was checked against the follow scope above. Do not let
+            // the device save this display-only transcript into a task card.
+            if let Some(object) = payload.as_object_mut() { object.remove("sessionId"); }
+        }
         let pixel_wire_guard=if topic=="ui/text-pixels" {
             if conn.capture_active.load(Ordering::Acquire)||self.media_requests_pending.load(Ordering::SeqCst)!=0
                 ||self.appearance_sync_active.load(Ordering::Acquire)||conn.cancel_reader.load(Ordering::Acquire){
@@ -8126,7 +8231,7 @@ manager.activate_memory_test_connection();
     }
 
     #[test]
-    fn session_binding_preflight_rejects_retired_agent_or_generation_without_a_write() {
+    fn session_binding_preflight_allows_a_new_enabled_agent_on_the_same_board() {
         let manager = UsbSerialManager::new();
         let recorded = Arc::new(Mutex::new(PacedWriterState::default()));
         *manager.connection.lock().unwrap() = Some(UsbConnection {
@@ -8143,9 +8248,9 @@ manager.activate_memory_test_connection();
         *manager.follow_scope.lock().unwrap() = Some(UsbFollowScope {
             generation: 1, board: "p4-test".into(), agent: "codex".into(), session: None, submitted: true,
         });
-        assert!(manager.check_session_follow_target("p4-test", "workbuddy", "1", "0123456789abcdef").is_err());
-        assert!(!manager.session_follow_target_is_current("p4-test", "1", "workbuddy"));
-        assert!(manager.session_follow_target_is_current("p4-test", "1", "codex"));
+        assert_eq!(manager.check_session_follow_target("p4-test", "workbuddy", "1", "0123456789abcdef"), Ok(1));
+        assert!(manager.session_follow_target_is_current("p4-test", "1", "workbuddy"));
+        assert!(!manager.session_follow_target_is_current("p4-test", "1", "codex"));
         assert!(manager.check_session_follow_target("p4-test", "codex", "2", "0123456789abcdef").is_err());
         assert!(manager.check_session_follow_target("p4-test", "codex", "1", "ffffffffffffffff").is_err());
         assert_eq!(manager.check_session_follow_target("p4-test", "codex", "1", "0123456789abcdef"), Ok(1));
@@ -8442,6 +8547,45 @@ manager.activate_memory_test_connection();
 
     #[derive(Clone)]
     struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    #[test]
+    fn voice_notice_never_crosses_board_connection_or_boot() {
+        let manager = UsbSerialManager::new();
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        *manager.connection.lock().unwrap() = Some(UsbConnection {
+            connection_id: 1, port_name: "test".into(), baud_rate: P4_USB_UART_BAUD,
+            writer: Box::new(SharedWriter(bytes.clone())), board_device_id: "p4-test".into(),
+            runtime: "esp-p4".into(), device_model: String::new(), firmware: String::new(),
+            build_id: String::new(), git_sha: String::new(), build_dirty: false, protocol_schema: 7,
+            wire_protocol: String::new(), capabilities: serde_json::json!({"debugBootId":"0123456789abcdef"}),
+            connected: true, cancel_reader: Arc::new(AtomicBool::new(false)),
+            capture_active: Arc::new(AtomicBool::new(false)),
+        });
+        manager.activate_memory_test_connection();
+        *manager.follow_scope.lock().unwrap() = Some(UsbFollowScope {
+            generation: 1, board: "p4-test".into(), agent: "workbuddy".into(),
+            session: Some("session-x".into()), submitted: true,
+        });
+        let notice = serde_json::json!({"displayContent":"synthetic", "agentId":"workbuddy", "sessionId":"session-x"});
+        assert!(manager.send_voice_notice_for_connection("p4-test", 1, "other-boot", &notice).is_err());
+        assert!(manager.send_voice_notice_for_connection("p4-other", 1, "0123456789abcdef", &notice).is_err());
+        assert!(manager.send_voice_notice_for_connection("p4-test", 2, "0123456789abcdef", &notice).is_err());
+        assert!(manager.send_voice_notice_for_connection("p4-test", 1, "0123456789abcdef", &serde_json::json!({"displayContent":"synthetic"})).is_err());
+        assert!(bytes.lock().unwrap().is_empty());
+        manager.send_voice_notice_for_connection("p4-test", 1, "0123456789abcdef", &notice).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes.lock().unwrap()).unwrap();
+        assert_eq!(body["topic"], "speech/text");
+        assert!(body["payload"].get("sessionId").is_none());
+        bytes.lock().unwrap().clear();
+        let draft = serde_json::json!({"active":true,"text":"synthetic","agentId":"workbuddy"});
+        assert!(manager.send_voice_draft_for_connection("p4-test", 1, "other", &draft).is_err());
+        assert!(manager.send_voice_draft_for_connection("p4-test", 1, "0123456789abcdef",
+            &serde_json::json!({"active":true,"agentId":"codex"})).is_err());
+        assert!(bytes.lock().unwrap().is_empty());
+        manager.send_voice_draft_for_connection("p4-test", 1, "0123456789abcdef", &draft).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes.lock().unwrap()).unwrap();
+        assert_eq!(body["topic"], "voice/draft");
+    }
 
     #[test]
     fn local_extended_deck_rejects_historical_quota_before_transport_or_repair() {

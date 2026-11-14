@@ -41,10 +41,12 @@ int main(void) {
   pet_p4_joystick_decoder_init(&joystick, 2048, 2048, 900, 500, 350, 140);
 
   assert(pet_p4_joystick_decoder_update(&joystick, 2048, 2048, 5) == PET_P4_JOYSTICK_CENTER);
-  assert(pet_p4_joystick_decoder_update(&joystick, 400, 2048, 5) == PET_P4_JOYSTICK_LEFT);
+  /* Waveshare's horizontal potentiometer has its high rail on the physical
+   * left.  The vertical rail remains high for physical up. */
+  assert(pet_p4_joystick_decoder_update(&joystick, 400, 2048, 5) == PET_P4_JOYSTICK_RIGHT);
   assert(pet_p4_joystick_decoder_update(&joystick, 1600, 2048, 5) == PET_P4_JOYSTICK_CENTER);
   release_to_center(&joystick);
-  assert(pet_p4_joystick_decoder_update(&joystick, 3700, 2048, 5) == PET_P4_JOYSTICK_RIGHT);
+  assert(pet_p4_joystick_decoder_update(&joystick, 3700, 2048, 5) == PET_P4_JOYSTICK_LEFT);
   release_to_center(&joystick);
   assert(pet_p4_joystick_decoder_update(&joystick, 2048, 3700, 5) == PET_P4_JOYSTICK_UP);
   release_to_center(&joystick);
@@ -53,9 +55,9 @@ int main(void) {
 
   // Limited-travel samples from production joystick batches must cross the
   // center-aware threshold even though they do not reach the ADC rails.
-  assert(pet_p4_joystick_decoder_update(&joystick, 1500, 2048, 5) == PET_P4_JOYSTICK_LEFT);
+  assert(pet_p4_joystick_decoder_update(&joystick, 1500, 2048, 5) == PET_P4_JOYSTICK_RIGHT);
   release_to_center(&joystick);
-  assert(pet_p4_joystick_decoder_update(&joystick, 2600, 2048, 5) == PET_P4_JOYSTICK_RIGHT);
+  assert(pet_p4_joystick_decoder_update(&joystick, 2600, 2048, 5) == PET_P4_JOYSTICK_LEFT);
   release_to_center(&joystick);
   assert(pet_p4_joystick_decoder_update(&joystick, 2048, 2600, 5) == PET_P4_JOYSTICK_UP);
   release_to_center(&joystick);
@@ -63,10 +65,10 @@ int main(void) {
   release_to_center(&joystick);
 
   // A diagonal sample resolves to the dominant axis and emits only once.
-  assert(pet_p4_joystick_decoder_update(&joystick, 3500, 3100, 5) == PET_P4_JOYSTICK_RIGHT);
+  assert(pet_p4_joystick_decoder_update(&joystick, 3500, 3100, 5) == PET_P4_JOYSTICK_LEFT);
   assert(pet_p4_joystick_decoder_update(&joystick, 3500, 3100, 340) == PET_P4_JOYSTICK_CENTER);
-  assert(pet_p4_joystick_decoder_update(&joystick, 3500, 3100, 10) == PET_P4_JOYSTICK_RIGHT);
-  assert(pet_p4_joystick_decoder_update(&joystick, 3500, 3100, 140) == PET_P4_JOYSTICK_RIGHT);
+  assert(pet_p4_joystick_decoder_update(&joystick, 3500, 3100, 10) == PET_P4_JOYSTICK_LEFT);
+  assert(pet_p4_joystick_decoder_update(&joystick, 3500, 3100, 140) == PET_P4_JOYSTICK_LEFT);
   release_to_center(&joystick);
 
   return 0;

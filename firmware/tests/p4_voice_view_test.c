@@ -48,6 +48,18 @@ int main(void) {
   pet_p4_build_view_model(&state, &view);
   assert(!view.show_voice_overlay && view.show_bubble && view.compact_bubble);
   assert(strcmp(view.body, "休息中") == 0);
+  // A display-only result has its own retained text, even while session
+  // updates replace the ordinary speech and provide a card.
+  strcpy(state.voice_notice_text, "synthetic transcript");
+  state.voice_notice_until_ms = 90000;
+  state.session_queue_count = 1;
+  pet_p4_build_view_model(&state, &view);
+  assert(view.show_voice_notice && view.show_bubble && !view.compact_bubble);
+  assert(strcmp(view.title, "未发送") == 0);
+  assert(strcmp(view.body, "synthetic transcript") == 0);
+  state.voice_notice_text[0] = '\0';
+  state.voice_notice_until_ms = 0;
+  state.session_queue_count = 0;
   strcpy(state.conversation_state, "listening");
   strcpy(state.conversation_name, "test");
   pet_p4_build_view_model(&state, &view);
@@ -62,6 +74,16 @@ int main(void) {
   strcpy(state.conversation_state, "ended");
   pet_p4_build_view_model(&state, &view);
   assert(strcmp(view.body, "休息中") == 0);
+
+  // Closing message prompts leaves the pet unobstructed, while a fresh voice
+  // interaction keeps its higher-priority recording feedback.
+  state.session_overlay_dismissed = true;
+  pet_p4_build_view_model(&state, &view);
+  assert(!view.show_bubble && !view.show_voice_overlay);
+  state.session_voice_active = true;
+  pet_p4_build_view_model(&state, &view);
+  assert(view.show_voice_overlay && !view.show_bubble);
+  state.session_voice_active = false;
   pet_p4_build_view_model(NULL, &view);
   assert(!view.show_voice_overlay);
   return 0;

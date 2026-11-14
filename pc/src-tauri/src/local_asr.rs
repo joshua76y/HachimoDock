@@ -171,6 +171,20 @@ pub fn pcm_to_wav(pcm: &[u8], sample_rate: u32, channels: u16) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn qwen_service_finds_local_huggingface_snapshot_without_trusting_ref_path() {
+        let root = std::env::temp_dir().join(format!("hachimo-qwen-test-{}", std::process::id()));
+        let repo = root.join(".cache/huggingface/hub/models--Qwen--Qwen3-ASR-0.6B-hf");
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        std::fs::create_dir_all(repo.join("refs")).unwrap();
+        std::fs::create_dir_all(repo.join("snapshots").join(revision)).unwrap();
+        std::fs::write(repo.join("refs/main"), revision).unwrap();
+        std::fs::write(repo.join("snapshots").join(revision).join("config.json"), "{}").unwrap();
+        assert_eq!(super::qwen_model_dir(&root), Some(repo.join("snapshots").join(revision)));
+        std::fs::write(repo.join("refs/main"), "../../other").unwrap();
+        assert_eq!(super::qwen_model_dir(&root), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     use super::*;
 
     #[test]
@@ -300,6 +314,17 @@ fn service_model_dir() -> Result<std::path::PathBuf, String> {
     Ok(home_dir()?.join(SERVICE_DIR).join("models").join(SERVICE_MODEL_NAME))
 }
 
+fn qwen_model_dir(home: &std::path::Path) -> Option<std::path::PathBuf> {
+    let legacy = home.join(".vibebuddy/models/qwen3-asr-0.6b");
+    if legacy.join("config.json").is_file() { return Some(legacy); }
+    let repo = home.join(".cache/huggingface/hub/models--Qwen--Qwen3-ASR-0.6B-hf");
+    let revision = std::fs::read_to_string(repo.join("refs/main")).ok()?;
+    let revision = revision.trim();
+    if revision.len() != 40 || !revision.bytes().all(|b| b.is_ascii_hexdigit()) { return None; }
+    let snapshot = repo.join("snapshots").join(revision);
+    snapshot.join("config.json").is_file().then_some(snapshot)
+}
+
 /// 确保本地 ASR 服务在跑：已经在跑就复用，否则自己拉起来（不占终端、
 /// 不依赖 launchd）。返回 true 表示本次是新启动的。
 pub fn ensure_service() -> Result<bool, String> {
@@ -308,15 +333,18 @@ pub fn ensure_service() -> Result<bool, String> {
     }
     let script = service_script()?;
     let model_dir = service_model_dir()?;
-    std::process::Command::new(SERVICE_PYTHON)
-        .arg(&script)
+    let mut command = std::process::Command::new(SERVICE_PYTHON);
+    command.arg(&script)
         .env("VIBEBUDDY_STT_PORT", "8900")
         .env("VIBEBUDDY_SENSEVOICE_DIR", &model_dir)
         .env("VIBEBUDDY_STT_LOG", "/tmp/hachimo-stt.log")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
+        .stderr(std::process::Stdio::null());
+    if std::env::var_os("VIBEBUDDY_QWEN_DIR").is_none() {
+        if let Some(qwen_dir) = qwen_model_dir(&home_dir()?) { command.env("VIBEBUDDY_QWEN_DIR", qwen_dir); }
+    }
+    command.spawn()
         .map_err(|e| format!("启动本地 ASR 服务失败：{e}（检查 {SERVICE_PYTHON} / {}）", script.display()))?;
     Ok(true)
 }

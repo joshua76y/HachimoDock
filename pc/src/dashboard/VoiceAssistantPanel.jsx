@@ -602,7 +602,7 @@ export default function VoiceAssistantPanel({
                 state.deviceVoiceFlow.updatedAt
                   ? `（${new Date(state.deviceVoiceFlow.updatedAt).toLocaleTimeString()}）`
                   : ""
-              }\n${formatVoiceUserMessage(voiceFlowMessage(state.deviceVoiceFlow))}${state.deviceVoiceFlow.phase === "draft_ready" ? ` ${usageHelp.confirm}` : ""}`}
+              }\n${formatVoiceUserMessage(voiceFlowMessage(state.deviceVoiceFlow))}${state.deviceVoiceFlow.phase === "draft_ready" && !["workbuddy", "codex", "claude-code"].includes(state.deviceVoiceFlow.agentId) ? ` ${usageHelp.confirm}` : ""}`}
             </div>
           )}
 
@@ -719,6 +719,11 @@ export default function VoiceAssistantPanel({
                       <p>
                         无需再进入系统设置。请保持 MiMoCode 终端在前台，并把光标停在输入位置；
                         识别文字写入目标输入框，不会自动发送。{usageHelp.confirm}
+                      </p>
+                    ) : ["workbuddy", "codex", "claude-code"].includes(visibleVoiceAgentId) ? (
+                      <p>
+                        请打开 {visibleVoiceAgentLabel} 的目标对话并点击输入框。识别后先在设备核对文字，
+                        摇杆向上发送，向下取消。
                       </p>
                     ) : (
                       <p>

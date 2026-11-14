@@ -117,13 +117,14 @@ struct lv_font_glyph_dsc{int box_w,box_h,ofs_x,ofs_y,req_raw_bitmap;font_t *reso
 static unsigned releases;
 static uint8_t bitmap[100];
 static const uint8_t *get_bitmap(lv_font_glyph_dsc_t*g,void*v){(void)v;return g->box_w==19?NULL:bitmap;}
-static font_t pet_p4_font_cn_16={24,5,get_bitmap};
+static font_t pet_p4_font_cn_16_a4={24,5,get_bitmap};
 static bool lv_font_get_glyph_dsc(font_t*f,lv_font_glyph_dsc_t*g,uint32_t cp,uint32_t next){
  (void)next;if(!cp)return false;
  *g=(lv_font_glyph_dsc_t){.box_w=7+cp%17,.box_h=9+cp%15,.ofs_x=(int)(cp%5)-2,.ofs_y=(int)(cp%7)-3,.resolved_font=f};return true;
 }
 static void lv_font_glyph_release_draw_data(lv_font_glyph_dsc_t*g){(void)g;releases++;}
 static float glyph_alpha_at(const uint8_t*p,const lv_font_glyph_dsc_t*g,int x,int y){(void)p;(void)g;return (x*53+y*29)%256;}
+#define pet_glyph_lookup(g,cp,next) lv_font_get_glyph_dsc(&pet_p4_font_cn_16_a4,(g),(cp),(next))
 static const pet_surface_font_t *app_font_glyph(uint32_t cp,int*index){
  static const pet_surface_font_t f={32,24};*index=3;return cp==1?&f:NULL;
 }
@@ -132,7 +133,7 @@ static int pet_app_symbol_advance(uint32_t cp){return cp==2?13:cp==0x2103?16:0;}
 static float pet_app_symbol_coverage(uint32_t cp,float x,float y,float scale){(void)cp;(void)scale;return x>=1&&y>=2&&x<10&&y<13?.67f:0;}
 static uint16_t rgb565(uint8_t r,uint8_t g,uint8_t b){return (uint16_t)(((r>>3)<<11)|((g>>2)<<5)|(b>>3));}
 '''
-    for name in ('blend_rgb565','app_clip_contains','blend_px','app_glyph_sample'):
+    for name in ('blend_rgb565','app_clip_contains','blend_px','app_glyph_sample','app_font_cell_origin_y'):
         code+=function(text,name)
     for enabled in (0,1):
         code+=f'\n#undef PET_P4_RASTER_EXACT\n#define PET_P4_RASTER_EXACT {enabled}\n'

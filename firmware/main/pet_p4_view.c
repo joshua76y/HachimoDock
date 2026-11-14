@@ -138,6 +138,18 @@ void pet_p4_build_view_model(const pet_p4_runtime_state_t *state, pet_p4_view_mo
     out->compact_bubble = false;
     return;
   }
+  if (state && state->voice_notice_until_ms && state->voice_notice_text[0]
+      && strcmp(out->page, "main") == 0 && !state->session_voice_active) {
+    out->agent = "";
+    out->title = "未发送";
+    out->body = state->voice_notice_text;
+    out->stats_json = "";
+    out->status = PET_P4_VIEW_STATUS_WAITING;
+    out->show_bubble = true;
+    out->compact_bubble = false;
+    out->show_voice_notice = true;
+    return;
+  }
   out->title = state && state->current_title[0] ? state->current_title : out->agent;
   out->body = state ? state->current_speech : "";
   out->stats_json = state ? state->stats_json : "";
@@ -145,6 +157,18 @@ void pet_p4_build_view_model(const pet_p4_runtime_state_t *state, pet_p4_view_mo
   out->show_voice_overlay = state && state->session_voice_active
     && state->session_queue_count == 0 && strcmp(out->page, "main") == 0;
   if (out->show_voice_overlay) return;
+  /* An explicitly dismissed Agent card must leave the pet unobstructed.
+   * Draft, realtime, and voice-notice paths above intentionally still win. */
+  if (state && state->session_overlay_dismissed && strcmp(out->page, "main") == 0) {
+    out->agent = "";
+    out->title = "";
+    out->body = "";
+    out->stats_json = "";
+    out->status = PET_P4_VIEW_STATUS_IDLE;
+    out->show_bubble = false;
+    out->compact_bubble = false;
+    return;
+  }
   if (should_wait_for_session_card(state)) {
     out->title = "";
     out->body = "休息中";

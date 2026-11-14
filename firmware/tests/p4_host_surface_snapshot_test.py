@@ -69,8 +69,13 @@ class HostSurfaceSnapshotTest(unittest.TestCase):
             'static const char *text_at(',
             'static int32_t render_integer(',
             'static int32_t render_scroll(',
+            'static bool button_matches_event(',
             'static bool app_surface_locked(',
         ))
+        input_source = (ROOT / 'main/pet_p4_input.c').read_text()
+        input_header = (ROOT / 'main/pet_p4_input.h').read_text()
+        event_limit = next(line for line in input_header.splitlines() if line.startswith('#define PET_P4_INPUT_EVENT_MAX '))
+        helpers = event_limit + '\n' + function(input_source, 'bool pet_p4_input_legacy_alias(') + '\n' + helpers
         clamp = function((ROOT / 'main/pet_p4_surface.c').read_text(), 'int32_t pet_surface_clamp_offset(')
         code = fixture.replace('/* ACTUAL_VARIABLE_DECLARATION */', declarations)
         code = code.replace('/* ACTUAL_RESOLVERS */', clamp + '\n' + helpers)

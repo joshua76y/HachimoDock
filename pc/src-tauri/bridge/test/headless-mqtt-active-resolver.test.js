@@ -397,10 +397,28 @@ test("HookHttpServer /mock-button-inject delegates request to callback", async (
 test("hardware input busy states identify Agent turns that need queueing", () => {
   assert.equal(isAgentBusyState("working"), true);
   assert.equal(isAgentBusyState("speaking"), true);
-  assert.equal(isAgentBusyState("waiting_user"), true);
+  assert.equal(isAgentBusyState("waiting_user"), false);
+  assert.equal(isAgentBusyState("approval_pending"), true);
   assert.equal(isAgentBusyState("idle"), false);
   assert.equal(isAgentBusyState("done"), false);
   assert.equal(isAgentBusyState("error"), false);
+});
+
+test("permission prompts remain busy while ordinary user input may proceed", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "voice-approval-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const publisher = new LocalStatePublisher({ enabledSources: [], localStateDir: directory });
+  publisher.publishSource({source: "codex", state: "waiting_user", rawState: "codex-permission"});
+  assert.equal(isAgentBusyState(publisher.getSourceState("codex")), true);
+  publisher.latestStateBySource.get("codex").at = Date.now() - 120000;
+  assert.equal(isAgentBusyState(publisher.getSourceState("codex")), true);
+  publisher.publishSource({source: "codex", state: "waiting_user", event: "user-input"});
+  assert.equal(isAgentBusyState(publisher.getSourceState("codex")), false);
+  publisher.publishSource({source: "claude-code", state: "waiting_user", event: "PermissionRequest"});
+  assert.equal(isAgentBusyState(publisher.getSourceState("claude-code")), true);
+  publisher.publishSource({source: "claude-code", state: "working", event: "PermissionRequest"});
+  publisher.latestStateBySource.get("claude-code").at = Date.now() - 120000;
+  assert.equal(isAgentBusyState(publisher.getSourceState("claude-code")), true);
 });
 
 test("busy hardware voice keeps only the latest input and sends it after the turn", async (t) => {

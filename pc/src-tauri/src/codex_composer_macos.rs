@@ -1758,6 +1758,38 @@ fn focused_codex_composer(agent: MacosAgent, window: &CodexWindow) -> Option<(AX
     Some((focus, value))
 }
 
+fn workbuddy_focused_chat_eligible(frontmost: bool, owned: bool, enabled: bool,
+    visible: bool, stable: bool, buttons: usize, editors: usize) -> bool {
+    frontmost && owned && enabled && visible && stable && buttons == 1 && editors == 1
+}
+
+fn focused_workbuddy_composer(agent: MacosAgent, window: &CodexWindow) -> Option<(AXUIElement, String)> {
+    if agent != MacosAgent::WorkBuddy { return None; }
+    let focus = ax_element_attribute(&window.app, "AXFocusedUIElement")?;
+    if !is_composer_element(&focus) { return None; }
+    let focus_bounds = rounded_bounds(&focus)?;
+    let buttons = walk_elements(&window.window, |element| {
+        element_role(element) == "AXButton" && send_button_score(element).is_some()
+            && rounded_bounds(element).is_some_and(|bounds| send_button_bounds_match_composer(focus_bounds, bounds))
+    });
+    let editors = if buttons.len() == 1 {
+        let bounds = rounded_bounds(&buttons[0])?;
+        composer_candidates(window).into_iter().filter(|(editor, _)|
+            composer_is_visible(editor, window) && rounded_bounds(editor)
+                .is_some_and(|editor_bounds| send_button_bounds_match_composer(editor_bounds, bounds)))
+            .count()
+    } else { 0 };
+    let frontmost = ax_element_attribute(&AXUIElement::system_wide(), "AXFocusedApplication").as_ref() == Some(&window.app)
+        && ax_element_attribute(&window.app, "AXFocusedWindow").as_ref() == Some(&window.window);
+    let owned = ax_element_attribute(&focus, "AXWindow").as_ref() == Some(&window.window);
+    let stable = ax_element_attribute(&window.app, "AXFocusedUIElement").as_ref() == Some(&focus);
+    if !workbuddy_focused_chat_eligible(frontmost, owned, element_is_enabled(&focus),
+        composer_is_visible(&focus, window), stable, buttons.len(), editors) { return None; }
+    let value = composer_value(&focus);
+    if ax_element_attribute(&window.app, "AXFocusedUIElement").as_ref() != Some(&focus) { return None; }
+    Some((focus, value))
+}
+
 fn composer_value(element: &AXUIElement) -> String {
     normalize_element_composer_value(element, &element_value(element))
 }
@@ -1887,6 +1919,7 @@ fn unique_composer(agent: MacosAgent, mut composers: Vec<(AXUIElement, String)>)
 
 fn find_composer(agent: MacosAgent, window: &CodexWindow) -> Result<(AXUIElement, String), String> {
     if let Some(focused) = focused_codex_composer(agent, window) { return Ok(focused); }
+    if let Some(focused) = focused_workbuddy_composer(agent, window) { return Ok(focused); }
     select_window_composer(agent, window, composer_candidates(window))
 }
 
@@ -2245,6 +2278,7 @@ fn find_stable_current_target(agent: MacosAgent, current_task: bool) -> Result<C
             // chat composer. Task window/modal and pinned-target checks remain
             // independent of editor selection and must not be bypassed.
             let focused = focused_codex_composer(agent, &target);
+            let focused = focused.or_else(|| focused_workbuddy_composer(agent, &target));
             let (composer, value) = if let Some(focused) = focused {
                 focused
             } else {
@@ -3051,7 +3085,7 @@ pub(super) fn begin_current_voice(agent: MacosAgent) -> Result<MacosComposerStat
     prepare_existing_workbuddy_for_voice_begin(agent)?;
     let target = find_current_visible_target(agent)?;
     focus_composer(&target)?;
-    let identity = (agent == MacosAgent::DeepSeekHarness).then(|| task_window_identity(&target.window));
+    let identity = voice_pins_task_identity(agent).then(|| task_window_identity(&target.window));
     Ok(MacosComposerState {
         agent,
         session_id: String::new(),
@@ -3062,6 +3096,10 @@ pub(super) fn begin_current_voice(agent: MacosAgent) -> Result<MacosComposerStat
         confirmation_identity: None,
         native_voice_text: String::new(),
     })
+}
+
+fn voice_pins_task_identity(agent: MacosAgent) -> bool {
+    matches!(agent, MacosAgent::WorkBuddy | MacosAgent::DeepSeekHarness | MacosAgent::Codex | MacosAgent::Claude)
 }
 
 fn task_window_identity(window: &AXUIElement) -> Vec<String> {
@@ -4121,6 +4159,23 @@ mod tests {
         assert_eq!(focused_composer_index(MacosAgent::Codex, 2, Some(2), true), None);
         assert_eq!(focused_composer_index(MacosAgent::WorkBuddy, 2, Some(1), true), None);
         assert_eq!(focused_composer_index(MacosAgent::Claude, 2, Some(1), true), None);
+    }
+
+    #[test]
+    fn workbuddy_focused_chat_requires_unique_button_and_owned_stable_focus() {
+        assert!(workbuddy_focused_chat_eligible(true, true, true, true, true, 1, 1));
+        for facts in [(false,true,true,true,true), (true,false,true,true,true),
+            (true,true,false,true,true), (true,true,true,false,true),
+            (true,true,true,true,false)] {
+            assert!(!workbuddy_focused_chat_eligible(facts.0,facts.1,facts.2,facts.3,facts.4,1,1));
+        }
+        for (buttons, editors) in [(0,1), (2,1), (1,0), (1,2)] {
+            assert!(!workbuddy_focused_chat_eligible(true,true,true,true,true,buttons,editors));
+        }
+        assert!(voice_pins_task_identity(MacosAgent::WorkBuddy));
+        assert!(voice_pins_task_identity(MacosAgent::DeepSeekHarness));
+        assert!(voice_pins_task_identity(MacosAgent::Codex));
+        assert!(voice_pins_task_identity(MacosAgent::Claude));
     }
 
     #[test]

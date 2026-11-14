@@ -604,7 +604,7 @@ class LocalStatePublisher {
       // 陈旧状态保护：log monitor 漏发结束事件会让会话永远卡在 working，
       // 硬件输入队列会因此永不注入、只能等 TTL 过期丢字。快照太久没更新
       // 就按空闲处理，宁可打断一次也不要把设备语音吞掉。
-      if (Date.now() - entry.at > AGENT_STATE_STALE_MS) return "";
+      if (entry.state !== "approval_pending" && Date.now() - entry.at > AGENT_STATE_STALE_MS) return "";
       return entry.state;
     }
     return entry;
@@ -612,8 +612,17 @@ class LocalStatePublisher {
 
   publishSource(payload) {
     const source = normalizeAgentId(payload.source || "unknown");
+    const state = normalizeStatus(payload.state) || "";
+    const event = String(payload.event || "").toLowerCase();
+    const rawState = String(payload.rawState || "").toLowerCase();
+    const reason = String(payload.reason || "").toLowerCase();
+    const approval = (
+      event === "permissionrequest" || event === "elicitation"
+      || rawState === "codex-permission" || rawState === "permission_request"
+      || reason === "codex.permission" || reason === "clawd.permissionrequest"
+    );
     this.latestStateBySource.set(source, {
-      state: normalizeStatus(payload.state) || "",
+      state: approval ? "approval_pending" : state,
       at: Date.now(),
     });
     this._writeLocalState(source, payload);
@@ -1771,7 +1780,7 @@ function syncHooks(port, autoStart, options = {}) {
 function isAgentBusyState(state) {
   // waiting_user 意味着上一轮已结束、正在等用户输入——此时设备语音应
   // 立即注入，而不是继续排队（否则没人再触发注入，队列只能等 TTL 过期）。
-  return state === "working" || state === "speaking";
+  return state === "working" || state === "speaking" || state === "approval_pending";
 }
 
 function createLatestHardwareInputQueue(options = {}) {

@@ -106,6 +106,8 @@ int main(void) {
   /* Historical/expired rows and legacy rows without a previous card are silent. */
   send(&s,"{\"agentId\":\"dsh\",\"sessions\":[{\"id\":\"a\",\"title\":\"A\",\"state\":\"stopped\",\"transitionRevision\":2}]}");
   assert(cues==0 && s.session_queue_count==0);
+  /* A pushed Session queue owns the status chrome until the next aggregate state. */
+  assert(!strcmp(s.active_agent,"dsh"));
   send(&s,"{\"agentId\":\"dsh\",\"sessions\":[{\"id\":\"a\",\"title\":\"A\",\"state\":\"stopped\"}]}");
   assert(cues==0 && s.session_queue_count==0);
   send(&s,stop); assert(cues==1 && s.session_queue_count==1);

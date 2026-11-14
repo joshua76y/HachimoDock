@@ -735,7 +735,6 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
             />
           </label>
           )}
-          )}
           <button
             type="button"
             className="btn-primary btn-sm api-settings__save"

@@ -42,11 +42,15 @@ test("Voice failure details are not duplicated or displayed after success", () =
   assert.equal(state.flow.composerError, "");
 });
 
-test("WorkBuddy describes final-only append without promising streaming editor writes", () => {
-  assert.match(transcriptMessage({ agentId: "workbuddy" }, "listening", "visible"), /松开后.*一次追加/);
-  assert.match(transcriptMessage({ agentId: "workbuddy" }, "partial", "visible"), /松开后一次写入/);
-  assert.match(transcriptMessage({ agentId: "workbuddy" }, "draft_ready", "visible"), /已追加到 WorkBuddy/);
-  assert.match(transcriptMessage({ agentId: "codex" }, "partial", "visible"), /实时识别并同步/);
+test("WorkBuddy voice stays on the device until joystick confirmation", () => {
+  assert.match(transcriptMessage({ agentId: "workbuddy" }, "listening", "visible"), /设备.*确认/);
+  assert.match(transcriptMessage({ agentId: "workbuddy" }, "partial", "visible"), /设备.*确认/);
+  assert.match(transcriptMessage({ agentId: "workbuddy" }, "draft_ready", "visible"), /向上发送.*向下取消/);
+  assert.doesNotMatch(transcriptMessage({ agentId: "workbuddy" }, "draft_ready", "visible"), /已追加/);
+  for (const agentId of ["codex", "claude-code"]) {
+    assert.match(transcriptMessage({ agentId }, "partial", "visible"), /设备.*确认/);
+    assert.match(transcriptMessage({ agentId }, "draft_ready", "visible"), /向上发送.*向下取消/);
+  }
 });
 
 function transcript(state, value) {

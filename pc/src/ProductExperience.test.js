@@ -318,6 +318,7 @@ test("Tauri release resources are target-specific and package only audited LGPL 
   assert.match(prepareScript, /依赖未随应用打包的动态库/);
   assert.match(prepareScript, /reusing validated staged Node runtime/);
   assert.match(prepareScript, /existsSync\(targetRuntime\)/);
+  assert.match(prepareScript, /preflightNodeRuntimeLicense\(targetRuntime, join\(repositoryRoot, "licenses"\)\)/);
   assert.match(p4ReadyScript, /copyValidCachedAudio/);
   assert.match(p4ReadyScript, /cachedAudioHashes\.get\(family\) === audioHash/);
   assert.match(p4ReadyScript, /Git LFS 指针/);

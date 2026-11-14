@@ -665,7 +665,7 @@ Board to PC:
     },
     "capabilities": {
       "version": 1,
-      "usbOnly": true,
+      "usbOnly": false,
       "nativeUsb": true,
       "nativeProtocol": "pet-usb-native-v1",
       "bulk": true,
@@ -673,7 +673,7 @@ Board to PC:
       "appearanceSlotReuse": true,
       "rawAppearanceSlot1": true,
       "transport": {
-        "usbOnly": true,
+        "usbOnly": false,
         "usbUart": true,
         "usbUartBaud": 4000000,
         "rawAssetChunks": true,
@@ -686,7 +686,7 @@ Board to PC:
         "width": 640,
         "height": 480,
         "physicalWidth": 480,
-        "physicalHeight": 640,
+        "physicalHeight": 800,
         "pixelFormat": "rgb565"
       },
       "assetFormats": ["p4-h264-v1", "p4-mjpeg-v1", "p4-pcm-wav-v1"],
@@ -749,7 +749,7 @@ Board to PC:
       "firmwareUpdate": {
         "transport": "usb-jsonl-ota-v1",
         "slots": 2,
-        "maxImageBytes": 2621440,
+        "maxImageBytes": 3145728,
         "chunkBytes": 4096,
         "checksum": "sha256",
         "rollback": true,
@@ -939,6 +939,10 @@ PC to board:
 - `speech/text`: updates the speech bubble title, body, status, and status text.
   A terminal `done` lifecycle remains visible on the device for 60 seconds
   before the runtime returns it to `idle`, so completed replies stay readable.
+  A `voiceNotice: true` payload additionally retains its nonempty text in a
+  separate, non-submittable main-page overlay for 90 seconds. Session-card
+  refreshes do not replace that overlay; a new push-to-talk hold clears it.
+  This presentation does not create a draft or authorize a message submission.
 - `session/current`: updates the live desktop conversation queue, selected
   position, and temporary explicit Session binding. The main page renders up
   to three cards around the selection. Each item carries `id`, `title`,
@@ -986,6 +990,14 @@ PC to board:
   arrives for 12 seconds; already terminal cards keep only their original
   remaining 60-second deadline. This protects the screen from stale working
   cards if the desktop bridge stops publishing while other USB traffic remains.
+
+  A local `input/event` action of `session_clear` means “close message
+  prompts”: firmware clears the visible card queue and hides the ordinary
+  main-page Agent bubble without stopping the Agent or a physical voice hold.
+  The desktop acknowledges the clear by sending `displayEnabled:false`; a later
+  nonempty card snapshot clears the local dismissal so new Agent activity is
+  visible again. Draft confirmation, realtime conversation, and recording/ASR
+  feedback remain higher-priority presentation states.
   On `main`, device previous/next actions update the selected Session card and
   report its exact ID back to the desktop. On `components`, the same actions
   select the previous/next catalog entry without changing desktop Session
@@ -1258,14 +1270,14 @@ Inputs are sampled every 5ms. Buttons are active-low with internal pull-ups,
 | `4` green (right) | `button.4` | GPIO24 | pin21 |
 | `K` joystick press | `button.k` | GPIO28 | pin16 |
 | `B` BOOT (board) | `button.b` | GPIO35 | onboard |
-| joystick X / Y | `joystick.*`, `knob.rotate_*` | GPIO21 / GPIO22 | pin15 / pin17 |
+| joystick X / Y | `joystick.*`, `knob.rotate_*` | GPIO22 / GPIO21 | pin17 / pin15 |
 
 `P` (POWER) is a power-management key (long-press 2s powers off) and `R`
 (RESET) drives EN: neither is capturable in software. GPIO24/GPIO25 are the
 ESP32-P4 USB full-speed PHY pair, usable as GPIO only while no USB-OTG or
 USB-Serial-JTAG transport is active.
 
-The joystick X/Y axes use ADC1 GPIO21/GPIO22. The runtime calibrates their neutral
+The joystick X/Y axes use ADC1 GPIO22/GPIO21. The runtime calibrates their neutral
 center at boot, derives activation/release hysteresis independently from the
 available travel in each direction, resolves diagonals by normalized dominant
 axis, and repeats a held direction after a bounded delay. This accepts

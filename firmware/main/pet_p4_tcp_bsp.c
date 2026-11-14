@@ -13,19 +13,21 @@
  *     transport_send_line_impl 调 pet_p4_tcp_broadcast_line() 转发
  *   - 连接建立时发 hello（由 main.c 注入 hello 提供函数）
  *
- * reply_ctx 必须是 main.c 里 pet_p4_transport_route_t 的指针
- * （screenshot 等路径会把 reply_ctx 按路由枚举解引用）。
+ * TCP replies use an opaque per-session generation as reply_ctx.  They are
+ * not passed to the UART-only screenshot/debug writers that dereference it.
  */
 #include "pet_p4_tcp_bsp.h"
 
 #include <errno.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "pet_p4_voice_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -39,13 +41,20 @@
 #define TCP_LINE_MAX (30 * 1024)
 #define TCP_TASK_STACK (8 * 1024)
 #define TCP_BACKLOG 1
+/* ESP lwIP initially accepts only one TCP send window (about 4 KB on this
+ * target).  A complete hello is larger and Wi-Fi delayed ACKs commonly take
+ * tens of milliseconds, so a 20 ms non-blocking retry tears down an otherwise
+ * healthy connection halfway through its first JSON line.  Large configuration
+ * and inventory replies can need several Wi-Fi windows; retain their JSONL
+ * tail for up to three seconds rather than corrupting the stream. */
+#define TCP_SEND_RETRY_BUDGET_US 3000000
 
 /* main.c 注入 */
 static pet_p4_tcp_enqueue_fn g_enqueue;
 static pet_p4_tcp_hello_fn g_hello;
-static const void *g_route_ctx;      /* 指向 PET_P4_TRANSPORT_TCP 枚举常量 */
-
 static atomic_int g_client_fd = -1;  /* 当前客户端，-1 = 无 */
+static atomic_uint g_session_id;    /* 断线重连不能复用前一会话的回复 */
+static atomic_uintptr_t g_session_ctx;
 static SemaphoreHandle_t g_tx_mutex;
 static atomic_bool g_listening;
 static atomic_bool g_listener_started;
@@ -53,33 +62,66 @@ static atomic_bool g_listener_started;
 
 static int tcp_send_all(int fd, const char *buf, size_t len) {
   size_t off = 0;
+  const int64_t deadline_us = esp_timer_get_time() + TCP_SEND_RETRY_BUDGET_US;
   while (off < len) {
-    int w = send(fd, buf + off, len - off, 0);
+    /* Audio frames are emitted from the real-time capture path.  Never let a
+     * congested LAN peer hold g_tx_mutex (and therefore capture) for the
+     * socket's multi-second send timeout.  Non-blocking TCP may split a valid
+     * line, though, so allow a short bounded retry window before dropping it. */
+    int w = send(fd, buf + off, len - off, MSG_DONTWAIT);
     if (w < 0) {
       if (errno == EINTR) continue;
+      if ((errno == EAGAIN || errno == EWOULDBLOCK)
+          && esp_timer_get_time() < deadline_us) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+        continue;
+      }
       return -1;
     }
+    if (w == 0) return -1;
     off += (size_t) w;
   }
   return 0;
 }
 
+/* All real transport-route objects have pointer alignment.  Reserve the low
+ * bit for a TCP generation token so generic delayed producers (notably bubble
+ * pixels) can recognize it without treating it as a route-object address. */
+#define TCP_SESSION_CONTEXT_TAG ((uintptr_t) 1U)
+
+bool pet_p4_tcp_context_is_tcp(void *ctx) {
+  return ((uintptr_t) ctx & TCP_SESSION_CONTEXT_TAG) != 0;
+}
+
+bool pet_p4_tcp_context_is_current(void *ctx) {
+  return pet_p4_tcp_context_is_tcp(ctx)
+    && atomic_load(&g_client_fd) >= 0
+    && (uintptr_t) ctx == atomic_load(&g_session_ctx);
+}
+
 /* 协议任务回程入口：写当前客户端（含 \n）。断线时静默关闭连接。 */
 static void tcp_send_line(const char *line, void *ctx) {
-  (void) ctx;
-  if (!line) return;
-  int fd = atomic_load(&g_client_fd);
-  if (fd < 0 || !g_tx_mutex) return;
+  if (!line || !ctx || !g_tx_mutex) return;
   xSemaphoreTake(g_tx_mutex, portMAX_DELAY);
+  int fd = atomic_load(&g_client_fd);
+  if (fd < 0 || !pet_p4_tcp_context_is_current(ctx)) {
+    xSemaphoreGive(g_tx_mutex);
+    return;
+  }
   size_t len = strlen(line);
   bool ok = tcp_send_all(fd, line, len) == 0 && tcp_send_all(fd, "\n", 1) == 0;
-  xSemaphoreGive(g_tx_mutex);
   if (!ok) {
-    /* 写失败：踢掉客户端，accept 循环重建 */
-    int bad = atomic_exchange(&g_client_fd, -1);
-    if (bad >= 0) close(bad);
+    /* The session task alone closes fd; shutdown wakes its blocking recv. */
+    atomic_store(&g_client_fd, -1);
+    shutdown(fd, SHUT_RDWR);
     ESP_LOGW(TAG, "send failed, client dropped");
   }
+  xSemaphoreGive(g_tx_mutex);
+}
+
+bool pet_p4_tcp_request_current(pet_p4_send_line_fn send_line, void *ctx) {
+  if (send_line != tcp_send_line) return true;
+  return pet_p4_tcp_context_is_current(ctx);
 }
 
 bool pet_p4_tcp_client_connected(void) {
@@ -88,26 +130,37 @@ bool pet_p4_tcp_client_connected(void) {
 
 void pet_p4_tcp_broadcast_line(const char *line) {
   if (!line || !g_tx_mutex) return;
-  int fd = atomic_load(&g_client_fd);
-  if (fd < 0) return;
   xSemaphoreTake(g_tx_mutex, portMAX_DELAY);
+  int fd = atomic_load(&g_client_fd);
+  if (fd < 0) {
+    xSemaphoreGive(g_tx_mutex);
+    return;
+  }
   size_t len = strlen(line);
   bool ok = tcp_send_all(fd, line, len) == 0 && tcp_send_all(fd, "\n", 1) == 0;
-  xSemaphoreGive(g_tx_mutex);
   if (!ok) {
-    int bad = atomic_exchange(&g_client_fd, -1);
-    if (bad >= 0) close(bad);
+    atomic_store(&g_client_fd, -1);
+    shutdown(fd, SHUT_RDWR);
   }
+  xSemaphoreGive(g_tx_mutex);
 }
 
 static void tcp_client_session(int fd) {
   ESP_LOGI(TAG, "client connected fd=%d", fd);
+  xSemaphoreTake(g_tx_mutex, portMAX_DELAY);
+  unsigned session = atomic_fetch_add(&g_session_id, 1) + 1;
+  if (!session) session = atomic_fetch_add(&g_session_id, 1) + 1;
+  uintptr_t session_ctx_value = ((uintptr_t) session << 1) | TCP_SESSION_CONTEXT_TAG;
+  atomic_store(&g_session_ctx, session_ctx_value);
   atomic_store(&g_client_fd, fd);
-  if (g_hello) g_hello(tcp_send_line, (void *) g_route_ctx);
+  xSemaphoreGive(g_tx_mutex);
+  void *session_ctx = (void *) session_ctx_value;
+  if (g_hello) g_hello(tcp_send_line, session_ctx);
 
   /* 行组装缓冲放 PSRAM，减内部堆压力 */
   char *acc = (char *) heap_caps_malloc(TCP_LINE_MAX + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   size_t have = 0;
+  bool discarding = false;
   char chunk[2048];
   if (acc) {
     while (true) {
@@ -115,33 +168,44 @@ static void tcp_client_session(int fd) {
       if (r <= 0) break;
       for (int i = 0; i < r; i++) {
         char c = chunk[i];
+        if (discarding) {
+          if (c == '\n') discarding = false;
+          continue;
+        }
+        if (c == '\0') {
+          /* A C-string consumer would otherwise accept only a forged prefix. */
+          have = 0;
+          discarding = true;
+          continue;
+        }
         if (c == '\n') {
           acc[have] = '\0';
           /* 去掉可选 \r */
           if (have && acc[have - 1] == '\r') acc[have - 1] = '\0';
           if (have && g_enqueue) {
-            g_enqueue(acc, tcp_send_line, (void *) g_route_ctx, NULL);
+            g_enqueue(acc, tcp_send_line, session_ctx, NULL);
           }
           have = 0;
         } else if (have < TCP_LINE_MAX) {
           acc[have++] = c;
         } else {
-          /* 超长行：丢弃并标记，等下一个换行 */
-          have = TCP_LINE_MAX + 1;  /* 哨兵：溢出中 */
+          /* 丢弃整个超长行，直到换行，不能将其尾部当作新命令。 */
+          have = 0;
+          discarding = true;
         }
       }
-      if (have > TCP_LINE_MAX) have = 0;  /* 溢出行整行丢弃 */
     }
   }
   free(acc);
-  int cur = atomic_load(&g_client_fd);
-  if (cur == fd) atomic_store(&g_client_fd, -1);
+  xSemaphoreTake(g_tx_mutex, portMAX_DELAY);
+  if (atomic_load(&g_client_fd) == fd) atomic_store(&g_client_fd, -1);
   close(fd);
+  xSemaphoreGive(g_tx_mutex);
   ESP_LOGI(TAG, "client disconnected");
 }
 
 void pet_p4_tcp_set_route(const void *route_ctx) {
-  g_route_ctx = route_ctx;
+  (void) route_ctx; /* retained for callers; TCP uses a session generation */
 }
 
 void pet_p4_tcp_init(pet_p4_tcp_enqueue_fn enqueue, pet_p4_tcp_hello_fn hello) {

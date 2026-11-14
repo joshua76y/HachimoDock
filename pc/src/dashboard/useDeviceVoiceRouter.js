@@ -304,6 +304,12 @@ export function transcriptMessage(payload, phase, composerMode) {
   const visibleAgentLabel = normalizeText(payload?.agentId).toLowerCase() === "deepseek-harness" ? "DeepSeek Harness" : normalizeText(payload?.agentId).toLowerCase() === "workbuddy" ? "WorkBuddy" : normalizeText(payload?.agentId).toLowerCase() === "claude-code"
     ? "Claude"
     : "ChatGPT（Codex）";
+  if (["workbuddy", "codex", "claude-code"].includes(normalizeText(payload?.agentId).toLowerCase())) {
+    if (phase === "listening" || phase === "partial") return "正在识别，松开后请在设备上确认。";
+    if (phase === "finalizing" || phase === "recognizing") return "正在准备设备上的待确认文字...";
+    if (phase === "draft_ready") return "请核对设备上的文字：摇杆向上发送，向下取消。";
+    if (phase === "submitting") return `已收到摇杆向上操作，正在通过 ${visibleAgentLabel} 输入框发送...`;
+  }
   if (phase === "listening") {
     if (["WorkBuddy", "DeepSeek Harness"].includes(visibleAgentLabel)) {
       return `正在聆听；松开后将完整识别结果一次追加到 ${visibleAgentLabel} 输入框，不自动发送。`;

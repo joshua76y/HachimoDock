@@ -202,6 +202,7 @@ pub struct StreamingSpeechRecognizer {
     sender: mpsc::UnboundedSender<StreamingSpeechCommand>,
     cancelled: Arc<AtomicBool>,
     round: Arc<SpeechRound>,
+    finish_wait_timeout: Duration,
 }
 
 /// Internal terminal state keeps cancellation explicit without changing the
@@ -531,14 +532,16 @@ impl StreamingSpeechRecognizer {
                 }
             }
         });
-        Ok(Self { sender, cancelled, round })
+        // Service startup may take 20 s and the transcription request another
+        // 20 s. Leave room for health probes and scheduling as well.
+        Ok(Self { sender, cancelled, round, finish_wait_timeout: Duration::from_secs(50) })
     }
 
     #[cfg(test)]
     pub(crate) fn test_sink() -> (Self, impl Sized) {
         let (sender, receiver) = mpsc::unbounded_channel();
         (Self { sender, cancelled: Arc::new(AtomicBool::new(false)),
-            round: Arc::new(SpeechRound::new()) }, receiver)
+            round: Arc::new(SpeechRound::new()), finish_wait_timeout: Duration::from_secs(9) }, receiver)
     }
 
     pub fn start(
@@ -591,8 +594,11 @@ impl StreamingSpeechRecognizer {
             sender,
             cancelled,
             round,
+            finish_wait_timeout: Duration::from_secs(9),
         })
     }
+
+    pub(crate) fn finish_wait_timeout(&self) -> Duration { self.finish_wait_timeout }
 
     pub(crate) fn generation(&self) -> u64 { self.round.generation }
 
@@ -1595,6 +1601,16 @@ async fn timeout_at_message(
 mod terminal_lifecycle_tests {
     use super::*;
 
+    #[test]
+    fn local_recognizer_allows_service_startup_and_transcription_after_finish() {
+        let local = StreamingSpeechRecognizer::start_local(
+            "http://127.0.0.1:1".into(), "synthetic".into(), |_| {},
+        ).unwrap();
+        let (cloud, _receiver, _callback, _events) = fixture();
+        assert!(local.finish_wait_timeout() >= Duration::from_secs(45));
+        assert_eq!(cloud.finish_wait_timeout(), Duration::from_secs(9));
+    }
+
     fn fixture() -> (StreamingSpeechRecognizer, mpsc::UnboundedReceiver<StreamingSpeechCommand>,
         SpeechCallback, Arc<Mutex<Vec<StreamingSpeechEvent>>>) {
         let (sender, receiver) = mpsc::unbounded_channel();
@@ -1602,7 +1618,7 @@ mod terminal_lifecycle_tests {
         let output = events.clone();
         let callback: SpeechCallback = Arc::new(move |event| output.lock().unwrap().push(event));
         (StreamingSpeechRecognizer { sender, cancelled: Arc::new(AtomicBool::new(false)),
-            round: Arc::new(SpeechRound::new()) }, receiver, callback, events)
+            round: Arc::new(SpeechRound::new()), finish_wait_timeout: Duration::from_secs(9) }, receiver, callback, events)
     }
 
     fn final_event() -> StreamingSpeechEvent {

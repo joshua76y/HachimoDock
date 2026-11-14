@@ -10,7 +10,8 @@
  *          every other unmapped system-navigation gesture is suppressed, and
  *          package-authored navigation actions are ignored, plus correlated snapshots of the authoritative NVS-backed
  *          input configuration with versioned SW1-confirm/SW3-back and
- *          joystick-up/down Previous/Next defaults, and cached telemetry replay
+ *          joystick bindings only on the pet home page, with native component
+ *          center/application joystick handling everywhere else, and cached telemetry replay
  *          immediately after a mini-app is activated; conversation clearing
  *          preserves ongoing physical voice-hold feedback; a DSH approval modal
  *          turns SW1/SW3 short presses into one allow/deny decision and swallows
@@ -43,6 +44,7 @@
 
 #include "pet_p4_audio.h"
 #include "pet_p4_input_core.h"
+#include "pet_p4_center_layout.h"
 #include "pet_p4_observation.h"
 #include "pet_p4_miniapp.h"
 #include "pet_p4_media.h"
@@ -57,7 +59,7 @@
  *   3  蓝(下)   = GPIO25 (pin23 / 线标 K5)
  *   4  绿(右)   = GPIO24 (pin21 / 线标 K3)
  *   B  BOOT     = GPIO35 (pin30 引出，板载键)
- *   摇杆 X = GPIO21 (pin15 / ADC1_CH5)，摇杆 Y = GPIO22 (pin17 / ADC1_CH6)
+ *   实机方向校准：水平轴 GPIO22 (pin17 / ADC1_CH6)，垂直轴 GPIO21 (pin15 / ADC1_CH5)。
  *
  * ⚠️ GPIO24/25 是 ESP32-P4 的 USB 全速 PHY 差分对（USB-Serial-JTAG 的 D-/D+，
  *    FS_PHY1）。微雪官方：不作 USB 用途时仍可当普通 GPIO —— 所以按键可用；
@@ -78,10 +80,10 @@
 /* 模块没有旋转编码器，A/B 保持未接（内部上拉，无沿即无事件） */
 #define PET_P4_INPUT_ENCODER_B_GPIO GPIO_NUM_3
 #define PET_P4_INPUT_ENCODER_A_GPIO GPIO_NUM_2
-#define PET_P4_INPUT_JOYSTICK_X_GPIO GPIO_NUM_21  /* pin15 · ADC1_CH5 */
-#define PET_P4_INPUT_JOYSTICK_Y_GPIO GPIO_NUM_22  /* pin17 · ADC1_CH6 */
-#define PET_P4_INPUT_JOYSTICK_X_CHANNEL ADC1_GPIO21_CHANNEL
-#define PET_P4_INPUT_JOYSTICK_Y_CHANNEL ADC1_GPIO22_CHANNEL
+#define PET_P4_INPUT_JOYSTICK_X_GPIO GPIO_NUM_22  /* pin17 · ADC1_CH6 */
+#define PET_P4_INPUT_JOYSTICK_Y_GPIO GPIO_NUM_21  /* pin15 · ADC1_CH5 */
+#define PET_P4_INPUT_JOYSTICK_X_CHANNEL ADC1_GPIO22_CHANNEL
+#define PET_P4_INPUT_JOYSTICK_Y_CHANNEL ADC1_GPIO21_CHANNEL
 /* 电池电压检测：原理图 R12 200K + R15 100K 分压，BAT_ADC = VBAT/3，接 GPIO20。
  * 这里复用摇杆那只 ADC1 单元句柄，避免第二次 new_unit 报 INVALID_STATE。 */
 #define PET_P4_BATTERY_CHANNEL ADC1_GPIO20_CHANNEL
@@ -1335,42 +1337,10 @@ static bool apply_local_action(
 ) {
   if (!binding || strcmp(binding->action, "disabled") == 0) return true;
   if (!state) return false;
-  /* round-6 语音草稿待确认：左右摇杆/确认/返回只发给 PC 由草稿状态机解释，
-   * 本地一律不执行会话切换、页面切换、组件切换等原有设定，避免「快选」
-   * 时顺带触发原功能。voice_ptt 不拦（重新录音会替换当前草稿）。 */
-  if (pet_p4_voice_ptt_draft_active()) {
-    /* 用户指定：摇杆向上=发送，向下=取消。不能只看绑定的 action 名——
-     * 实测这台设备的方向键绑的是 agent_previous / agent_next。按事件名与
-     * action 双重判定，命中后覆写成草稿专用动作（PC 已部署版本认识）。 */
-    const bool up = strcmp(binding->event, "joystick.up") == 0
-      || strcmp(binding->event, "knob.rotate_ccw") == 0
-      || strcmp(binding->action, "agent_previous") == 0
-      || strcmp(binding->action, "session_previous") == 0;
-    const bool down = strcmp(binding->event, "joystick.down") == 0
-      || strcmp(binding->event, "knob.rotate_cw") == 0
-      || strcmp(binding->action, "agent_next") == 0
-      || strcmp(binding->action, "session_next") == 0;
-    if (up) {
-      copy_text(action_override, action_override_size, "voice_draft_send");
-      return false;
-    }
-    if (down) {
-      copy_text(action_override, action_override_size, "voice_draft_cancel");
-      return false;
-    }
-    static const char *const draft_swallowed[] = {
-      "session_clear",
-      "page_enter", "page_back", "page_toggle", "page_main", "page_app",
-      "component_center", "agent_enter", "agent_prompt", "realtime_chat",
-      "dsh_interrupt", "miniapp_screen_tap", "miniapp_screen_long_press",
-    };
-    for (size_t i = 0; i < sizeof(draft_swallowed) / sizeof(draft_swallowed[0]); i += 1) {
-      if (strcmp(binding->action, draft_swallowed[i]) == 0) return false;
-    }
-  }
   if (strcmp(binding->action, "session_clear") == 0) {
     memset(state->session_queue, 0, sizeof(state->session_queue));
     state->session_queue_count = 0;
+    state->session_overlay_dismissed = true;
     state->current_session_index = 0;
     state->current_session_count = 0;
     state->current_session_title[0] = '\0';
@@ -1605,6 +1575,107 @@ static void send_ignored_component_event(
   );
 }
 
+/* The four direction aliases and K press are configurable only on the pet
+ * home page. Outside it they retain the page's native contract: the launcher
+ * navigates/open cards, an app receives its authored inputs, and every other
+ * page consumes its own default interaction without an accidental remap. */
+static bool joystick_launch_event(const char *event_name) {
+  return event_name && strcmp(event_name, "button.k.short_press") == 0;
+}
+
+static bool native_joystick_event(const char *event_name) {
+  return event_name && (
+    strcmp(event_name, "joystick.up") == 0
+    || strcmp(event_name, "joystick.down") == 0
+    || strcmp(event_name, "knob.rotate_ccw") == 0
+    || strcmp(event_name, "knob.rotate_cw") == 0
+    || strncmp(event_name, "button.k.", 9) == 0
+  );
+}
+
+static bool component_direction_from_joystick(
+  pet_p4_joystick_direction_t joystick_direction,
+  pet_center_direction_t *direction
+) {
+  if (!direction) return false;
+  switch (joystick_direction) {
+    case PET_P4_JOYSTICK_UP:
+      *direction = PET_CENTER_DIRECTION_UP;
+      return true;
+    case PET_P4_JOYSTICK_DOWN:
+      *direction = PET_CENTER_DIRECTION_DOWN;
+      return true;
+    case PET_P4_JOYSTICK_LEFT:
+      *direction = PET_CENTER_DIRECTION_LEFT;
+      return true;
+    case PET_P4_JOYSTICK_RIGHT:
+      *direction = PET_CENTER_DIRECTION_RIGHT;
+      return true;
+    default:
+      return false;
+  }
+}
+
+static bool move_component_catalog_direction(
+  pet_p4_joystick_direction_t joystick_direction
+) {
+  pet_center_direction_t direction;
+  size_t target;
+  const size_t count = pet_p4_miniapp_catalog_count();
+  const size_t selected = pet_p4_miniapp_catalog_selected();
+  return component_direction_from_joystick(joystick_direction, &direction)
+    && pet_center_move(selected, count, direction, &target)
+    && pet_p4_miniapp_catalog_select(target);
+}
+
+static bool dispatch_native_joystick_event(
+  pet_p4_runtime_state_t *state,
+  pet_p4_send_line_fn send_line,
+  void *ctx,
+  const pet_p4_input_event_t *event,
+  const char *event_name,
+  const char *gesture
+) {
+  if (!state || !native_joystick_event(event_name)
+      || pet_p4_conversation_active(state)
+      || strcmp(state->screen_page, "main") == 0) return false;
+  if (strcmp(state->screen_page, "components") == 0) {
+    if (joystick_launch_event(event_name)) {
+      static const pet_p4_input_binding_t launch_binding = {
+        .event = "button.k.short_press",
+        .action = "page_enter",
+        .value = "",
+      };
+      char action_override[PET_P4_MINIAPP_ACTION_MAX] = {0};
+      const bool handled_locally = apply_local_action(
+        state, &launch_binding, event->ts_ms, action_override, sizeof(action_override)
+      );
+      send_input_event(
+        state, send_line, ctx, event, event_name, gesture,
+        &launch_binding, action_override, handled_locally
+      );
+    } else {
+      send_ignored_component_event(state, send_line, ctx, event, event_name, gesture);
+    }
+    return true;
+  }
+  if (strcmp(state->screen_page, "app") == 0) {
+    if (!dispatch_component_binding_event(state, send_line, ctx, event, event_name, gesture)) {
+      send_ignored_component_event(state, send_line, ctx, event, event_name, gesture);
+    }
+    return true;
+  }
+  send_ignored_component_event(state, send_line, ctx, event, event_name, gesture);
+  return true;
+}
+
+static const char *voice_draft_action_for_event(const char *event_name) {
+  if (!event_name) return NULL;
+  if (strcmp(event_name, "joystick.up") == 0) return "voice_draft_send";
+  if (strcmp(event_name, "joystick.down") == 0) return "voice_draft_cancel";
+  return NULL;
+}
+
 static void dispatch_binding_event(
   pet_p4_runtime_state_t *state,
   pet_p4_send_line_fn send_line,
@@ -1614,9 +1685,25 @@ static void dispatch_binding_event(
   const char *gesture
 ) {
   const pet_p4_input_binding_t *binding = active_binding(event_name);
+  if (pet_p4_voice_ptt_draft_active()) {
+    const char *decision = voice_draft_action_for_event(event_name);
+    if (decision) {
+      pet_p4_input_binding_t draft_binding = {0};
+      copy_text(draft_binding.event, sizeof(draft_binding.event), event_name);
+      copy_text(draft_binding.action, sizeof(draft_binding.action), decision);
+      send_input_event(state, send_line, ctx, event, event_name, gesture,
+                       &draft_binding, "", false);
+      return;
+    }
+    if (!binding || strcmp(binding->action, "voice_ptt") != 0) {
+      send_ignored_component_event(state, send_line, ctx, event, event_name, gesture);
+      return;
+    }
+  }
   if (pet_p4_conversation_active(state)) {
     // The realtime mode owns input: never move/confirm/send into an Agent session.
-    if (binding && (!strcmp(binding->action, "realtime_chat") || !strcmp(binding->action, "page_back"))) {
+    if (!native_joystick_event(event_name) && binding
+        && (!strcmp(binding->action, "realtime_chat") || !strcmp(binding->action, "page_back"))) {
       pet_p4_input_binding_t exit = *binding;
       copy_text(exit.action, sizeof(exit.action), "realtime_chat");
       send_input_event(state, send_line, ctx, event, event_name, gesture, &exit, "", false);
@@ -1638,6 +1725,7 @@ static void dispatch_binding_event(
     send_input_event(state, send_line, ctx, event, event_name, gesture, binding, "media_stop", true);
     return;
   }
+  if (dispatch_native_joystick_event(state, send_line, ctx, event, event_name, gesture)) return;
   const pet_p4_input_binding_t *global_exit = active_global_priority_binding(state, event_name);
   if (state && !strcmp(state->screen_page, "touch_test")) {
     /* Diagnostic input is isolated; configured global Back/realtime wins. */
@@ -1709,15 +1797,28 @@ static void dispatch_binding_event(
     sizeof(miniapp_action)
   );
   if (binding && strcmp(binding->action, "voice_ptt") == 0) {
+    static bool rejected_busy_hold;
     if (strcmp(gesture, "hold_end") == 0) {
       if (state) state->session_voice_active = false;
       /* capture_stop 会让 audio_task 走到 send_audio_end，
        * 那里 pet_p4_voice_ptt_notify_end() 自动提交本地缓冲（若本会话是本地 PTT） */
-      handled_locally = pet_p4_audio_capture_stop() == ESP_OK;
+      if (rejected_busy_hold) {
+        rejected_busy_hold = false;
+        handled_locally = true;
+      } else {
+        handled_locally = pet_p4_audio_capture_stop() == ESP_OK;
+      }
     } else if (!handled_locally && strcmp(gesture, "hold_start") == 0) {
+      rejected_busy_hold = false;
+      if (state) { state->voice_notice_text[0] = '\0'; state->voice_notice_until_ms = 0; }
       if (state) state->session_voice_active = true;
       /* WiFi 在线优先本地闭环：录音落 PSRAM，松键 POST 到 PC 本地 ASR */
-      if (pet_p4_voice_ptt_begin(state && state->session_queue_count == 0)) {
+      pet_p4_voice_ptt_begin_result_t result = pet_p4_voice_ptt_begin(state && state->session_queue_count == 0);
+      if (result == PET_P4_VOICE_PTT_STARTED) {
+        handled_locally = true;
+      } else if (result == PET_P4_VOICE_PTT_BUSY) {
+        if (state) state->session_voice_active = false;
+        rejected_busy_hold = true;
         handled_locally = true;
       } else {
         handled_locally = pet_p4_audio_capture_start(state && state->session_queue_count == 0) == ESP_OK;
@@ -1792,6 +1893,20 @@ static void process_button_event(
     char long_event_name[PET_P4_INPUT_EVENT_MAX];
     snprintf(long_event_name, sizeof(long_event_name), "%s.long_press", prefix);
     if (state && !pet_p4_conversation_active(state)
+        && strcmp(state->screen_page, "main") != 0
+        && strcmp(prefix, "button.k") == 0) {
+      snprintf(event_name, sizeof(event_name), "%s.hold", prefix);
+      dispatch_binding_event(
+        state,
+        send_line,
+        ctx,
+        event,
+        event_name,
+        event->gesture == PET_P4_INPUT_GESTURE_HOLD_START ? "hold_start" : "hold_end"
+      );
+      return;
+    }
+    if (state && !pet_p4_conversation_active(state)
         && strcmp(state->screen_page, "app") == 0
         && pet_p4_miniapp_has_input(long_event_name)) {
       return;
@@ -1841,6 +1956,7 @@ void pet_p4_input_process(
       bool repeated=event.gesture==PET_P4_INPUT_GESTURE_REPEAT;
       /* A context change requires actual neutral, not merely another direction. */
       if(!pet_p4_input_gate_accept(&gate,event.delta==PET_P4_JOYSTICK_CENTER,context)){pet_p4_miniapp_side_axis(0);continue;}
+      const pet_p4_joystick_direction_t joystick_direction = (pet_p4_joystick_direction_t) event.delta;
       const char *event_name = "";
       const char *gesture = "";
       switch ((pet_p4_joystick_direction_t) event.delta) {
@@ -1869,12 +1985,28 @@ void pet_p4_input_process(
       }
       bool side_input=state&&!pet_p4_conversation_active(state)&&!strcmp(state->screen_page,"app");
       int side_direction=!strcmp(event_name,"knob.rotate_ccw")?-1:!strcmp(event_name,"knob.rotate_cw")?1:0;
-      if(side_input)pet_p4_miniapp_side_axis(event_name[0]&&active_global_priority_binding(state,event_name)?0:side_direction);
+      if(side_input)pet_p4_miniapp_side_axis(side_direction);
       if (!event_name[0]) continue;
-      if(repeated&&state&&!strcmp(state->screen_page,"app")&&
+      if (state && !pet_p4_conversation_active(state)
+          && strcmp(state->screen_page, "components") == 0) {
+        static const pet_p4_input_binding_t select_binding = {
+          .event = "joystick.up",
+          .action = "component_select",
+          .value = "",
+        };
+        bool moved = move_component_catalog_direction(joystick_direction);
+        if (moved) state->last_update_ms = event.ts_ms;
+        send_input_event(
+          state, send_line, ctx, &event, event_name, gesture,
+          &select_binding, "component_select", true
+        );
+        continue;
+      }
+      if(repeated&&state&&!strcmp(state->screen_page,"app")&& !native_joystick_event(event_name)&&
          (!pet_p4_miniapp_input_policy(event_name,false)||active_global_priority_binding(state,event_name)))continue;
       if (state && !pet_p4_conversation_active(state)
           && strcmp(state->screen_page, "app") == 0
+          && !native_joystick_event(event_name)
           && !pet_p4_miniapp_has_input(event_name)
           && !active_global_priority_binding(state, event_name)) {
         send_ignored_component_event(

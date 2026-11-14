@@ -43,7 +43,7 @@ export default function VoiceDraftCard() {
       setBusy(false);
       push({
         tone: result?.ok ? "success" : "error",
-        title: result?.cancelled ? "语音草稿已取消" : result?.ok ? "语音已发送" : "发送失败",
+        title: result?.cancelled ? "语音草稿已取消" : result?.ok ? "已请求提交" : "未能确认发送",
         message: String(result?.message || "").slice(0, 160),
         ttl: 5_000,
       });

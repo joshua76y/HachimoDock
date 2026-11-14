@@ -217,7 +217,9 @@ static pet_p4_joystick_direction_t joystick_direction_for_sample(
   if (!x_active && !y_active) return PET_P4_JOYSTICK_CENTER;
   if (x_active && (!y_active
       || (int64_t) abs_x * y_threshold >= (int64_t) abs_y * x_threshold)) {
-    return dx < 0 ? PET_P4_JOYSTICK_LEFT : PET_P4_JOYSTICK_RIGHT;
+    // Waveshare's GPIO22 horizontal potentiometer is mounted mirrored: its
+    // high rail is physical left, unlike the conventional low-is-left wiring.
+    return dx < 0 ? PET_P4_JOYSTICK_RIGHT : PET_P4_JOYSTICK_LEFT;
   }
   // The board's joystick is mounted with the positive Y rail facing upward.
   return dy < 0 ? PET_P4_JOYSTICK_DOWN : PET_P4_JOYSTICK_UP;

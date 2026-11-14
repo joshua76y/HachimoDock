@@ -2406,6 +2406,11 @@ bool pet_p4_state_decide_approval(
 
 void pet_p4_state_process(pet_p4_runtime_state_t *state, unsigned long long now_ms) {
   if (!state) return;
+  if (state->voice_notice_until_ms && now_ms >= state->voice_notice_until_ms) {
+    state->voice_notice_until_ms = 0;
+    state->voice_notice_text[0] = '\0';
+    state->last_update_ms += 1;
+  }
   if (state->approval_active && state->approval_expires_ms > 0
       && now_ms >= state->approval_expires_ms) {
     /* Timeout is fail-closed: hide the modal but never send a decision. */
@@ -2998,7 +3003,7 @@ void pet_p4_send_hello_for_board(const char *board_id, pet_p4_send_line_fn send_
   cJSON_AddItemToObject(payload, "hardware", hardware);
 
   cJSON_AddNumberToObject(capabilities, "version", 1);
-  cJSON_AddBoolToObject(capabilities, "usbOnly", true);
+  cJSON_AddBoolToObject(capabilities, "usbOnly", false);
   cJSON_AddBoolToObject(capabilities, "nativeUsb", true);
   cJSON_AddBoolToObject(capabilities, "bulk", true);
   cJSON_AddNumberToObject(capabilities, "maxAppearanceSlots", 2);
@@ -3371,7 +3376,10 @@ void pet_p4_send_hello_for_board(const char *board_id, pet_p4_send_line_fn send_
   cJSON_AddBoolToObject(capabilities, "firmwareOta", true);
   cJSON_AddStringToObject(firmware_update, "transport", "usb-jsonl-ota-v1");
   cJSON_AddNumberToObject(firmware_update, "slots", 2);
-  cJSON_AddNumberToObject(firmware_update, "maxImageBytes", 0x280000);
+  /* This factory layout has two 3 MiB application slots.  Keep capability
+   * discovery aligned with the actual inactive-partition guard in
+   * pet_p4_ota.c so clients do not reject a valid Wi-Fi OTA preflight. */
+  cJSON_AddNumberToObject(firmware_update, "maxImageBytes", 0x300000);
   cJSON_AddNumberToObject(firmware_update, "chunkBytes", 4 * 1024);
   cJSON_AddStringToObject(firmware_update, "checksum", "sha256");
   cJSON_AddStringToObject(firmware_update, "projectName", "pet_manager_p4_runtime");
@@ -3409,8 +3417,8 @@ void pet_p4_send_hello_for_board(const char *board_id, pet_p4_send_line_fn send_
 #endif
   cJSON_AddNumberToObject(display, "width", 640);
   cJSON_AddNumberToObject(display, "height", 480);
-  cJSON_AddNumberToObject(display, "physicalWidth", 480);
-  cJSON_AddNumberToObject(display, "physicalHeight", 640);
+  cJSON_AddNumberToObject(display, "physicalWidth", BSP_LCD_H_RES);
+  cJSON_AddNumberToObject(display, "physicalHeight", BSP_LCD_V_RES);
   cJSON_AddStringToObject(display, "pixelFormat", "rgb565");
   cJSON_AddItemToObject(capabilities, "display", display);
   cJSON_AddItemToArray(asset_formats, cJSON_CreateString("p4-mjpeg-v1"));
@@ -3418,7 +3426,7 @@ void pet_p4_send_hello_for_board(const char *board_id, pet_p4_send_line_fn send_
   cJSON_AddItemToArray(asset_formats, cJSON_CreateString("p4-pcm-wav-v1"));
   cJSON_AddItemToObject(capabilities, "assetFormats", asset_formats);
 
-  cJSON_AddBoolToObject(transport, "usbOnly", true);
+  cJSON_AddBoolToObject(transport, "usbOnly", false);
   cJSON_AddBoolToObject(transport, "usbUart", true);
   cJSON_AddNumberToObject(transport, "usbUartBaud", PET_P4_UART_BAUD);
   cJSON_AddBoolToObject(transport, "rawAssetChunks", true);
@@ -3521,6 +3529,18 @@ static void handle_state_topic(pet_p4_runtime_state_t *state, const char *topic,
   const char *agent = "";
   const char *slash = strchr(topic, '/');
   if (slash && slash[1]) agent = slash + 1;
+  /* Desktop emits state/active as the aggregate lifecycle update after the
+   * source-specific update.  Its source field is the followed Agent; using
+   * the topic suffix here would overwrite "codex" with the literal "active". */
+  if (strcmp(agent, "active") == 0) {
+    const char *source = json_string(payload, "source");
+    if (source[0]) agent = source;
+    /* session/current is the user-visible foreground card.  A later
+     * aggregate status can legitimately describe another queued job; do not
+     * let it make the right-hand Agent indicator jump away from the card the
+     * desktop just selected. */
+    if (state->current_session_agent[0]) agent = state->current_session_agent;
+  }
   copy_text(state->active_agent, sizeof(state->active_agent), agent);
   copy_text(state->current_state, sizeof(state->current_state), json_string(payload, "state"));
   if (!state->current_state[0]) copy_text(state->current_state, sizeof(state->current_state), "working");
@@ -3565,6 +3585,10 @@ static void handle_speech(pet_p4_runtime_state_t *state, const cJSON *payload) {
   const char *content_keys[] = {"displayContent", "text", "message"};
   const char *title = json_first_string(payload, title_keys, sizeof(title_keys) / sizeof(title_keys[0]));
   const char *content = json_first_string(payload, content_keys, sizeof(content_keys) / sizeof(content_keys[0]));
+  if (content[0] && cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(payload, "voiceNotice"))) {
+    copy_text(state->voice_notice_text, sizeof(state->voice_notice_text), content);
+    state->voice_notice_until_ms = (unsigned long long)(esp_timer_get_time() / 1000ULL) + 90000ULL;
+  }
   const char *session_id = json_string(payload, "sessionId");
   if (title[0]) copy_text(state->current_title, sizeof(state->current_title), title);
   copy_text(state->current_speech, sizeof(state->current_speech), content);
@@ -3700,6 +3724,12 @@ static void handle_session_current(pet_p4_runtime_state_t *state, const cJSON *p
   copy_text(state->current_session_title, sizeof(state->current_session_title), title);
   copy_text(state->current_session_id, sizeof(state->current_session_id), session_id);
   copy_text(state->current_session_agent, sizeof(state->current_session_agent), agent_id);
+  /* Session/current is an explicit foreground selection from the desktop
+   * queue. Make its Agent visible immediately instead of waiting for the next
+   * aggregate state/active packet, which can describe an older job. */
+  if (agent_id[0]) {
+    copy_text(state->active_agent, sizeof(state->active_agent), agent_id);
+  }
   copy_text(state->stats.session_title, sizeof(state->stats.session_title), title);
   state->current_session_count = count > 999ULL ? 999U : (unsigned int) count;
   state->current_session_index = index > state->current_session_count
@@ -3888,6 +3918,14 @@ static void handle_session_current(pet_p4_runtime_state_t *state, const cJSON *p
   }
   memcpy(state->session_queue, state->session_queue_staging, sizeof(state->session_queue));
   state->session_queue_count = next_count;
+  /* A desktop clear is sent with displayEnabled=false.  Keep the pet clean
+   * until the host supplies a real card again, at which point new Agent
+   * activity is allowed to surface normally. */
+  if (!display_enabled) {
+    state->session_overlay_dismissed = true;
+  } else if (next_count > 0) {
+    state->session_overlay_dismissed = false;
+  }
   pet_p4_session_queue_item_t *selected_item = find_session_queue_item(
     state->session_queue,
     state->session_queue_count,

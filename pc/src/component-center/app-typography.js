@@ -4,6 +4,11 @@ export const keyHint=(action,bindings=[])=>({
   'knob.rotate_ccw':'左','knob.rotate_cw':'右','joystick.up':'上','joystick.down':'下',
 }[bindings.find(b=>b.action===action)?.event]||'—');
 
+// The device renders every glyph from a line at this shared cell origin.
+// Do not derive it from the individual glyph's ink bounds: neighbouring
+// labels with different Chinese, Latin, or digit glyphs must remain aligned.
+export const glyphCellTop=(lineY,lineHeight,fontSize)=>lineY+(lineHeight-fontSize)/2;
+
 export function glyphs(surface,images){
   const map=new Map();
   for(const font of surface.fonts||[]){

@@ -77,7 +77,7 @@ static void draw_app_glyph(uint32_t cp,uint32_t next,float x,float y,int size,ui
 }
 static void draw_app_icon(int icon,int x,int y,int size,uint16_t color){draw_app_glyph(UINT32_MAX,0,x,y,size,color,NULL);(void)icon;}
 static int app_glyph_width(uint32_t cp,uint32_t next){(void)next;return cp>127?32:12+cp%9;}
-static void app_text_bounds(const char*text,int*top,int*bottom){(void)text;*top=1;*bottom=29;}
+static void __attribute__((unused)) app_text_bounds(const char*text,int*top,int*bottom){(void)text;*top=1;*bottom=29;}
 '''
     for name in ('utf8_next','utf8_peek','app_text_width'):code+=function(text,name)
     label=function(text,'draw_app_label')
@@ -99,6 +99,43 @@ int main(void){
 }
 '''
     src=tmp_path/'layout.c';exe=tmp_path/'layout';src.write_text(code)
+    subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-I',str(ROOT/'main'),
+      '-I',str(ROOT/'tests/vendor/cjson'),str(src),'-o',str(exe)],check=True)
+    subprocess.run([str(exe)],check=True)
+
+
+def test_component_labels_keep_a_shared_baseline_when_glyph_ink_bounds_differ(tmp_path):
+    """Sibling component labels in one layout row must not shift with glyph shape."""
+    text=(ROOT/'main/pet_p4_renderer.c').read_text()
+    code=r'''
+#include <assert.h>
+#include <stdint.h>
+#include "pet_p4_surface.h"
+static float observed_y;
+static void draw_app_glyph(uint32_t cp,uint32_t next,float x,float y,int size,uint16_t color,const pet_surface_node_t*n){
+  (void)cp;(void)next;(void)x;(void)size;(void)color;(void)n;observed_y=y;
+}
+static void draw_app_icon(int icon,int x,int y,int size,uint16_t color){(void)icon;(void)x;(void)y;(void)size;(void)color;}
+static int app_glyph_width(uint32_t cp,uint32_t next){(void)cp;(void)next;return 16;}
+/* These bounds mirror atlas glyphs whose ink is not centred identically in
+ * their source cells.  They still belong on the same layout baseline. */
+static void __attribute__((unused)) app_text_bounds(const char*text,int*top,int*bottom){
+  if(text[0]=='A'){*top=0;*bottom=32;}else{*top=2;*bottom=32;}
+}
+'''
+    for name in ('utf8_next','utf8_peek','app_text_width'):
+        code+=function(text,name)
+    code+='\n#undef PET_P4_GLYPH_ROWS\n#define PET_P4_GLYPH_ROWS 0\n'+function(text,'draw_app_label')
+    code+=r'''
+int main(void){
+  pet_surface_node_t node={.x=10,.y=20,.w=120,.h=24,.font_size=16,.line_height=24,.icon=-1,.type=1};
+  draw_app_label(&node,"A",0x738e);float atlas_a=observed_y;
+  draw_app_label(&node,"B",0x738e);float atlas_b=observed_y;
+  assert(atlas_a==atlas_b);
+  return 0;
+}
+'''
+    src=tmp_path/'baseline.c';exe=tmp_path/'baseline';src.write_text(code)
     subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-I',str(ROOT/'main'),
       '-I',str(ROOT/'tests/vendor/cjson'),str(src),'-o',str(exe)],check=True)
     subprocess.run([str(exe)],check=True)

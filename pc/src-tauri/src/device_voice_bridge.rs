@@ -16,14 +16,17 @@
  */
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::sync::Mutex;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::net::{IpAddr, TcpListener, TcpStream};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 use tauri::Emitter;
 
 const BIND_ADDR: &str = "0.0.0.0:8901";
-/// 设备录音上限 60s × 16kHz × 2字节 ≈ 2MB；留足余量防滥用。
-const MAX_BODY: usize = 16 * 1024 * 1024;
+/// 固件 PTT PCM 缓冲上限 512 KiB，WAV 头固定 44 字节。
+const MAX_BODY: usize = 512 * 1024 + 44;
+const VOICE_MAX_CONNECTIONS: usize = 4;
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// 本地 ASR 冷加载 + 识别的最坏情况（Qwen3 冷启动约 19s）。
 const ASR_TIMEOUT: Duration = Duration::from_secs(45);
@@ -34,13 +37,85 @@ const ASR_TIMEOUT: Duration = Duration::from_secs(45);
 #[derive(Clone, Debug)]
 struct VoiceBeginSnapshot {
     agent_id: String,
-    at_ms: u128,
+    at: Instant,
+    target: Option<WifiVoiceTarget>,
 }
 
-static VOICE_BEGIN_SNAPSHOT: Mutex<Option<VoiceBeginSnapshot>> = Mutex::new(None);
+#[derive(Clone, Debug)]
+struct WifiVoiceTarget {
+    board: String,
+    agent: String,
+    session: String,
+    generation: u64,
+}
 
-/// 快照有效窗口：录音上限 60s + 传输/识别余量。
-const VOICE_BEGIN_SNAPSHOT_TTL_MS: u128 = 120_000;
+impl WifiVoiceTarget {
+    fn from_binding(agent: &str, binding: &crate::P4SessionBinding) -> Option<Self> {
+        // Visible-app delivery currently resolves the foreground window, not
+        // a session ID; it must not pretend to pin a specific conversation.
+        if matches!(agent, "workbuddy" | "deepseek-harness") || agent.is_empty()
+            || binding.agent_id != agent || binding.board_device_id.is_empty()
+            || binding.session_id.trim().is_empty()
+            || matches!(binding.session_id.trim().to_ascii_lowercase().as_str(), "auto" | "new")
+            || binding.auto_follow || binding.generation == 0 {
+            return None;
+        }
+        Some(Self { board: binding.board_device_id.clone(), agent: agent.into(),
+            session: binding.session_id.clone(), generation: binding.generation })
+    }
+    fn matches(&self, binding: &crate::P4SessionBinding) -> bool {
+        !binding.auto_follow && binding.board_device_id == self.board && binding.agent_id == self.agent
+            && binding.session_id == self.session && binding.generation == self.generation
+    }
+}
+
+const VOICE_BEGIN_SNAPSHOT_TTL: Duration = Duration::from_secs(120);
+const VOICE_BEGIN_MAX_PENDING: usize = 16;
+const VOICE_BEGIN_WAIT: Duration = Duration::from_secs(3);
+
+#[derive(Default)]
+struct VoiceSnapshotStore {
+    pending: HashMap<(IpAddr, String), VoiceBeginSnapshot>,
+}
+
+fn valid_voice_id(id: &str) -> bool {
+    id.len() == 16 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+impl VoiceSnapshotStore {
+    fn insert(&mut self, peer: IpAddr, id: &str, agent: &str, now: Instant) -> bool {
+        if !valid_voice_id(id) || agent.is_empty() { return false; }
+        self.pending.retain(|_, entry| now.saturating_duration_since(entry.at) <= VOICE_BEGIN_SNAPSHOT_TTL);
+        let key = (peer, id.to_owned());
+        if self.pending.contains_key(&key) { return false; }
+        // Short/cancelled recordings never upload, so their snapshots may fill
+        // the bounded store. Evict the oldest instead of blocking all new PTT
+        // attempts for two minutes; an evicted recording fails closed at take().
+        if self.pending.len() >= VOICE_BEGIN_MAX_PENDING {
+            if let Some(oldest) = self.pending.iter().min_by_key(|(_, entry)| entry.at).map(|(key, _)| key.clone()) {
+                self.pending.remove(&oldest);
+            }
+        }
+        self.pending.insert(key, VoiceBeginSnapshot { agent_id: agent.to_owned(), at: now, target: None });
+        true
+    }
+
+    fn take_scoped(&mut self, peer: IpAddr, id: &str, now: Instant) -> Option<VoiceBeginSnapshot> {
+        let snapshot = self.pending.remove(&(peer, id.to_owned()))?;
+        (now.saturating_duration_since(snapshot.at) <= VOICE_BEGIN_SNAPSHOT_TTL)
+            .then_some(snapshot)
+    }
+    #[cfg(test)]
+    fn take(&mut self, peer: IpAddr, id: &str, now: Instant) -> Option<String> {
+        self.take_scoped(peer, id, now).map(|snapshot| snapshot.agent_id)
+    }
+}
+
+static VOICE_BEGIN_SNAPSHOTS: OnceLock<Mutex<VoiceSnapshotStore>> = OnceLock::new();
+
+fn voice_snapshots() -> &'static Mutex<VoiceSnapshotStore> {
+    VOICE_BEGIN_SNAPSHOTS.get_or_init(|| Mutex::new(VoiceSnapshotStore::default()))
+}
 
 fn now_ms() -> u128 {
     std::time::SystemTime::now()
@@ -72,60 +147,47 @@ fn followed_agent_id() -> String {
     }
 }
 
-fn store_voice_begin_snapshot() {
-    let snapshot = VoiceBeginSnapshot {
-        agent_id: followed_agent_id(),
-        at_ms: now_ms(),
-    };
-    bridge_log(&format!(
-        "voice/begin -> froze follow target \"{}\"",
-        snapshot.agent_id
-    ));
-    if let Ok(mut guard) = VOICE_BEGIN_SNAPSHOT.lock() {
-        *guard = Some(snapshot);
+fn store_voice_begin_snapshot(peer: IpAddr, id: &str) -> bool {
+    let agent = followed_agent_id();
+    let target = crate::p4_session_binding().lock().ok()
+        .and_then(|binding| WifiVoiceTarget::from_binding(&agent, &binding));
+    voice_snapshots().lock().map(|mut store| {
+        if !store.insert(peer, id, &agent, Instant::now()) { return false; }
+        if let Some(snapshot) = store.pending.get_mut(&(peer, id.to_owned())) { snapshot.target = target; }
+        true
+    }).unwrap_or(false)
+}
+
+fn take_voice_begin_info(peer: IpAddr, id: &str) -> Option<VoiceBeginSnapshot> {
+    let deadline = Instant::now() + VOICE_BEGIN_WAIT;
+    loop {
+        let snapshot = voice_snapshots().lock().ok()?.take_scoped(peer, id, Instant::now());
+        if snapshot.is_some() || Instant::now() >= deadline { return snapshot; }
+        std::thread::sleep(Duration::from_millis(25));
     }
 }
 
-/// 录完投递前的 target_is_current 校验。返回 false 表示跟随目标在录音
-/// 期间被切换，本次文本应当丢弃（与原项目语义一致：宁弃勿错投）。
-fn voice_target_is_current() -> bool {
-    let snapshot = match VOICE_BEGIN_SNAPSHOT.lock() {
-        Ok(guard) => guard.clone(),
-        Err(_) => return true,
-    };
-    let Some(snapshot) = snapshot else {
-        return true; // 旧固件没有 begin 通知：保持原行为直接投递
-    };
-    if now_ms().saturating_sub(snapshot.at_ms) > VOICE_BEGIN_SNAPSHOT_TTL_MS {
-        return true; // 过期快照（比如悬空的 begin）：不拦
-    }
-    if snapshot.agent_id.is_empty() {
-        return true; // begin 时无法确定目标：不拦
-    }
-    let current = followed_agent_id();
-    if current.is_empty() {
-        return true; // 投递时无法确定目标：不拦
-    }
-    let same = snapshot.agent_id == current;
-    if !same {
-        bridge_log(&format!(
-            "voice dropped: follow target changed during recording (\"{}\" -> \"{}\")",
-            snapshot.agent_id, current
-        ));
-    }
-    same
+#[cfg(test)]
+fn take_voice_begin_snapshot(peer: IpAddr, id: &str) -> Option<String> {
+    take_voice_begin_info(peer, id).map(|snapshot| snapshot.agent_id)
 }
 
-/// ASR 识别完成后不再直接投递：先生成「待确认草稿」，PC 端与设备屏都显示
-/// 识别文字，用户按发送（摇杆右/确认键）才真正注入 Agent，按取消
-/// （摇杆左/返回键）丢弃。这既满足用户要求，也避开 input/action 链路上
-/// realtime_chat 等前置分支的静默吞字。
+fn voice_request_id(query: &str) -> Option<&str> {
+    let mut ids = query.split('&').filter_map(|part| part.strip_prefix("sid="));
+    let id = ids.next()?;
+    if ids.next().is_some() || !valid_voice_id(id) { return None; }
+    Some(id)
+}
+
+/// ASR 识别完成后先生成待确认草稿，设备摇杆向上发送，向下取消。
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct VoiceDraft {
     pub text: String,
     pub agent_id: String,
     pub utterance_id: String,
     pub at_ms: u128,
+    #[serde(skip)]
+    target: Option<WifiVoiceTarget>,
 }
 
 /// 草稿有效窗口（录音上限 + 确认操作时间）。
@@ -159,7 +221,7 @@ pub fn draft_status() -> serde_json::Value {
 
 fn emit_voice_event(app: &tauri::AppHandle, event: &str, payload: serde_json::Value) {
     let _ = app.emit(event, payload.clone());
-    bridge_log(&format!("emit {event}: {}", payload.to_string().chars().take(140).collect::<String>()));
+    bridge_log(&format!("emit {event}"));
 }
 
 /// 通知设备进入/退出「语音草稿确认模式」：期间设备本地屏蔽左右摇杆等
@@ -173,7 +235,7 @@ fn notify_device_draft(app: &tauri::AppHandle, active: bool, text: &str) {
     let payload = serde_json::json!({
         "active": active,
         "text": text,
-        "hint": "语音待确认：摇杆右/确认=发送 · 摇杆左/返回=取消",
+        "hint": "语音待确认：摇杆向上发送 · 向下取消",
     });
     match manager.send("voice/draft", &payload) {
         Ok(()) => bridge_log(&format!("voice/draft notify active={active} sent")),
@@ -181,17 +243,34 @@ fn notify_device_draft(app: &tauri::AppHandle, active: bool, text: &str) {
     }
 }
 
-pub fn create_draft(app: &tauri::AppHandle, text: &str, agent_id: &str) -> VoiceDraft {
+fn notify_unbound_voice_target(app: &tauri::AppHandle, agent: &str) {
+    use tauri::Manager;
+    if let Some(manager) = app.try_state::<crate::usb_serial::UsbSerialManager>() {
+        let status = manager.status();
+        let session = crate::p4_session_binding().lock().ok().and_then(|binding|
+            (binding.board_device_id == status.board_device_id && binding.agent_id == agent)
+                .then(|| binding.session_id.clone()));
+        if let (Ok(generation), Some(session)) = (status.connection_id.parse::<u64>(), session) {
+            let notice = crate::display_only_voice_notice("会话未固定或已变化，未发送", agent, &session);
+            let _ = manager.send_voice_notice_for_connection(&status.board_device_id, generation, &status.boot_id, &notice);
+        }
+    }
+}
+
+fn create_draft(app: &tauri::AppHandle, text: &str, agent_id: &str, target: Option<WifiVoiceTarget>) -> Result<VoiceDraft, String> {
+    if !crate::workbuddy_device_draft_fits(text.trim()) || agent_id.is_empty() {
+        return Err("文字过长、含换行或目标不可用，请缩短后重新录音".into());
+    }
     let stamp = now_ms();
     let draft = VoiceDraft {
         text: text.trim().to_string(),
         agent_id: agent_id.to_string(),
         utterance_id: format!("wifi-draft-{stamp}"),
         at_ms: stamp,
+        target,
     };
-    if let Ok(mut guard) = VOICE_DRAFT.lock() {
-        *guard = Some(draft.clone());
-    }
+    let mut guard = VOICE_DRAFT.lock().map_err(|_| "语音草稿状态不可用".to_string())?;
+    *guard = Some(draft.clone());
     emit_voice_event(
         app,
         "voice-draft-ready",
@@ -208,55 +287,70 @@ pub fn create_draft(app: &tauri::AppHandle, text: &str, agent_id: &str) -> Voice
         draft.agent_id,
         draft.text.chars().count()
     ));
-    draft
+    drop(guard);
+    Ok(draft)
 }
 
 pub fn clear_draft(app: &tauri::AppHandle, reason: &str) {
-    let existed = VOICE_DRAFT.lock().ok().and_then(|mut guard| guard.take()).is_some();
-    if existed {
+    if let Ok(mut guard) = VOICE_DRAFT.lock() {
+      if guard.take().is_some() {
         notify_device_draft(app, false, reason);
         emit_voice_event(app, "voice-draft-cleared", serde_json::json!({"reason": reason}));
         bridge_log(&format!("voice draft cleared: {reason}"));
+      }
     }
 }
 
+fn validate_draft_submission(draft: &VoiceDraft, current: &str, now: u128) -> Result<(), (&'static str, String)> {
+    if now < draft.at_ms || now - draft.at_ms > VOICE_DRAFT_TTL_MS {
+        return Err(("草稿已超时", "语音草稿已超时，请重新说一次".into()));
+    }
+    if current.is_empty() || current != draft.agent_id {
+        return Err(("跟随的 Agent 不可用或已切换", "跟随的 Agent 不可用或已切换，草稿已取消，请重新录音".into()));
+    }
+    if draft.text.trim().is_empty() {
+        return Err(("草稿为空", "语音草稿为空".into()));
+    }
+    Ok(())
+}
+
 pub fn submit_draft(app: &tauri::AppHandle) -> Result<serde_json::Value, String> {
-    let draft = match VOICE_DRAFT.lock() {
-        Ok(mut guard) => guard.take(),
-        Err(_) => None,
-    }
-    .ok_or_else(|| "没有待发送的语音草稿".to_string())?;
-    if now_ms().saturating_sub(draft.at_ms) > VOICE_DRAFT_TTL_MS {
-        clear_draft(app, "草稿已超时");
-        return Err("语音草稿已超时，请重新说一次".to_string());
-    }
-    // 目标冻结：待确认期间切换了跟随 Agent 就拒绝发送（宁弃勿错投）。
+    let mut guard = VOICE_DRAFT.lock().map_err(|_| "语音草稿状态不可用".to_string())?;
+    let draft = guard.take().ok_or_else(|| "没有待发送的语音草稿".to_string())?;
     let current = followed_agent_id();
-    if !current.is_empty() && current != draft.agent_id {
-        clear_draft(app, "跟随的 Agent 已切换");
-        return Err(format!(
-            "跟随的 Agent 已从 {} 切换到 {}，草稿已取消",
-            draft.agent_id, current
-        ));
+    if let Err((reason, error)) = validate_draft_submission(&draft, &current, now_ms()) {
+        notify_device_draft(app, false, reason);
+        emit_voice_event(app, "voice-draft-cleared", serde_json::json!({"reason": reason}));
+        return Err(error);
     }
-    if draft.text.is_empty() {
-        clear_draft(app, "草稿为空");
-        return Err("语音草稿为空".to_string());
-    }
+    let Some(target) = draft.target.clone().filter(|target|
+        crate::p4_session_binding().lock().is_ok_and(|binding| target.matches(&binding))) else {
+        notify_device_draft(app, false, "会话未固定或已变化");
+        notify_unbound_voice_target(app, &draft.agent_id);
+        emit_voice_event(app, "voice-draft-cleared", serde_json::json!({"reason": "会话未固定或已变化"}));
+        return Err("无线语音无法确认原会话，本次未发送；请选择明确会话或使用 USB 语音".into());
+    };
     bridge_log(&format!(
-        "voice draft submitting -> agent=\"{}\" text=\"{}\"",
+        "voice draft submitting -> agent=\"{}\" chars={}",
         draft.agent_id,
-        draft.text.chars().take(60).collect::<String>()
+        draft.text.chars().count()
     ));
-    notify_device_draft(app, false, "submitted");
-    emit_voice_event(app, "voice-draft-cleared", serde_json::json!({"reason": "submitted"}));
+    notify_device_draft(app, false, "submitting");
+    emit_voice_event(app, "voice-draft-cleared", serde_json::json!({"reason": "submitting"}));
+    drop(guard);
     // Agent 注入可能耗时数分钟（CLI 冷启动 + 整轮回复）。同步等待会让
     // 「发送」按钮和摇杆手势卡死，因此后台执行，结果经事件回报前端。
     let app = app.clone();
     let text = draft.text.clone();
     let agent_id = draft.agent_id.clone();
     std::thread::spawn(move || {
-        match crate::deliver_voice_draft_to_agent(&text, &agent_id) {
+        if !crate::p4_session_binding().lock().is_ok_and(|binding| target.matches(&binding)) {
+            emit_voice_event(&app, "voice-draft-result", serde_json::json!({
+                "ok": false, "message": "会话已变化，本次未发送", "agentId": agent_id,
+            }));
+            return;
+        }
+        match crate::direct_inject_agent_input_to_session(&text, &agent_id, &target.session) {
             Ok(response) => {
                 let queued = response.get("queued").and_then(|v| v.as_bool()).unwrap_or(false);
                 let message = if queued {
@@ -265,7 +359,7 @@ pub fn submit_draft(app: &tauri::AppHandle) -> Result<serde_json::Value, String>
                         agent_id
                     )
                 } else {
-                    format!("已发送到 {}", agent_id)
+                    format!("已向 {} 请求提交，未取得送达回执", agent_id)
                 };
                 emit_voice_event(&app, "voice-draft-result", serde_json::json!({
                     "ok": true, "queued": queued, "message": message,
@@ -283,7 +377,8 @@ pub fn submit_draft(app: &tauri::AppHandle) -> Result<serde_json::Value, String>
     });
     Ok(serde_json::json!({
         "ok": true,
-        "submitted": true,
+        "submitted": false,
+        "pending": true,
         "agentId": draft.agent_id,
         "text": draft.text,
     }))
@@ -295,8 +390,18 @@ pub fn cancel_draft(app: &tauri::AppHandle, reason: &str) -> bool {
     existed
 }
 
-/// 设备手势快选：草稿存在时把左右摇杆 / 确认 / 返回解释为发送 / 取消，
-/// 并阻止这些按键继续走会话切换等原有动作。返回 true 表示已消费。
+fn wifi_draft_decision(topic: &str, payload: &serde_json::Value, board: &str) -> Option<bool> {
+    if topic != "input/event" || board.is_empty()
+        || payload["boardDeviceId"].as_str() != Some(board)
+        || payload["handledLocally"].as_bool() != Some(false) { return None; }
+    match (payload["event"].as_str(), payload["action"].as_str()) {
+        (Some("joystick.up"), Some("voice_draft_send")) => Some(true),
+        (Some("joystick.down"), Some("voice_draft_cancel")) => Some(false),
+        _ => None,
+    }
+}
+
+/// 草稿期间只由本设备摇杆上下决定，其他按键不再触发原有功能。
 pub fn try_draft_gesture(app: &tauri::AppHandle, topic: &str, payload: &serde_json::Value) -> bool {
     if topic != "input/event" && topic != "input/action" {
         return false;
@@ -304,23 +409,17 @@ pub fn try_draft_gesture(app: &tauri::AppHandle, topic: &str, payload: &serde_js
     if current_draft().is_none() {
         return false;
     }
+    use tauri::Manager;
+    let board = app.try_state::<crate::usb_serial::UsbSerialManager>()
+        .map(|manager| manager.status().board_device_id).unwrap_or_default();
     let action = payload.get("action").and_then(|v| v.as_str()).unwrap_or_default();
-    // 用户指定：摇杆向上=发送，向下=取消（按方向事件判定，不依赖绑定的
-    // action 名——摇杆上下默认仍绑 session_previous/next，草稿期被重映射）。
-    let event = payload.get("event").and_then(|v| v.as_str()).unwrap_or_default();
-    let send = event == "joystick.up"
-        || action == "page_enter"
-        || action == "voice_draft_send";
-    let cancel = event == "joystick.down"
-        || action == "page_back"
-        || action == "voice_draft_cancel";
-    if send {
+    if wifi_draft_decision(topic, payload, &board) == Some(true) {
         if let Err(error) = submit_draft(app) {
             emit_voice_event(app, "voice-draft-result", serde_json::json!({
                 "ok": false, "message": error,
             }));
         }
-    } else if cancel {
+    } else if wifi_draft_decision(topic, payload, &board) == Some(false) {
         clear_draft(app, "设备取消");
         emit_voice_event(app, "voice-draft-result", serde_json::json!({
             "ok": true, "cancelled": true, "message": "已取消语音草稿",
@@ -366,15 +465,37 @@ pub fn start(app: tauri::AppHandle) {
     });
 }
 
+struct VoiceConnectionPermit(Arc<AtomicUsize>);
+
+impl VoiceConnectionPermit {
+    fn acquire(active: &Arc<AtomicUsize>) -> Option<Self> {
+        active.fetch_update(Ordering::SeqCst, Ordering::SeqCst,
+            |count| (count < VOICE_MAX_CONNECTIONS).then_some(count + 1)).ok()?;
+        Some(Self(Arc::clone(active)))
+    }
+}
+
+impl Drop for VoiceConnectionPermit {
+    fn drop(&mut self) { self.0.fetch_sub(1, Ordering::SeqCst); }
+}
+
 fn serve(app: tauri::AppHandle) -> Result<(), String> {
     let listener =
         TcpListener::bind(BIND_ADDR).map_err(|e| format!("监听 {BIND_ADDR} 失败：{e}"))?;
+    let active = Arc::new(AtomicUsize::new(0));
     bridge_log(&format!("listening on http://{BIND_ADDR}/voice"));
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
+                let Some(permit) = VoiceConnectionPermit::acquire(&active) else {
+                    // Close immediately; do not block the accept loop on a slow peer.
+                    continue;
+                };
                 let app = app.clone();
-                std::thread::spawn(move || handle_connection(app, stream));
+                let _ = std::thread::Builder::new().name("p4-voice-request".into()).spawn(move || {
+                    let _permit = permit;
+                    handle_connection(app, stream);
+                });
             }
             Err(_) => continue,
         }
@@ -383,16 +504,23 @@ fn serve(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 fn handle_connection(app: tauri::AppHandle, mut stream: TcpStream) {
-    let peer = stream
-        .peer_addr()
-        .map(|addr| addr.to_string())
-        .unwrap_or_else(|_| "unknown".into());
+    let peer_addr = stream.peer_addr().ok();
+    let peer = peer_addr.map(|addr| addr.to_string()).unwrap_or_else(|| "unknown".into());
     let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
     let _ = stream.set_write_timeout(Some(READ_TIMEOUT));
     let (status, body) = match read_request(&mut stream) {
-        Ok(Some((path, body))) if path == "/voice/begin" => {
-            store_voice_begin_snapshot();
-            (200, serde_json::json!({"ok": true}))
+        Ok(Some((path, _body))) if path.split('?').next() == Some("/voice/begin") => {
+            let id = path.split_once('?').and_then(|(_, query)| voice_request_id(query));
+            if let (Some(peer), Some(id)) = (peer_addr, id) {
+                if store_voice_begin_snapshot(peer.ip(), id) {
+                    bridge_log("voice/begin accepted");
+                    (200, serde_json::json!({"ok": true}))
+                } else {
+                    (409, serde_json::json!({"ok": false, "error": "无法冻结语音目标"}))
+                }
+            } else {
+                (400, serde_json::json!({"ok": false, "error": "缺少有效录音标识"}))
+            }
         }
         // 本机诊断/自动化入口：仅 127.0.0.1 可调用，等价于 PC 端「发送」/
         // 「取消」按钮，便于验证草稿链路，不向局域网暴露。
@@ -406,35 +534,47 @@ fn handle_connection(app: tauri::AppHandle, mut stream: TcpStream) {
             let existed = cancel_draft(&app, "本机取消");
             (200, serde_json::json!({"ok": true, "hadDraft": existed}))
         }
-        Ok(Some((_path, wav))) => match transcribe(&wav) {
-            Ok(text) => {
-                bridge_log(&format!(
-                    "POST /voice from {peer} bytes={} -> ok text=\"{}\"",
-                    wav.len(),
-                    text.chars().take(60).collect::<String>()
-                ));
-                if voice_target_is_current() {
-                    let agent_id = followed_agent_id();
-                    create_draft(&app, &text, &agent_id);
-                    (200, serde_json::json!({"ok": true, "text": text, "draft": true}))
-                } else {
-                    (
-                        200,
-                        serde_json::json!({
-                            "ok": false,
-                            "error": "跟随的 Agent 在录音期间已切换，本次语音未投递"
-                        }),
-                    )
+        Ok(Some((path, wav))) if path.split('?').next() == Some("/voice") => {
+            let id = path.split_once('?').and_then(|(_, query)| voice_request_id(query));
+            let snapshot = match (peer_addr, id) {
+                (Some(peer), Some(id)) => take_voice_begin_info(peer.ip(), id),
+                _ => None,
+            };
+            let current = followed_agent_id();
+            if snapshot.as_ref().filter(|snapshot| !current.is_empty() && snapshot.agent_id == current).is_none() {
+                (409, serde_json::json!({"ok": false, "error": "录音目标缺失、过期或已变化，请重录"}))
+            } else {
+                let started = Instant::now();
+                match transcribe(&wav) {
+                    Ok(text) => {
+                        bridge_log(&format!(
+                            "POST /voice from {peer} bytes={} -> ok chars={} elapsed_ms={}",
+                            wav.len(),
+                            text.chars().count(),
+                            started.elapsed().as_millis()
+                        ));
+                        let snapshot = snapshot.expect("validated snapshot");
+                        let agent_id = snapshot.agent_id;
+                        if !agent_id.is_empty() && followed_agent_id() == agent_id {
+                            match create_draft(&app, &text, &agent_id, snapshot.target) {
+                                Ok(_) => (200, serde_json::json!({"ok": true, "text": text, "draft": true})),
+                                Err(error) => (200, serde_json::json!({"ok": false, "error": error})),
+                            }
+                        } else {
+                            (200, serde_json::json!({
+                                "ok": false,
+                                "error": "跟随的 Agent 在录音期间已切换，本次语音未投递"
+                            }))
+                        }
+                    }
+                    Err(error) => {
+                        bridge_log(&format!("POST /voice from {peer} -> ASR ERROR after {}ms: {error}", started.elapsed().as_millis()));
+                        (200, serde_json::json!({"ok": false, "error": error}))
+                    }
                 }
             }
-            Err(error) => {
-                bridge_log(&format!(
-                    "POST /voice from {peer} bytes={} -> ASR ERROR {error}",
-                    wav.len()
-                ));
-                (200, serde_json::json!({"ok": false, "error": error}))
-            }
-        },
+        }
+        Ok(Some((_path, _body))) => (404, serde_json::json!({"ok": false, "error": "not found"})),
         Ok(None) => {
             bridge_log(&format!("non-voice request from {peer} -> 404"));
             (404, serde_json::json!({"ok": false, "error": "not found"}))
@@ -475,8 +615,17 @@ fn read_request(stream: &mut TcpStream) -> Result<Option<(String, Vec<u8>)>, Str
     let method = parts.next().unwrap_or("");
     let path = parts.next().unwrap_or("");
     let mut content_length = 0usize;
+    let mut content_type = None;
     for line in lines {
         if let Some((name, value)) = line.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("origin") {
+                return Err("不接受浏览器跨站请求".into());
+            }
+            if name.trim().eq_ignore_ascii_case("content-type") {
+                if content_type.replace(value.trim()).is_some() {
+                    return Err("重复的 Content-Type".into());
+                }
+            }
             if name.trim().eq_ignore_ascii_case("content-length") {
                 content_length = value.trim().parse().unwrap_or(0);
             }
@@ -484,6 +633,11 @@ fn read_request(stream: &mut TcpStream) -> Result<Option<(String, Vec<u8>)>, Str
     }
     if !method.eq_ignore_ascii_case("POST") || !path.starts_with("/voice") {
         return Ok(None);
+    }
+    if path.split('?').next() == Some("/voice")
+        && !content_type.and_then(|value| value.split(';').next())
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("audio/wav")) {
+        return Err("录音请求必须使用 audio/wav".into());
     }
     if content_length > MAX_BODY {
         return Err("录音过大".into());
@@ -511,8 +665,10 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
 /// 火山云端走的是流式会话，这里不重复实现。
 fn transcribe(wav: &[u8]) -> Result<String, String> {
     if let Some((endpoint, engine)) = crate::volcengine_asr::local_provider_prefs() {
-        // 冷加载预热失败不致命：transcribe_wav 自己会再触发懒加载。
-        let _ = crate::local_asr::ensure_loaded(&endpoint, &engine);
+        // The actual request loads the selected engine lazily.  Avoid a
+        // separate silent transcription, which can consume another 30 seconds
+        // before the real request even starts.
+        let _ = crate::local_asr::ensure_ready(&endpoint);
         let transcript =
             crate::local_asr::transcribe_wav(&endpoint, &engine, wav, ASR_TIMEOUT)?;
         return Ok(transcript.text);
@@ -526,10 +682,11 @@ fn respond(stream: &mut TcpStream, status: u16, body: &serde_json::Value) {
         200 => "OK",
         400 => "Bad Request",
         404 => "Not Found",
+        409 => "Conflict",
         _ => "Internal Server Error",
     };
     let response = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         payload.len(),
         payload
     );
@@ -540,6 +697,163 @@ fn respond(stream: &mut TcpStream, status: u16, body: &serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_limit_releases_on_drop_and_rejects_excess() {
+        let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut permits = (0..VOICE_MAX_CONNECTIONS)
+            .map(|_| VoiceConnectionPermit::acquire(&active).expect("slot"))
+            .collect::<Vec<_>>();
+        assert!(VoiceConnectionPermit::acquire(&active).is_none());
+        permits.pop();
+        assert!(VoiceConnectionPermit::acquire(&active).is_some());
+        drop(permits);
+        assert_eq!(active.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn request_body_limit_matches_device_capture_capacity() {
+        fn request(size: usize, send_body: bool) -> Result<Option<(String, Vec<u8>)>, String> {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let address = listener.local_addr().unwrap();
+            let writer = std::thread::spawn(move || {
+                let mut client = TcpStream::connect(address).unwrap();
+                write!(client, "POST /voice?sid=0123456789abcdef HTTP/1.1\r\nContent-Type: audio/wav\r\nContent-Length: {size}\r\n\r\n").unwrap();
+                if send_body { client.write_all(&vec![0; size]).unwrap(); }
+            });
+            let (mut server, _) = listener.accept().unwrap();
+            let result = read_request(&mut server);
+            writer.join().unwrap();
+            result
+        }
+        assert_eq!(request(MAX_BODY, true).unwrap().unwrap().1.len(), MAX_BODY);
+        assert!(request(MAX_BODY + 1, false).is_err());
+    }
+
+    #[test]
+    fn wifi_voice_requires_exact_unchanged_explicit_session() {
+        for session in ["", "auto", "new", " AUTO "] {
+            assert!(crate::direct_inject_agent_input_to_session("synthetic", "codex", session).is_err());
+        }
+        let binding = crate::P4SessionBinding { board_device_id: "p4".into(), agent_id: "codex".into(),
+            session_id: "session-a".into(), generation: 7, ..Default::default() };
+        let target = WifiVoiceTarget::from_binding("codex", &binding).unwrap();
+        assert!(target.matches(&binding));
+        let mut changed = binding.clone(); changed.session_id = "session-b".into();
+        assert!(!target.matches(&changed));
+        changed = binding.clone(); changed.generation += 1;
+        assert!(!target.matches(&changed));
+        changed = binding.clone(); changed.auto_follow = true;
+        assert!(WifiVoiceTarget::from_binding("codex", &changed).is_none());
+        changed = binding.clone(); changed.session_id.clear();
+        assert!(WifiVoiceTarget::from_binding("codex", &changed).is_none());
+        changed.session_id = "new".into();
+        assert!(WifiVoiceTarget::from_binding("codex", &changed).is_none());
+        changed = binding.clone(); changed.agent_id = "workbuddy".into();
+        assert!(WifiVoiceTarget::from_binding("workbuddy", &changed).is_none());
+        let peer: IpAddr = "192.0.2.12".parse().unwrap();
+        let id = "0123456789abcdef";
+        let mut store = VoiceSnapshotStore::default();
+        let now = Instant::now();
+        assert!(store.insert(peer, id, "codex", now));
+        store.pending.get_mut(&(peer, id.into())).unwrap().target = Some(target);
+        let taken = store.take_scoped(peer, id, now).unwrap();
+        assert!(taken.target.unwrap().matches(&binding));
+        assert!(store.take_scoped(peer, id, now).is_none());
+    }
+
+    #[test]
+    fn wifi_draft_decisions_require_matching_vertical_joystick_events() {
+        let event = |direction, action, board| serde_json::json!({
+            "event": direction, "action": action, "boardDeviceId": board, "handledLocally": false
+        });
+        assert_eq!(wifi_draft_decision("input/event", &event("joystick.up", "voice_draft_send", "p4"), "p4"), Some(true));
+        assert_eq!(wifi_draft_decision("input/event", &event("joystick.down", "voice_draft_cancel", "p4"), "p4"), Some(false));
+        for payload in [event("button.1.short_press", "page_enter", "p4"),
+            event("knob.rotate_ccw", "voice_draft_send", "p4"),
+            event("joystick.up", "voice_draft_send", "other")] {
+            assert_eq!(wifi_draft_decision("input/event", &payload, "p4"), None);
+        }
+        assert_eq!(wifi_draft_decision("input/action", &event("joystick.up", "voice_draft_send", "p4"), "p4"), None);
+    }
+
+    #[test]
+    fn draft_submission_requires_current_matching_agent_and_unexpired_text() {
+        let draft = VoiceDraft { text: "测试".into(), agent_id: "codex".into(),
+            utterance_id: "u".into(), at_ms: 1000, target: None };
+        assert!(validate_draft_submission(&draft, "codex", 1001).is_ok());
+        assert!(validate_draft_submission(&draft, "", 1001).is_err());
+        assert!(validate_draft_submission(&draft, "other", 1001).is_err());
+        assert!(validate_draft_submission(&draft, "codex", 1001 + VOICE_DRAFT_TTL_MS).is_err());
+        let empty = VoiceDraft { text: "   ".into(), ..draft };
+        assert!(validate_draft_submission(&empty, "codex", 1001).is_err());
+    }
+
+    #[test]
+    fn voice_snapshots_are_bounded_scoped_expiring_and_single_use() {
+        let mut store = VoiceSnapshotStore::default();
+        let a: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        let b: std::net::IpAddr = "192.0.2.2".parse().unwrap();
+        let now = std::time::Instant::now();
+        assert!(store.take(a, "0000000000000001", now).is_none());
+        assert!(store.insert(a, "0000000000000001", "codex", now));
+        assert!(store.insert(b, "0000000000000001", "other", now));
+        assert!(!store.insert(a, "0000000000000001", "other", now));
+        assert!(store.take(a, "0000000000000002", now).is_none());
+        assert_eq!(store.take(a, "0000000000000001", now).as_deref(), Some("codex"));
+        assert!(store.take(a, "0000000000000001", now).is_none());
+        assert_eq!(store.take(b, "0000000000000001", now).as_deref(), Some("other"));
+        assert!(store.insert(a, "0000000000000003", "codex", now));
+        assert!(store.take(a, "0000000000000003", now + Duration::from_secs(121)).is_none());
+        assert!(!store.insert(a, "invalid", "codex", now));
+        assert!(!store.insert(a, "0000000000000004", "", now));
+        for index in 0..16 { assert!(store.insert(a, &format!("{index:016x}"), "codex", now + Duration::from_millis(index))); }
+        assert!(store.insert(a, "ffffffffffffffff", "codex", now + Duration::from_millis(16)));
+        assert!(store.take(a, "0000000000000000", now + Duration::from_millis(16)).is_none());
+        assert_eq!(store.take(a, "ffffffffffffffff", now + Duration::from_millis(16)).as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn voice_id_query_requires_one_exact_identifier() {
+        assert_eq!(voice_request_id("sid=0123456789abcdef"), Some("0123456789abcdef"));
+        assert_eq!(voice_request_id("x=1&sid=0123456789abcdef"), Some("0123456789abcdef"));
+        assert!(voice_request_id("x=1").is_none());
+        assert!(voice_request_id("sid=0123456789abcdef&sid=fedcba9876543210").is_none());
+        assert!(voice_request_id("sid=0123456789abcdeF").is_none());
+    }
+
+    #[test]
+    fn delayed_begin_is_matched_only_to_its_recording() {
+        let peer: IpAddr = "192.0.2.123".parse().unwrap();
+        let id = "abc1230000000001";
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(60));
+            assert!(voice_snapshots().lock().unwrap().insert(peer, id, "codex", Instant::now()));
+        });
+        assert_eq!(take_voice_begin_snapshot(peer, id).as_deref(), Some("codex"));
+        worker.join().unwrap();
+        assert!(voice_snapshots().lock().unwrap().take(peer, id, Instant::now()).is_none());
+    }
+
+    #[test]
+    fn browser_origin_and_plain_text_cannot_reach_voice_handler() {
+        use std::io::Write;
+        fn request(raw: &'static [u8]) -> Result<Option<(String, Vec<u8>)>, String> {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let address = listener.local_addr().unwrap();
+            let writer = std::thread::spawn(move || {
+                let mut client = TcpStream::connect(address).unwrap();
+                client.write_all(raw).unwrap();
+            });
+            let (mut server, _) = listener.accept().unwrap();
+            let result = read_request(&mut server);
+            writer.join().unwrap();
+            result
+        }
+        assert!(request(b"POST /voice?sid=0123456789abcdef HTTP/1.1\r\nOrigin: https://evil.example\r\nContent-Type: audio/wav\r\nContent-Length: 0\r\n\r\n").is_err());
+        assert!(request(b"POST /voice?sid=0123456789abcdef HTTP/1.1\r\nContent-Type: text/plain\r\nContent-Length: 0\r\n\r\n").is_err());
+        assert!(request(b"POST /voice?sid=0123456789abcdef HTTP/1.1\r\nContent-Type: audio/wav\r\nContent-Length: 0\r\n\r\n").unwrap().is_some());
+    }
 
     #[test]
     fn header_end_detection() {

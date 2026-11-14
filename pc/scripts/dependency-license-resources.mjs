@@ -16,6 +16,7 @@ export const dependencyLicenseResources = Object.freeze([
   ['MPL-2.0.txt', '3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04'],
   ['DEPENDENCY-LICENSE-NOTICE.md', '357b4e159c983730eb6fda2b312226f52b511793a223189c8e991f79396c6782'],
   ['Node-26.7.0-LICENSE.txt', 'e991d81497a85bb24fc6bffae0a3637a6accd6c6bc5ce1f2c5698bd555cf9d49'],
+  ['Node-26.7.0-darwin-arm64-LICENSE.txt', '5888dbb9a1d2b18f2c3e6c5f6af1b39de658372b402a0577b002777f14c62ace'],
   ['DESKTOP-RUNTIME-LICENSES.txt', 'b9a5b7bddeccc0525c50d44a60d2a3b48bc59195de0daff3c5070d4366f6d559'],
   ['DESKTOP-RUNTIME-DEPENDENCIES.json', '9db9b80bcad9bc95ff2f3051b91073e8dcc744598a8413955d8e7dc280b912c2'],
 ].map(([name, sha256]) => Object.freeze({ name, sha256 })));
@@ -58,17 +59,39 @@ export function copyDependencyLicenses(sourceDirectory, destinationDirectory) {
 
 // Reviewed Node26.7.0 inputs; a new vendor build needs an explicit license review.
 const node267Builds = new Set(["913b144fdb40638b1acef7974ab3c33fbd527cc0974cb5da467ab1e6ac51b4d4", "abdc47a6bc8b45e6272d62d4c5c0c0419fb5dbedf3fe12ddabb595634f06f81f", "e921fe5307e29bf6fd00000dd594356affd3a7b044e52720c7f10decbdc305b9"]);
-export function copyNodeRuntimeLicense(binaryPath, sourceDirectory, destinationDirectory) {
+export function nodeRuntimeLicenseForSha(sha) {
+  if (sha === 'a9bd0630891c2dcdee70de88270fee2cc0c4a9e76495039dd3b4f91c5e6b71df') {
+    return {name:'Node-26.7.0-darwin-arm64-LICENSE.txt', sha256:'5888dbb9a1d2b18f2c3e6c5f6af1b39de658372b402a0577b002777f14c62ace'};
+  }
+  if (node267Builds.has(sha)) return {name:'Node-26.7.0-LICENSE.txt', sha256:'e991d81497a85bb24fc6bffae0a3637a6accd6c6bc5ce1f2c5698bd555cf9d49'};
+  return null;
+}
+export function preflightNodeRuntimeLicense(binaryPath, sourceDirectory) {
   const st = lstatSync(binaryPath);
-  if (!st.isFile() || st.isSymbolicLink() || !node267Builds.has(digest(readFileSync(binaryPath)))) {
+  const license = st.isFile() && !st.isSymbolicLink()
+    ? nodeRuntimeLicenseForSha(digest(readFileSync(binaryPath))) : null;
+  if (!license) {
     throw new Error('Node vendor build has no reviewed matching license carrier');
   }
   directory(sourceDirectory);
-  const raw = verified(join(sourceDirectory, 'Node-26.7.0-LICENSE.txt'),
-    'e991d81497a85bb24fc6bffae0a3637a6accd6c6bc5ce1f2c5698bd555cf9d49', 'Node-26.7.0-LICENSE.txt');
+  const raw = verified(join(sourceDirectory, license.name), license.sha256, license.name);
+  return raw;
+}
+
+export function validateStagedNodeLicense(destinationDirectory, expectedLicense) {
   if (existsSync(destinationDirectory)) directory(destinationDirectory);
   const target = join(destinationDirectory, 'node.LICENSE');
-  if (existsSync(target)) verified(target, digest(raw), 'node.LICENSE');
+  try { lstatSync(target); } catch (error) {
+    if (error.code === 'ENOENT') return;
+    throw error;
+  }
+  verified(target, digest(expectedLicense), 'node.LICENSE');
+}
+
+export function copyNodeRuntimeLicense(binaryPath, sourceDirectory, destinationDirectory) {
+  const raw = preflightNodeRuntimeLicense(binaryPath, sourceDirectory);
+  validateStagedNodeLicense(destinationDirectory, raw);
+  const target = join(destinationDirectory, 'node.LICENSE');
   mkdirSync(destinationDirectory, {recursive:true});
   if (!existsSync(target)) writeFileSync(target, raw, {flag:'wx',mode:0o644});
   verified(target,digest(raw),'node.LICENSE');

@@ -53,6 +53,7 @@ static struct {
   char net[20];
   char state[20];
   char page[12];
+  char agent[PET_P4_AGENT_MAX];
   int batt;
   int bars;
   int host;            /* 主机（PC）在线 0/1 */
@@ -172,6 +173,44 @@ static void draw_bars(int x, int y, int bars) {
   }
 }
 
+/* The panel font only needs stable, product-facing ASCII labels here.  Keep
+ * the protocol ID private so an unknown future channel cannot overflow the
+ * narrow side rail or render as missing glyphs. */
+static const char *agent_display_name(const char *agent) {
+  if (!agent || !agent[0]) return "WAITING";
+  if (!strcmp(agent, "codex")) return "CODEX";
+  if (!strcmp(agent, "claude-code")) return "CLAUDE";
+  if (!strcmp(agent, "openclaw")) return "OPENCLAW";
+  if (!strcmp(agent, "mimocode")) return "MIMOCODE";
+  if (!strcmp(agent, "deepseek-harness")) return "DEEPSEEK";
+  if (!strcmp(agent, "workbuddy")) return "WORKBUDDY";
+  return "AGENT";
+}
+
+static uint16_t agent_accent(const char *agent) {
+  if (!strcmp(agent ? agent : "", "codex")) return C_OK;
+  if (!strcmp(agent ? agent : "", "claude-code")) return C_ACCENT;
+  if (!strcmp(agent ? agent : "", "openclaw")) return C_KEY_BLUE;
+  if (!strcmp(agent ? agent : "", "deepseek-harness")) return C_KEY_YELLOW;
+  if (!strcmp(agent ? agent : "", "workbuddy")) return C_KEY_GREEN;
+  return C_DIM;
+}
+
+/* A compact neutral robot mark makes the followed channel scannable without
+ * pretending to reproduce third-party product logos. */
+static void draw_agent_badge(const char *agent) {
+  const int x = 14, y = 442;
+  const uint16_t accent = agent_accent(agent);
+  fill(14, 414, W - 28, 1, C_LINE);
+  text("AGENT", x, 423, C_DIM, 1);
+  frame(x + 1, y + 3, 25, 19, accent);
+  fill(x + 12, y, 3, 4, accent);       /* antenna */
+  fill(x + 5, y + 9, 4, 4, accent);    /* left eye */
+  fill(x + 18, y + 9, 4, 4, accent);   /* right eye */
+  fill(x + 9, y + 17, 9, 2, accent);   /* mouth */
+  text(agent_display_name(agent), x + 36, y + 5, C_TEXT, 1);
+}
+
 /* 按键行：方框直接填充物理键颜色（1红/2黄/3蓝/4绿，K/B 中性灰），
  * 框内是键名、右侧是用途与 GPIO 号。按下时方框反白（白底+键色字），
  * 用途文字提亮——按哪个键看哪个方框立刻反白，就是接线自检。 */
@@ -272,7 +311,7 @@ static const char *page_word(const pet_p4_runtime_state_t *st) {
 
 static void redraw(const char *clock, const char *date, const char *net,
                    const char *state, const char *page, int batt, int bars,
-                   int host_online, unsigned int keys) {
+                   int host_online, unsigned int keys, const char *agent) {
   fill(0, 0, W, H, C_BG);
 
   /* 精简版：只留时间/日期/网络/电量/按键。
@@ -352,6 +391,7 @@ static void redraw(const char *clock, const char *date, const char *net,
                  (keys & (1u << bits[i])) != 0);
   }
 
+  draw_agent_badge(agent);
   fill(0, H - 1, W, 1, C_LINE);
 }
 
@@ -402,6 +442,7 @@ void pet_p4_panel_chrome_tick(const pet_p4_runtime_state_t *state, unsigned long
   const char *word = state_word(state, connected);
   if (!connected) word = wifi_up ? "等待" : "断开";
   const char *page = page_word(state);
+  const char *agent = state->active_agent;
   const int batt = battery_percent(pet_p4_battery_millivolts());
   const int host_online = connected ? 1 : 0;
 
@@ -416,7 +457,7 @@ void pet_p4_panel_chrome_tick(const pet_p4_runtime_state_t *state, unsigned long
   if (strcmp(s_shown.clock, clock) == 0 && strcmp(s_shown.date, date) == 0 &&
       strcmp(s_shown.net, net) == 0 && strcmp(s_shown.state, word) == 0 &&
       strcmp(s_shown.page, page) == 0 && s_shown.batt == batt && s_shown.bars == bars &&
-      s_shown.host == host_online && s_shown.keys == keys) {
+      strcmp(s_shown.agent, agent) == 0 && s_shown.host == host_online && s_shown.keys == keys) {
     return;
   }
 
@@ -425,12 +466,13 @@ void pet_p4_panel_chrome_tick(const pet_p4_runtime_state_t *state, unsigned long
   snprintf(s_shown.net, sizeof(s_shown.net), "%s", net);
   snprintf(s_shown.state, sizeof(s_shown.state), "%s", word);
   snprintf(s_shown.page, sizeof(s_shown.page), "%s", page);
+  snprintf(s_shown.agent, sizeof(s_shown.agent), "%s", agent);
   s_shown.batt = batt;
   s_shown.bars = bars;
   s_shown.host = host_online;
   s_shown.keys = keys;
 
-  redraw(clock, date, net, word, page, batt, bars, host_online, keys);
+  redraw(clock, date, net, word, page, batt, bars, host_online, keys, agent);
   s_dirty = true;
 }
 

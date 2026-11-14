@@ -365,7 +365,13 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
         }
         if (rememberedHost) {
           const tcpStatus = normalizeUsbStatusPayload(
-            await invoke("usb_connect_tcp", { host: rememberedHost, port: 3333 }),
+            await invoke("usb_connect_tcp", {
+              host: rememberedHost,
+              port: 3333,
+              // The remembered IP is a locator, not an identity.  Do not
+              // silently attach this dashboard to a different board on LAN.
+              expectedBoardDeviceId: String(binding?.boardDeviceId || "").trim() || undefined,
+            }),
           );
           if (tcpStatus.connected) {
             connectedStatus = tcpStatus;
@@ -380,7 +386,7 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
     setUsb(nextUsb);
     if (!nextUsb.connected && lastError) throw lastError;
     return { devices: list, status: nextUsb };
-  }, []);
+  }, [binding?.boardDeviceId]);
 
   const currentDisplay = useMemo(
     () => deriveCurrentDisplay(agentAppearanceMap, enabledAgents, appearances, agentOptions),

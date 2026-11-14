@@ -87,6 +87,7 @@
       "../../integrations/dsh-hachimodock/profile-metadata-windows-acl.js": "dsh-bridge/profile-metadata-windows-acl.js",
       "../../integrations/dsh-hachimodock/profile-metadata-windows-acl.ps1": "dsh-bridge/profile-metadata-windows-acl.ps1",
       "../../licenses/Node-26.7.0-LICENSE.txt": "licenses/Node-26.7.0-LICENSE.txt",
+      "../../licenses/Node-26.7.0-darwin-arm64-LICENSE.txt": "licenses/Node-26.7.0-darwin-arm64-LICENSE.txt",
       "../../licenses/DESKTOP-RUNTIME-LICENSES.txt": "licenses/DESKTOP-RUNTIME-LICENSES.txt",
       "../../licenses/DESKTOP-RUNTIME-DEPENDENCIES.json": "licenses/DESKTOP-RUNTIME-DEPENDENCIES.json",
       "generated-runtime/node.LICENSE": "bridge/runtime/node.LICENSE"

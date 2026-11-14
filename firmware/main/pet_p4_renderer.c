@@ -3498,8 +3498,7 @@ static void main_compact_underlay_prepare(bool drew_asset, bool compact_requeste
   if (!compact_requested) pet_compact_underlay_forget(&g_main_compact_underlay);
 }
 
-/* round-8：草稿提示符号。设备字库没有 ↑ ↓ √ ×，用像素线段直接画：
- * 绿色「↑ + 勾」= 摇杆上发送；红色「↓ + 叉」= 摇杆下取消。 */
+/* The font lacks arrow glyphs, so draw the direction indicators directly. */
 static void draw_px_line(int x0, int y0, int x1, int y1, int thickness, uint16_t color) {
   int dx = x1 >= x0 ? x1 - x0 : x0 - x1;
   int dy = y1 >= y0 ? y1 - y0 : y0 - y1;
@@ -3517,29 +3516,26 @@ static void draw_px_line(int x0, int y0, int x1, int y1, int thickness, uint16_t
 
 static void draw_draft_glyphs(int x, int y, int h, int w) {
   if (!pet_p4_voice_ptt_draft_active()) return;
-  if (w < 120 || h < 24) return;
-  const uint16_t send = rgb565(20, 150, 90);
-  const uint16_t cancel = rgb565(196, 54, 48);
-  const int top = y + 8;
-  const int bottom = y + h - 8;
-
-  /* 屏幕是 90° 旋转的：逻辑 x 最大的一端显示在物理顶部。留出右上角
-   * 「•••」按钮（x+w-26）的空间，符号整体往中间偏 ~90px 避免重叠。
-   * 顺序按物理自上而下：先绿色 ↑勾（发送），再红色 ↓叉（取消）。 */
-  int ax = x + w - 116;
-  draw_px_line(ax, bottom, ax, top, 3, send);
-  draw_px_line(ax, top, ax - 8, top + 10, 3, send);
-  draw_px_line(ax, top, ax + 8, top + 10, 3, send);
-  draw_px_line(ax + 16, bottom - 4, ax + 22, bottom, 3, send);
-  draw_px_line(ax + 22, bottom, ax + 34, top + 4, 3, send);
-
-  /* 下：红色 ↓ + 叉（取消），在发送符号下方（逻辑 x 更小） */
-  int bx = x + w - 170;
-  draw_px_line(bx, top, bx, bottom, 3, cancel);
-  draw_px_line(bx, bottom, bx - 8, bottom - 10, 3, cancel);
-  draw_px_line(bx, bottom, bx + 8, bottom - 10, 3, cancel);
-  draw_px_line(bx - 30, top + 4, bx - 18, bottom - 4, 3, cancel);
-  draw_px_line(bx - 18, top + 4, bx - 30, bottom - 4, 3, cancel);
+  if (w < 320 || h < 36) return;
+  const uint16_t send = rgb565(24, 119, 77);
+  const uint16_t cancel = rgb565(83, 91, 87);
+  const int chip_w = 112, chip_h = 32, chip_y = y + 7;
+  /* Leave the status indicator clear; upper/right is the send action. */
+  const int send_x = x + w - 170;
+  const int cancel_x = send_x - chip_w - 10;
+  fill_round_rect(cancel_x, chip_y, chip_w, chip_h, 10, rgb565(232, 235, 231));
+  fill_round_rect(send_x, chip_y, chip_w, chip_h, 10, rgb565(211, 241, 223));
+  const int cy = chip_y + chip_h / 2;
+  int ax = send_x + 17;
+  draw_px_line(ax, cy + 6, ax, cy - 6, 2, send);
+  draw_px_line(ax, cy - 6, ax - 5, cy - 1, 2, send);
+  draw_px_line(ax, cy - 6, ax + 5, cy - 1, 2, send);
+  ax = cancel_x + 17;
+  draw_px_line(ax, cy - 6, ax, cy + 6, 2, cancel);
+  draw_px_line(ax, cy + 6, ax - 5, cy + 1, 2, cancel);
+  draw_px_line(ax, cy + 6, ax + 5, cy + 1, 2, cancel);
+  draw_text_line_vcenter("取消", cancel_x + 31, chip_y, chip_h, 72, cancel, 1, false);
+  draw_text_line_vcenter("发送", send_x + 31, chip_y, chip_h, 72, send, 1, false);
 }
 
 static void draw_bubble(const pet_p4_runtime_state_t *state,
@@ -3929,7 +3925,7 @@ static void render_component_center_page(bool loading) {
     }
   }
   fill_round_rect(24,435,592,34,14,panel);
-  draw_text_center("摇杆选择    确认键打开    全局键返回", 320, 444, 580, muted, 1);
+  draw_text_center("上下左右选择    按下打开    全局键返回", 320, 444, 580, muted, 1);
 }
 
 static void draw_connection_banner_pixels(const char *label,uint16_t dot) {
@@ -5662,16 +5658,13 @@ static int app_glyph_width(uint32_t cp,uint32_t next){
 static int app_text_width(const char *s,int px){
   int units=0;while(s&&*s){uint32_t cp=utf8_next(&s);units+=app_glyph_width(cp,utf8_peek(s));}return (units*px+16)/32;
 }
-static void app_text_bounds(const char *s,int *top,int *bottom){
-  bool found=false;
-  while(s&&*s){uint32_t cp=utf8_next(&s);int t=0,b=15;
-    int i;const pet_surface_font_t *f=app_font_glyph(cp,&i);
-    if(f){t=f->metrics[i][1];b=f->metrics[i][2];if(t==b)continue;}
-    else {if(pet_app_symbol_advance(cp))pet_app_symbol_bounds(cp,&t,&b);
-      else if(!glyph_visual_bounds(cp,utf8_peek(s),1,&t,&b))continue;t*=2;b=(b+1)*2;}
-    if(!found||t<*top)*top=t;if(!found||b>*bottom)*bottom=b;found=true;
-  }
-  if(!found){*top=0;*bottom=32;}
+static float app_font_cell_origin_y(float line_y,int px){
+  /* p4-app-type-v1 atlas builders paint glyphs at 7/8 of the cell height.
+   * Native fallback glyphs use the LVGL 16px baseline.  Put both on that
+   * same baseline so a missing atlas character cannot jump within a line. */
+  float fallback_baseline=(pet_p4_font_cn_16_a4.line_height-pet_p4_font_cn_16_a4.base_line)*px/16.0f;
+  float atlas_baseline=px*7.0f/8.0f;
+  return line_y+fallback_baseline-atlas_baseline;
 }
 static float app_font_sample(const pet_surface_font_t *f,int index,int x,int y){
   int cw=f->cell_w?f->cell_w:32,ch=f->cell_h?f->cell_h:32;
@@ -5733,13 +5726,14 @@ static void draw_app_glyph(uint32_t cp,uint32_t next,float x,float y,int px,uint
   int index;const pet_surface_font_t *font=app_font_glyph(cp,&index);
   if(font){
     float scale=px/(float)(font->cell_h?font->cell_h:32);
+    float glyph_y=app_font_cell_origin_y(y,px);
     int cw=font->cell_w?font->cell_w:32;
 #if PET_P4_GLYPH_PIXEL_FAST
     const uint8_t cr=((color>>11)&31)*255/31,cg=((color>>5)&63)*255/63,cb=(color&31)*255/31;
     const uint16_t opaque=rgb565(cr,cg,cb);
     int left=(int)floorf(x),right=(int)ceilf(x+cw*scale);
     glyph_pixel_bounds_t bounds;
-    if(!glyph_pixel_bounds(clip,left,right,(int)floorf(y),(int)ceilf(y+px),&bounds))return;
+    if(!glyph_pixel_bounds(clip,left,right,(int)floorf(glyph_y),(int)ceilf(glyph_y+px),&bounds))return;
     for(int tile=left;tile<right;tile+=PET_RASTER_AXIS_TILE){
       unsigned count=(unsigned)(right-tile);if(count>PET_RASTER_AXIS_TILE)count=PET_RASTER_AXIS_TILE;
       int c0=bounds.x0-tile,c1=bounds.x1-tile;if(c0<0)c0=0;if(c1>(int)count)c1=(int)count;
@@ -5747,7 +5741,7 @@ static void draw_app_glyph(uint32_t cp,uint32_t next,float x,float y,int px,uint
       g_glyph_sample_y=INT32_MIN;
       pet_raster_axis_prepare(g_glyph_axis,tile,count,x,scale);
       for(int yy=bounds.y0;yy<bounds.y1;yy++){
-        float sy=(yy+.5f-y)/scale-.5f;int iy=(int)floorf(sy);float fy=sy-iy;
+        float sy=(yy+.5f-glyph_y)/scale-.5f;int iy=(int)floorf(sy);float fy=sy-iy;
         if(cw<=64)app_prepare_glyph_rows(font,index,NULL,NULL,cw,iy);
         uint16_t *row=g_framebuffer+(size_t)yy*PET_P4_UI_WIDTH+tile;
         for(int col=c0;col<c1;col++){
@@ -5769,9 +5763,9 @@ static void draw_app_glyph(uint32_t cp,uint32_t next,float x,float y,int px,uint
 #endif
       unsigned count=(unsigned)(right-tile);if(count>PET_RASTER_AXIS_TILE)count=PET_RASTER_AXIS_TILE;
       pet_raster_axis_prepare(g_glyph_axis,tile,count,x,scale);
-      for(int yy=(int)floorf(y);yy<(int)ceilf(y+px);yy++){
+      for(int yy=(int)floorf(glyph_y);yy<(int)ceilf(glyph_y+px);yy++){
         if(yy<clip->y||yy>=clip->y+clip->h)continue;
-        float sy=(yy+.5f-y)/scale-.5f;int iy=(int)floorf(sy);float fy=sy-iy;
+        float sy=(yy+.5f-glyph_y)/scale-.5f;int iy=(int)floorf(sy);float fy=sy-iy;
 #if PET_P4_GLYPH_ROWS
         if(cw<=64)app_prepare_glyph_rows(font,index,NULL,NULL,cw,iy);
 #endif
@@ -5790,9 +5784,9 @@ static void draw_app_glyph(uint32_t cp,uint32_t next,float x,float y,int px,uint
     }
     return;
 #else
-    for(int yy=(int)floorf(y);yy<(int)ceilf(y+px);yy++)for(int xx=(int)floorf(x);xx<(int)ceilf(x+cw*scale);xx++){
+    for(int yy=(int)floorf(glyph_y);yy<(int)ceilf(glyph_y+px);yy++)for(int xx=(int)floorf(x);xx<(int)ceilf(x+cw*scale);xx++){
       if(xx<clip->x||yy<clip->y||xx>=clip->x+clip->w||yy>=clip->y+clip->h)continue;
-      float sx=(xx+.5f-x)/scale-.5f,sy=(yy+.5f-y)/scale-.5f;int ix=(int)floorf(sx),iy=(int)floorf(sy);float fx=sx-ix,fy=sy-iy;
+      float sx=(xx+.5f-x)/scale-.5f,sy=(yy+.5f-glyph_y)/scale-.5f;int ix=(int)floorf(sx),iy=(int)floorf(sy);float fx=sx-ix,fy=sy-iy;
       float a=(app_font_sample(font,index,ix,iy)*(1-fx)+app_font_sample(font,index,ix+1,iy)*fx)*(1-fy)+(app_font_sample(font,index,ix,iy+1)*(1-fx)+app_font_sample(font,index,ix+1,iy+1)*fx)*fy;
       if(clip->weight)a=fminf(255,a*1.15f);
       if(a>0)blend_px(xx,yy,((color>>11)&31)*255/31,((color>>5)&63)*255/63,(color&31)*255/31,(int)a);
@@ -5910,8 +5904,9 @@ static void draw_app_label(const pet_surface_node_t *n,const char *text,uint16_t
     int tw=app_text_width(rows[row],px),total=tw+(row==0?icon_space:0);
     int x=n->x+n->padding+(n->align==1?(n->w-2*n->padding-total)/2:n->align==2?n->w-2*n->padding-total:0);
     if(row==0&&icon_space){draw_app_icon(n->icon,x,n->y+(n->h-n->icon_size)/2,n->icon_size,color);x+=icon_space;}
-    int ink_top=0,ink_bottom=15;app_text_bounds(rows[row],&ink_top,&ink_bottom);
-    float yy=y+row*lh+(lh-(ink_bottom-ink_top)*px/32.0f)/2-ink_top*px/32.0f;
+    /* A line owns one cell origin.  Centering the actual ink here would make
+     * sibling labels move vertically when their characters or atlas change. */
+    float yy=y+row*lh+(lh-px)/2.0f;
     float xx=x;const char *p=rows[row];while(*p){uint32_t cp=utf8_next(&p),next=utf8_peek(p);draw_app_glyph(cp,next,xx,yy,px,color,n);xx+=app_glyph_width(cp,next)*px/32.0f;}
   }
 }
@@ -7522,7 +7517,7 @@ esp_err_t pet_p4_renderer_render(
     /* 语音草稿待确认窗口优先级最高：会话卡片会让 draw_bubble 不执行，
      * 导致识别文字和「↑√ / ↓×」提示都看不到。草稿期间强制走气泡路径。 */
     bool show_session_queue = !realtime && state && state->session_queue_count > 0
-      && !pet_p4_voice_ptt_draft_active();
+      && !pet_p4_voice_ptt_draft_active() && !(view && view->show_voice_notice);
     int64_t asset_started_us = esp_timer_get_time();
     bool drew_asset = component_media_idle&&render_asset_pet_frame(state, view, now_ms);
     if(drew_asset)g_main_appearance_ready=true;
@@ -7547,6 +7542,10 @@ esp_err_t pet_p4_renderer_render(
      * first decode is queued, retain the previous page without an early bubble. */
     if(g_main_appearance_ready){
       if (view && view->show_voice_overlay) draw_standalone_voice_overlay();
+      else if (view && view->show_voice_notice) {
+        if (!realtime) draw_session_queue(state, now_ms);
+        draw_bubble(state, view, now_ms);
+      }
       else if (pet_p4_voice_ptt_draft_active()) {
         /* 草稿窗口：先把会话卡片画掉（它只作为下层），再把草稿气泡画在
          * 最上层。这样既不会被卡片盖住，也顺带擦掉上一帧残留。 */

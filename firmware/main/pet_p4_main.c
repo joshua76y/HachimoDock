@@ -615,9 +615,12 @@ static void transport_audit_observe(pet_transport_audit_t *audit,const char *lin
 }
 
 static void transport_send_line_impl(const char *line, void *ctx, bool drain) {
-  pet_p4_transport_route_t route = ctx
+  /* TCP reply contexts are tagged generations, not pointers to this enum.
+   * Delayed producers may retain one, so detect it before any dereference. */
+  bool tcp_route = pet_p4_tcp_context_is_tcp(ctx);
+  pet_p4_transport_route_t route = ctx && !tcp_route
     ? *((const pet_p4_transport_route_t *) ctx)
-    : PET_P4_TRANSPORT_BROADCAST;
+    : (tcp_route ? PET_P4_TRANSPORT_TCP : PET_P4_TRANSPORT_BROADCAST);
   if (!line) return;
 #if PET_P4_NATIVE_WORK_WINDOW
   bool work_window=false;
@@ -719,7 +722,10 @@ static void transport_send_line_impl(const char *line, void *ctx, bool drain) {
       usb_queue_all("\n", 1, NULL);
     }
   }
-  if (route == PET_P4_TRANSPORT_BROADCAST) {
+  if (route == PET_P4_TRANSPORT_TCP) {
+    /* A stale bubble/cache request must never be delivered to a successor. */
+    if (pet_p4_tcp_context_is_current(ctx)) pet_p4_tcp_broadcast_line(line);
+  } else if (route == PET_P4_TRANSPORT_BROADCAST) {
     pet_p4_native_usb_send_json_line(line, NULL);
     if (observing) transport_audit_observe(audit,line, PET_TRANSPORT_AUDIT_NATIVE_USB, audited_bytes,
       fingerprint, hash_available, NULL, NULL);
@@ -1577,6 +1583,9 @@ static void protocol_worker_task(void *arg) {
     /* Retired ordinary native JSON must not reach debug/trace/state dispatch. */
     if (request.send_line == pet_p4_native_usb_send_json_line
         && !pet_p4_native_usb_route_current(request.reply_ctx)) {
+      free(request.line); continue;
+    }
+    if (!pet_p4_tcp_request_current(request.send_line, request.reply_ctx)) {
       free(request.line); continue;
     }
 #if PET_P4_QUERY_REPLY_TRACE

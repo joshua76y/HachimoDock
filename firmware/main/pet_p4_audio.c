@@ -2,7 +2,6 @@
 #include "pet_p4_audio.h"
 #include "pet_p4_sound_catalog.h"
 #include "pet_p4_voice_ptt.h"
-#include "pet_p4_voice_wifi.h"
 #include "pet_p4_audio_volume.h"
 #include "pet_p4_fs_activity.h"
 #include "pet_p4_instrument_core.h"
@@ -423,6 +422,9 @@ static void send_audio_error(const char *session_id, const char *code, const cha
 
 static void send_audio_begin(const char *session_id, bool session_queue_empty, const char *owner) {
   pet_p4_audio_diagnostic("capture_started", session_id, 0, true);
+  /* Local PTT uploads its complete WAV separately. Advertising a PCM begin
+   * without any matching chunks causes the desktop relay to reject it. */
+  if (owner && strcmp(owner, "ptt-local") == 0) return;
   cJSON *payload = cJSON_CreateObject();
   cJSON_AddStringToObject(payload, "sessionId", session_id);
   cJSON_AddStringToObject(payload,"captureOwner",owner);
@@ -439,8 +441,6 @@ static void send_audio_begin(const char *session_id, bool session_queue_empty, c
   send_topic("audio/begin", payload);
 }
 
-static bool s_wifi_tried;
-
 static bool send_audio_chunk(
   const char *session_id,
   uint32_t sequence,
@@ -456,15 +456,9 @@ static bool send_audio_chunk(
     pet_p4_voice_ptt_feed(pcm, pcm_len);
     return true;
   }
-  /* 第二条通路：Wi-Fi 裸 PCM。没配主机地址时保持原样走 USB。 */
-  if (!pet_p4_voice_wifi_active() && !s_wifi_tried) {
-    s_wifi_tried = true;
-    pet_p4_voice_wifi_start_configured();
-  }
-  if (pet_p4_voice_wifi_active()) {
-    pet_p4_voice_wifi_push(pcm, pcm_len);
-    return true;
-  }
+  /* The control connection may be UART, USB or TCP. Keep PCM on the same
+   * session-aware protocol as audio/begin/end so the desktop can validate and
+   * deliver it; the old side-channel receiver only wrote a diagnostic file. */
   char encoded[((PET_P4_AUDIO_FRAME_BYTES + 2) / 3) * 4 + 1];
   char checksum_hex[17];
   size_t encoded_len = 0;
@@ -500,8 +494,11 @@ static void send_audio_end(
   char checksum_hex[17];
   uint64_t bytes_per_second = PET_P4_AUDIO_SAMPLE_RATE * PET_P4_AUDIO_CHANNELS
     * (PET_P4_AUDIO_BITS_PER_SAMPLE / 8);
-  /* 本地 PTT：此刻缓冲已收完整，交给 PTT 模块提交（内部判断 capturing） */
-  pet_p4_voice_ptt_notify_end();
+  const bool clean = !reason || !strcmp(reason, "released") || !strcmp(reason, "timeout");
+  const bool local_ptt = pet_p4_voice_ptt_capturing();
+  if (clean) pet_p4_voice_ptt_notify_end();
+  else pet_p4_voice_ptt_abort();
+  if (local_ptt) return;
   snprintf(checksum_hex, sizeof(checksum_hex), "%016llx", (unsigned long long) checksum);
   cJSON *payload = cJSON_CreateObject();
   cJSON_AddStringToObject(payload, "sessionId", session_id);
@@ -1166,7 +1163,7 @@ static void audio_task(void *arg) {
       if (tx_us > atomic_load(&g_capture_tx_max_us)) atomic_store(&g_capture_tx_max_us, tx_us);
       if (!sent) {
         reason = "encode_error";
-        send_audio_error(session_id, "base64_failed", "PCM frame encoding failed");
+        send_audio_error(session_id, "capture_transport_failed", "PCM frame encoding or transmission failed");
         capture_worker_cancel(capture_work);
         break;
       }

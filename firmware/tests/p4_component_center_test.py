@@ -5,6 +5,7 @@ This is not a hardware display, serial or audio acceptance test.
 """
 from pathlib import Path
 import json
+import re
 import subprocess
 import tempfile
 
@@ -106,6 +107,44 @@ def test_center_hit_targets_and_partial_page_navigation(tmp_path):
     subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-I',str(ROOT/'main'),
         str(ROOT/'tests/p4_center_layout_test.c'),'-o',str(binary)],check=True)
     subprocess.run([str(binary)],check=True)
+
+
+def test_only_pet_home_allows_custom_joystick_bindings():
+    """All non-home pages must consume native stick input before bindings.
+
+    Bindings still own normal pages/apps, but the launcher has a fixed
+    two-column UI and a component owns its original four-way/press controls.
+    """
+    source = (ROOT / "main/pet_p4_input.c").read_text()
+    assert '#include "pet_p4_center_layout.h"' in source
+    for joystick, grid in (
+        ("PET_P4_JOYSTICK_UP", "PET_CENTER_DIRECTION_UP"),
+        ("PET_P4_JOYSTICK_DOWN", "PET_CENTER_DIRECTION_DOWN"),
+        ("PET_P4_JOYSTICK_LEFT", "PET_CENTER_DIRECTION_LEFT"),
+        ("PET_P4_JOYSTICK_RIGHT", "PET_CENTER_DIRECTION_RIGHT"),
+    ):
+        assert re.search(rf"case {joystick}:.*?\*direction = {grid};", source, re.S)
+    assert "move_component_catalog_direction(joystick_direction)" in source
+    component_page = source.rindex('strcmp(state->screen_page, "components") == 0)')
+    assert source.find("bool moved = move_component_catalog_direction(joystick_direction);", component_page) >= 0
+    assert "native_joystick_event(event_name)" in source
+    assert "joystick_launch_event(event_name)" in source
+    native_dispatch = source.index("native_joystick_event(event_name)")
+    global_dispatch = source.index("const pet_p4_input_binding_t *global_exit")
+    assert native_dispatch < global_dispatch
+    assert '|| strcmp(state->screen_page, "main") == 0) return false;' in source
+    assert "if(side_input)pet_p4_miniapp_side_axis(side_direction);" in source
+    assert re.search(
+        r"if\(repeated&&state&&!strcmp\(state->screen_page,\"app\"\)"
+        r"&& !native_joystick_event\(event_name\)",
+        source,
+    )
+    assert re.search(
+        r"strcmp\(prefix, \"button\.k\"\) == 0\) \{\n"
+        r"\s*snprintf\(event_name, sizeof\(event_name\), \"%s\.hold\", prefix\);\n"
+        r"\s*dispatch_binding_event\(\s*state,",
+        source,
+    )
 
 
 def preview(path):

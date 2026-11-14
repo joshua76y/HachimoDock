@@ -57,7 +57,7 @@ def test_home_back_stops_music_but_navigation_and_realtime_keep_priority(tmp_pat
 #include <stdio.h>
 #include <string.h>
 typedef struct { char screen_page[24]; unsigned long long last_update_ms; } pet_p4_runtime_state_t;
-typedef struct { char action[40]; } pet_p4_input_binding_t;
+typedef struct { char event[40],action[40],value[40]; } pet_p4_input_binding_t;
 typedef struct { unsigned long long ts_ms; } pet_p4_input_event_t;
 typedef void (*pet_p4_send_line_fn)(const char *,void *);
 static pet_p4_input_binding_t configured;
@@ -67,6 +67,10 @@ static const pet_p4_input_binding_t *active_binding(const char *event) {
   return !strcmp(event,"button.sw1.long_press") ? &configured : NULL;
 }
 static bool pet_p4_conversation_active(pet_p4_runtime_state_t *s){(void)s;return conversation;}
+static bool pet_p4_voice_ptt_draft_active(void){return false;}
+static const char *voice_draft_action_for_event(const char *event){(void)event;return NULL;}
+static bool native_joystick_event(const char *event){(void)event;return false;}
+static bool dispatch_native_joystick_event(pet_p4_runtime_state_t *s,pet_p4_send_line_fn f,void *ctx,const pet_p4_input_event_t *e,const char *n,const char *g){(void)s;(void)f;(void)ctx;(void)e;(void)n;(void)g;return false;}
 static void copy_text(char *out,size_t n,const char *s){snprintf(out,n,"%s",s);}
 static void pet_p4_conversation_move(pet_p4_runtime_state_t *s,int d,unsigned long long t){(void)s;(void)d;(void)t;}
 static void send_ignored_component_event(pet_p4_runtime_state_t *s,pet_p4_send_line_fn f,void *ctx,const pet_p4_input_event_t *e,const char *n,const char *g){(void)s;(void)f;(void)ctx;(void)e;(void)n;(void)g;}

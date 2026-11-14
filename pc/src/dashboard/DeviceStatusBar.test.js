@@ -1,6 +1,6 @@
 /**
  * [Input] Read DeviceStatusBar.jsx source.
- * [Output] Static Node coverage that the P4 status bar reads from useDeviceContext, renders board id + USB state only, exposes manual USB serial rescan, and uses the documented class names.
+ * [Output] Static Node coverage that the P4 status bar renders a verified transport state, exposes manual USB rescan plus identity-scoped Wi-Fi switching, and uses the documented class names.
  * [Pos] test node in pc/src/dashboard
  * [Sync] If this file changes, update `pc/src/dashboard/.folder.md`.
  */
@@ -18,9 +18,8 @@ test("DeviceStatusBar exports a default React component", () => {
   assert.match(source, /export default function DeviceStatusBar\s*\(/);
 });
 
-test("DeviceStatusBar consumes useDeviceContext (no local polling)", () => {
+test("DeviceStatusBar consumes useDeviceContext without local status polling", () => {
   assert.match(source, /useDeviceContext\(/);
-  assert.doesNotMatch(source, /invoke\(/);
   assert.doesNotMatch(source, /usb_get_status/);
   assert.doesNotMatch(source, /check_device_availability/);
 });
@@ -31,11 +30,20 @@ test("DeviceStatusBar exposes a manual USB serial rescan button", () => {
   assert.match(source, /handleRescanUsb/);
 });
 
-test("DeviceStatusBar renders verified USB state without WiFi status", () => {
-  assert.match(source, /usbChip/);
-  assert.match(source, /USB 直连/);
+test("DeviceStatusBar renders the verified current transport", () => {
+  assert.match(source, /connectionChip/);
+  assert.match(source, /connectionLabel/);
   assert.match(source, /dashboard-status-bar__chips/);
   assert.doesNotMatch(source, /wifiOnline|wifiChip|WiFi 在线|WiFi 离线/);
+});
+
+test("DeviceStatusBar switches Wi-Fi only after the bound board identity is checked", () => {
+  assert.match(source, /invoke\("usb_connect_tcp"/);
+  assert.match(source, /expectedBoardDeviceId: boardDeviceId/);
+  assert.match(source, /status\?\.boardDeviceId !== boardDeviceId/);
+  assert.match(source, /invoke\("save_device_binding"/);
+  assert.match(source, /transport: "tcp"/);
+  assert.match(source, /aria-label="设备 Wi-Fi 地址"/);
 });
 
 test("DeviceStatusBar reads the board id and tolerates the legacy USB port field", () => {
@@ -48,4 +56,5 @@ test("DeviceStatusBar uses the documented class names", () => {
   assert.match(source, /className="dashboard-status-bar/);
   assert.match(source, /dashboard-status-bar__chip/);
   assert.match(source, /dashboard-status-bar__scan-btn/);
+  assert.match(source, /dashboard-status-bar__wifi/);
 });

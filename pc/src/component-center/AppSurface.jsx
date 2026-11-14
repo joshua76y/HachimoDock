@@ -5,7 +5,7 @@ import React,{useEffect,useLayoutEffect,useId,useState,useMemo,useRef,useCallbac
 import {rgb565} from "./media-surface-model.js";
 import {initialApp,appAction,appAdvance,appDashboard,appPage,appVisible,appTile,appNodeValue,appNodeMeter} from "./app-runtime.js";
 import icons from "./app-icons.json";
-import {glyphs,keyHint} from './app-typography.js';
+import {glyphCellTop,glyphs,keyHint} from './app-typography.js';
 import {ClassicGameLayer} from './ClassicGameLayer.jsx';
 import {createClassicCore} from './classic-core.js';
 import classicUrl from './classic-core.wasm?url';
@@ -51,10 +51,9 @@ function wrap(text,width,size,max,weight,atlas){
   }return [...rows,line].slice(0,max);
 }
 function Icon({name,x,y,size,color}){return <g transform={`translate(${x} ${y}) scale(${size/24})`} fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{icons[name]?.map((points,i)=><polyline key={i} points={points.map(p=>p.join(",")).join(" ")}/>)}</g>;}
-function AtlasLine({text,atlas,x,y,size,color,weight,id}){
-  const scale=size/32,characters=[...text],bounds=characters.map(c=>atlas.get(c)?.metrics).filter(m=>m&&m[1]!==m[2]);
-  const top=bounds.length?Math.min(...bounds.map(m=>m[1])):0,bottom=bounds.length?Math.max(...bounds.map(m=>m[2])):32;
-  const gy=y-(bottom-top)*scale/2-top*scale;let pen=x;
+function AtlasLine({text,atlas,x,y,cellTop,size,color,weight,id}){
+  const scale=size/32,characters=[...text];
+  const gy=cellTop;let pen=x;
   return characters.map((c,i)=>{const g=atlas.get(c),at=pen;pen+=measure(c,size,weight,atlas);
     if(!g)return <text key={i} x={at} y={y} dominantBaseline="central" fill={color} fontSize={size} fontWeight={weight} fontFamily={fontFamily}>{c}</text>;
     const key=`${id}-${i}`;
@@ -71,8 +70,8 @@ function GraphicLabel({node:n,value,atlas}){
   const rows=n._flowLine?[String(value??'')]:wrap(value,width,size,button?1:Math.max(1,Math.min(8,Math.floor(n.h/lh))),weight,atlas);
   const va=n.valign||(button?"center":"top"),align=n.align||(button?"center":"left"),block=rows.length*lh;
   const y=n.y+(va==="center"?(n.h-block)/2:va==="bottom"?n.h-block:0),color=rgb565(button?(n.foreground??n.color):n.color);
-  return rows.map((row,i)=>{const textWidth=measure(row,size,weight,atlas),total=textWidth+(i===0?iw:0),x=n.x+pad+(align==="center"?(n.w-2*pad-total)/2:align==="right"?n.w-2*pad-total:0),tx=x+(i===0?iw:0),ty=y+i*lh+lh/2;
-    return <g key={i} data-label={row}>{i===0&&iw>0&&<Icon name={n.icon} x={x} y={n.y+(n.h-isz)/2} size={isz} color={color}/>}<rect data-text-box x={tx} y={ty-size/2} width={textWidth} height={size} fill="transparent"/><title>{row}</title>{atlas?.size?<AtlasLine text={row} atlas={atlas} x={tx} y={ty} size={size} color={color} weight={weight} id={`${id}-${i}`}/>:<text x={tx} y={ty} dominantBaseline="central" fill={color} fontSize={size} fontWeight={weight} fontFamily={fontFamily}>{row}</text>}</g>;
+  return rows.map((row,i)=>{const textWidth=measure(row,size,weight,atlas),total=textWidth+(i===0?iw:0),x=n.x+pad+(align==="center"?(n.w-2*pad-total)/2:align==="right"?n.w-2*pad-total:0),tx=x+(i===0?iw:0),lineY=y+i*lh,ty=lineY+lh/2,cellTop=glyphCellTop(lineY,lh,size);
+    return <g key={i} data-label={row}>{i===0&&iw>0&&<Icon name={n.icon} x={x} y={n.y+(n.h-isz)/2} size={isz} color={color}/>}<rect data-text-box x={tx} y={ty-size/2} width={textWidth} height={size} fill="transparent"/><title>{row}</title>{atlas?.size?<AtlasLine text={row} atlas={atlas} x={tx} y={ty} cellTop={cellTop} size={size} color={color} weight={weight} id={`${id}-${i}`}/>:<text x={tx} y={ty} dominantBaseline="central" fill={color} fontSize={size} fontWeight={weight} fontFamily={fontFamily}>{row}</text>}</g>;
   });
 }
 

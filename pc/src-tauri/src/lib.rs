@@ -158,6 +158,7 @@ mod device_voice_bridge;
 mod local_asr;
 mod local_tts;
 mod prompt_sounds;
+#[cfg(test)]
 mod voice_wifi;
 mod volcengine_asr;
 
@@ -687,9 +688,13 @@ fn agent_uses_visible_composer(agent_id: &str) -> bool {
 }
 
 fn agent_streams_voice_draft(agent_id: &str) -> bool {
-    // Rich-text desktop editors use one final insertion, preserving the same
-    // draft and selection rather than pasting every ASR hypothesis.
-    agent_uses_visible_composer(agent_id) && !matches!(agent_id, "workbuddy" | "deepseek-harness")
+    agent_uses_visible_composer(agent_id)
+        && !device_uses_joystick_confirmation(agent_id)
+        && agent_id != "deepseek-harness"
+}
+
+fn device_uses_joystick_confirmation(agent_id: &str) -> bool {
+    matches!(agent_id, "workbuddy" | "codex" | "claude-code")
 }
 
 fn device_voice_platform_block_reason(agent_id: &str, is_macos: bool) -> Option<&'static str> {
@@ -827,6 +832,7 @@ async fn write_workbuddy_voice_test_draft(text: String, app: tauri::AppHandle) -
         latest_confidence: Mutex::new(None),
         streaming_error: Mutex::new(String::new()),
         composer_error: Mutex::new(String::new()),
+        composer_display_only: AtomicBool::new(false),
         composer_visible: AtomicBool::new(false),
         recognizer: Mutex::new(DeviceVoiceInput::default()),
         composer: Mutex::new(None),
@@ -932,6 +938,7 @@ struct DeviceVoiceContext {
     latest_confidence: Mutex<Option<f64>>,
     streaming_error: Mutex<String>,
     composer_error: Mutex<String>,
+    composer_display_only: AtomicBool,
     composer_visible: AtomicBool,
     recognizer: Mutex<DeviceVoiceInput>,
     composer: Mutex<Option<codex_composer::CodexComposerBridge>>,
@@ -1727,6 +1734,54 @@ fn finalize_device_voice_final(
         }
     }
 
+    if context.composer_display_only.load(Ordering::SeqCst) {
+        let manager = context.emitter.state::<usb_serial::UsbSerialManager>();
+        let sent = context.connection_id.parse::<u64>().ok().is_some_and(|generation|
+            manager.send_voice_notice_for_connection(&context.board_device_id, generation,
+                &context.boot_id, &display_only_voice_notice(&text, &context.target.agent_id,
+                    &context.target.session_id)).is_ok());
+        realtime_chat_log::record(&context.utterance_id, "device_voice_timing",
+            serde_json::json!({"stage":"display_only_notice","ok":sent}));
+        let error = context.composer_error.lock().map(|v| v.clone()).unwrap_or_default();
+        report_device_voice_delivery_failure(&context, revision, &text, &error,
+            "识别文字仅显示在设备上，WorkBuddy 输入框不可用，本次未发送", "VISIBLE_COMPOSER_UNAVAILABLE");
+        return;
+    }
+
+    // Do not write the editor until this capture is confirmed on the device.
+    if device_uses_joystick_confirmation(&context.target.agent_id) {
+        if !workbuddy_device_draft_fits(&text) || crate::device_voice_bridge::current_draft().is_some()
+            || !context.composer.lock().is_ok_and(|slot| slot.is_some()) {
+            let manager = context.emitter.state::<usb_serial::UsbSerialManager>();
+            if let Ok(generation) = context.connection_id.parse::<u64>() {
+                let _ = manager.send_voice_notice_for_connection(&context.board_device_id, generation,
+                    &context.boot_id, &display_only_voice_notice("草稿过长或目标不可用，请缩短后重录", &context.target.agent_id, ""));
+            }
+            report_device_voice_delivery_failure(&context, revision, &text,
+                "设备草稿不可安全显示或目标输入框不可用", "未发送，请缩短语音或检查目标输入框", "VOICE_DRAFT_UNAVAILABLE");
+            return;
+        }
+        if !device_voice_finalization_target_is_current(&context, "voice target changed before device draft") { return; }
+        if let Err(error) = publish_workbuddy_device_draft(&context, true, &text) {
+            report_device_voice_delivery_failure(&context, revision, &text, &error,
+                "设备未确认草稿显示，本次未发送", "VOICE_DRAFT_UNAVAILABLE");
+            return;
+        }
+        context.draft_ready.store(true, Ordering::SeqCst);
+        emit_device_voice_transcript(&context, "draft_ready", revision, &text, true, true, "");
+        let expiry_context = context.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs(175));
+            if expiry_context.draft_submit_requested.swap(true, Ordering::SeqCst) { return; }
+            if active_device_voice_context().lock().is_ok_and(|active|
+                active.as_ref().is_some_and(|current| Arc::ptr_eq(current, &expiry_context))) {
+                let _ = publish_workbuddy_device_draft(&expiry_context, false, "");
+                cancel_device_voice_context(&expiry_context, "语音草稿已过期");
+            }
+        });
+        return;
+    }
+
     let composer_update = context.composer.lock().ok().and_then(|composer| {
         composer
             .as_ref()
@@ -1868,6 +1923,81 @@ fn input_event_confirms_device_voice_draft(
     )
 }
 
+fn workbuddy_device_draft_decision(topic: &str, payload: &serde_json::Value,
+    board: &str, ready: bool) -> Option<bool> {
+    if !ready || topic != "input/event" || board.is_empty()
+        || payload["boardDeviceId"].as_str() != Some(board)
+        || payload["handledLocally"].as_bool() != Some(false) { return None; }
+    match (payload["event"].as_str(), payload["action"].as_str()) {
+        (Some("joystick.up"), Some("voice_draft_send")) => Some(true),
+        (Some("joystick.down"), Some("voice_draft_cancel")) => Some(false),
+        _ => None,
+    }
+}
+
+// The P4 draft card renders two lines, not a scrolling transcript. Restrict
+// input conservatively so a user never confirms a silently clipped sentence.
+fn workbuddy_device_draft_fits(text: &str) -> bool {
+    !text.is_empty() && text.len() < 256 && text.chars().count() <= 40
+        && !text.chars().any(char::is_control)
+}
+
+fn publish_workbuddy_device_draft(context: &DeviceVoiceContext, active: bool, text: &str) -> Result<(), String> {
+    let generation = context.connection_id.parse::<u64>().map_err(|_| "设备连接代次不可用")?;
+    let manager = context.emitter.state::<usb_serial::UsbSerialManager>();
+    manager.send_voice_draft_for_connection(&context.board_device_id, generation, &context.boot_id,
+        &serde_json::json!({"active":active, "text":text, "agentId":context.target.agent_id}))
+}
+
+fn try_workbuddy_device_draft_gesture(topic: &str, payload: &serde_json::Value) -> bool {
+    let Some(context) = active_device_voice_context().lock().ok().and_then(|v| v.clone()) else { return false; };
+    if !device_uses_joystick_confirmation(&context.target.agent_id) { return false; }
+    let Some(send) = workbuddy_device_draft_decision(topic, payload, &context.board_device_id,
+        context.draft_ready.load(Ordering::SeqCst) && !context.cancelled.load(Ordering::SeqCst)) else {
+        // A page-enter event must never fall through to the legacy confirmation
+        // handler while this device uses the joystick confirmation flow.
+        return topic == "input/event" && payload["boardDeviceId"].as_str() == Some(&context.board_device_id)
+            && payload["action"].as_str() == Some("page_enter");
+    };
+    if context.draft_submit_requested.swap(true, Ordering::SeqCst) { return true; }
+    thread::spawn(move || {
+        if !active_device_voice_context().lock().is_ok_and(|active|
+            active.as_ref().is_some_and(|current| Arc::ptr_eq(current, &context))) { return; }
+        let _ = publish_workbuddy_device_draft(&context, false, "");
+        if !send {
+            cancel_device_voice_context(&context, "设备取消语音草稿");
+            return;
+        }
+        if !device_voice_target_is_current(&context) {
+            cancel_device_voice_context(&context, "语音目标已变化，未发送");
+            return;
+        }
+        let revision = context.latest_revision.load(Ordering::SeqCst);
+        let text = context.latest_text.lock().map(|v| v.clone()).unwrap_or_default();
+        let result = (|| -> Result<VisibleComposerSubmitOutcome, String> {
+            if text.trim().is_empty() { return Err("语音草稿为空".into()); }
+            let composer = context.composer.lock().map_err(|_| "输入框状态不可用")?;
+            let bridge = composer.as_ref().ok_or("目标输入框不可用")?;
+            bridge.update_confirmed(revision, &text)?;
+            if !device_voice_target_is_current(&context) { return Err("语音目标已变化，未发送".into()); }
+            Ok(classify_visible_composer_submit(bridge.confirm(revision, &text)
+                .wait(VISIBLE_COMPOSER_START_TIMEOUT, VISIBLE_COMPOSER_SUBMIT_TIMEOUT)))
+        })();
+        match result {
+            Ok(VisibleComposerSubmitOutcome::Submitted) if device_voice_target_is_current(&context) => {
+                emit_device_voice_transcript(&context, "submitted", revision, &text, true, true, "");
+                complete_device_voice_context(&context);
+            }
+            Ok(VisibleComposerSubmitOutcome::Submitted) => cancel_device_voice_context(&context, "发送后目标已变化，未重试"),
+            Ok(VisibleComposerSubmitOutcome::ExplicitFailure(error)) | Err(error) =>
+                report_device_voice_delivery_failure(&context, revision, &text, &error, "语音发送失败，未自动重试", "VISIBLE_COMPOSER_FAILED"),
+            Ok(VisibleComposerSubmitOutcome::Unconfirmed(error)) =>
+                report_device_voice_delivery_failure(&context, revision, &text, &error, "语音发送结果未确认，未自动重试", "VISIBLE_COMPOSER_UNCONFIRMED"),
+        }
+    });
+    true
+}
+
 fn confirm_pending_device_voice_draft(topic: &str, payload: &serde_json::Value) -> bool {
     let context = active_device_voice_context()
         .lock()
@@ -1876,6 +2006,7 @@ fn confirm_pending_device_voice_draft(topic: &str, payload: &serde_json::Value) 
     let Some(context) = context else {
         return false;
     };
+    if device_uses_joystick_confirmation(&context.target.agent_id) { return false; }
     if payload.get("voiceUtteranceId").and_then(serde_json::Value::as_str)
         .is_some_and(|id| id != context.utterance_id) { return false; }
     if !context.draft_ready.load(Ordering::SeqCst)
@@ -2155,9 +2286,46 @@ fn visible_composer_startup_is_target_changed(error: &str) -> bool {
     error == "DESKTOP_TASK_TARGET_CHANGED" || error.starts_with("DESKTOP_TASK_TARGET_CHANGED:")
 }
 
+fn composer_startup_failure_kind(error: &str) -> &'static str {
+    if visible_composer_startup_is_target_changed(error) { return "target_changed"; }
+    if let Some(count) = error.split("实际找到 ").nth(1)
+        .and_then(|tail| tail.split_whitespace().next())
+        .and_then(|value| value.parse::<usize>().ok()) {
+        return if count == 0 { "no_composer" } else if count > 1 { "multiple_composers" } else { "other" };
+    }
+    if error.contains("输入框内容仍在变化") || error.contains("输入框仍在恢复") {
+        "composer_changed"
+    } else if error.contains("激活") || error.contains("前台") {
+        "foreground_unavailable"
+    } else if error.contains("辅助功能") {
+        "accessibility_unavailable"
+    } else {
+        "other"
+    }
+}
+
+fn allow_display_only_composer_failure(agent: &str, error: &str) -> bool {
+    agent_uses_visible_composer(agent) && !visible_composer_startup_is_target_changed(error)
+}
+
+fn display_only_voice_notice(text: &str, agent: &str, session: &str) -> serde_json::Value {
+    serde_json::json!({"displayTitle":"识别结果（未发送）", "displayContent":text,
+        "status":"done", "statusText":"未发送", "agentId":agent, "sessionId":session,
+        "voiceNotice":true})
+}
+
 fn fail_visible_composer_startup(context: &Arc<DeviceVoiceContext>, error: &str) {
+    realtime_chat_log::record(&context.utterance_id, "device_voice_timing",
+        serde_json::json!({"stage":"composer_failure", "ok":false,
+            "errorKind":composer_startup_failure_kind(error)}));
     if visible_composer_startup_is_target_changed(error) {
         cancel_device_voice_context(context, error);
+        return;
+    }
+    if allow_display_only_composer_failure(&context.target.agent_id, error)
+        && context.lifecycle.admission_open() && !context.cancelled.load(Ordering::SeqCst) {
+        if let Ok(mut slot) = context.composer_error.lock() { *slot = error.into(); }
+        context.composer_display_only.store(true, Ordering::SeqCst);
         return;
     }
     let won = context.lifecycle.stop_once(device_voice_lifecycle::StopReason::DeliveryError(error.into()));
@@ -2223,6 +2391,7 @@ fn start_device_voice_context(
         latest_confidence: Mutex::new(None),
         streaming_error: Mutex::new(String::new()),
         composer_error: Mutex::new(String::new()),
+        composer_display_only: AtomicBool::new(false),
         composer_visible: AtomicBool::new(false),
         recognizer: Mutex::new(DeviceVoiceInput::default()),
         composer: Mutex::new(None),
@@ -2284,6 +2453,11 @@ fn start_device_voice_context(
                 return;
             }
             if let Some(previous) = previous {
+                // The new round owns the board now; remove the previous modal
+                // before beginning recognition so its controls cannot be reused.
+                if device_uses_joystick_confirmation(&previous.target.agent_id) && previous.draft_ready.load(Ordering::SeqCst) {
+                    let _ = publish_workbuddy_device_draft(&previous, false, "");
+                }
                 if let Err(error) = finish_stopping_device_voice_context(
                     &previous, "superseded by a new device recording", false)
                 {
@@ -2308,14 +2482,14 @@ fn device_voice_round_is_current(context: &Arc<DeviceVoiceContext>) -> bool {
         && device_voice_target_is_current(context)
 }
 
-fn arm_device_voice_finish_timeout(context: &Arc<DeviceVoiceContext>) {
+fn arm_device_voice_finish_timeout(context: &Arc<DeviceVoiceContext>, timeout: Duration) {
     let timeout_context = context.clone();
     thread::spawn(move || {
-        thread::sleep(Duration::from_secs(9));
+        thread::sleep(timeout);
         if !timeout_context.final_handled.load(Ordering::SeqCst)
             && !timeout_context.cancelled.load(Ordering::SeqCst)
         {
-            fail_device_voice_context(&timeout_context, "等待火山引擎云端识别最终文本超时");
+            fail_device_voice_context(&timeout_context, "等待语音识别最终文本超时");
         }
     });
 }
@@ -2644,12 +2818,12 @@ fn continue_device_voice_context_start(context: Arc<DeviceVoiceContext>, agent_i
                 }
                 return;
             }
-            let installed = (|| -> Result<bool, String> {
+            let installed = (|| -> Result<Option<Duration>, String> {
                 let mut input = context.recognizer.lock().map_err(|_| "语音输入队列不可用".to_string())?;
                 if input.closed || context.cancelled.load(Ordering::SeqCst)
                     || context.final_handled.load(Ordering::SeqCst) {
                     recognizer.cancel();
-                    return Ok(false);
+                    return Ok(None);
                 }
                 input.recognizer = Some(recognizer);
                 // Publishing and draining use the same mutex as live pushes
@@ -2657,19 +2831,21 @@ fn continue_device_voice_context_start(context: Arc<DeviceVoiceContext>, agent_i
                 let pending = std::mem::take(&mut input.pending_pcm);
                 input.pending_bytes = 0;
                 for pcm in pending {
-                    if context.cancelled.load(Ordering::SeqCst) { input.discard(); return Ok(false); }
+                    if context.cancelled.load(Ordering::SeqCst) { input.discard(); return Ok(None); }
                     input.recognizer.as_ref().unwrap().push_pcm(&pcm)?;
                 }
                 if context.final_requested.load(Ordering::SeqCst) && !input.finish_sent {
-                    input.recognizer.as_ref().unwrap().finish()?;
+                    let recognizer = input.recognizer.as_ref().unwrap();
+                    recognizer.finish()?;
+                    let timeout = recognizer.finish_wait_timeout();
                     input.finish_sent = true;
-                    return Ok(true);
+                    return Ok(Some(timeout));
                 }
-                Ok(false)
+                Ok(None)
             })();
             match installed {
-                Ok(true) => arm_device_voice_finish_timeout(&context),
-                Ok(false) => {}
+                Ok(Some(timeout)) => arm_device_voice_finish_timeout(&context, timeout),
+                Ok(None) => {}
                 Err(error) => fail_device_voice_context(&context, &error),
             }
         }
@@ -2766,22 +2942,23 @@ fn finish_device_voice_context(completed: usb_audio::CompletedUsbAudio) {
         cancel_device_voice_context(&context, "DeepSeek voice target changed before audio end");
         return;
     }
-    let finished = (|| -> Result<bool, String> {
+    let finished = (|| -> Result<Option<Duration>, String> {
         let mut input = context.recognizer.lock().map_err(|_| "语音输入队列不可用".to_string())?;
         if input.closed || context.final_handled.load(Ordering::SeqCst)
-            || context.cancelled.load(Ordering::SeqCst) { return Ok(false); }
-        if context.final_requested.swap(true, Ordering::SeqCst) { return Ok(false); }
+            || context.cancelled.load(Ordering::SeqCst) { return Ok(None); }
+        if context.final_requested.swap(true, Ordering::SeqCst) { return Ok(None); }
         match input.recognizer.as_ref() {
             Some(recognizer) => {
                 recognizer.finish()?;
+                let timeout = recognizer.finish_wait_timeout();
                 input.finish_sent = true;
-                Ok(true)
+                Ok(Some(timeout))
             }
             None => {
                 // A short utterance may finish before local capture/ASR setup.
                 // Keep its already validated bounded PCM; installation drains
                 // it and sends Finish once, in that order, for this round only.
-                Ok(false)
+                Ok(None)
             }
         }
     })();
@@ -2792,8 +2969,8 @@ fn finish_device_voice_context(completed: usb_audio::CompletedUsbAudio) {
         }
     }
     match finished {
-        Ok(true) => arm_device_voice_finish_timeout(&context),
-        Ok(false) => {}
+        Ok(Some(timeout)) => arm_device_voice_finish_timeout(&context, timeout),
+        Ok(None) => {}
         Err(error) => fail_device_voice_context(&context, &error),
     }
 }
@@ -2816,16 +2993,13 @@ fn usb_session_binding_allows(
     source: &str,
     payload: &serde_json::Value,
 ) -> bool {
-    let Some(binding) = p4_session_binding_for_board(board_device_id) else {
-        return true;
-    };
-    let source = normalize_agent_id(source).unwrap_or_else(|| source.trim().to_ascii_lowercase());
-    let session_id = payload
-        .get("sessionId")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .unwrap_or_default();
-    source == binding.agent_id && session_id == binding.session_id
+    // The binding selects the destination for a *device voice draft*. It must
+    // not hide lifecycle/message packets belonging to other enabled Agents:
+    // P4 renders one multi-Agent project queue and uses those packets to keep
+    // all of its cards current. Source admission remains enforced by
+    // `usb_source_allowed_by_follow` before every caller reaches here.
+    let _ = (board_device_id, source, payload);
+    true
 }
 
 fn resolve_usb_inject_target(board_device_id: &str) -> (String, String) {
@@ -3108,6 +3282,17 @@ fn resolve_usb_input_route_snapshot(payload: &serde_json::Value) -> (String, Str
     (agent_id, session_id, voice_utterance_id)
 }
 
+fn parse_device_injection_response(body: &str) -> Result<serde_json::Value, String> {
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|_| "桥接返回无效响应，发送结果未知，请检查目标会话后再操作".to_string())?;
+    match value.get("ok").and_then(serde_json::Value::as_bool) {
+        Some(true) => Ok(value),
+        Some(false) => Err(value.get("error").and_then(serde_json::Value::as_str)
+            .unwrap_or("桥接拒绝了请求").to_string()),
+        None => Err("桥接未确认请求结果，请检查目标会话后再操作".to_string()),
+    }
+}
+
 fn forward_usb_agent_input_to_bridge(
     payload: &serde_json::Value,
     input: &UsbAgentInput,
@@ -3156,7 +3341,7 @@ fn forward_usb_agent_input_to_bridge(
             "source": input.source,
             "inputType": input.input_type,
             "trigger": "device-button",
-            "transport": "usb",
+            "transport": if input.source == "wifi-ptt-draft" { "wifi-http-draft" } else { "usb" },
             "boardDeviceId": board_device_id,
             "localDeviceId": local_device_id,
             "actionType": input.action_type,
@@ -3194,71 +3379,21 @@ fn forward_usb_agent_input_to_bridge(
                 status, DEFAULT_BRIDGE_PORT, response_text
             ));
         }
-        println!("[usb-device-input] bridge response {}", response_text);
-
-        let parsed =
-            serde_json::from_str::<serde_json::Value>(&response_text).unwrap_or_else(|_| {
-                serde_json::json!({
-                    "ok": true,
-                    "raw": response_text,
-                })
-            });
-        if parsed
-            .get("ok")
-            .and_then(|v| v.as_bool())
-            .is_some_and(|ok| !ok)
-        {
-            return Err(parsed
-                .get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("mock-button-inject returned ok=false")
-                .to_string());
-        }
-        return Ok(parsed);
+        return parse_device_injection_response(&response_text);
     }
 
     Err("usb device input inject failed while bridge was unavailable".to_string())
 }
 
-/// WiFi-PTT 草稿确认后的分发口（round-6）。
-/// WorkBuddy / DeepSeek Harness 的 agent-session-bus 适配器明确不支持后台
-/// 注入（WorkBuddyAdapter.inject() 恒返回 AGENT_INPUT_UNSUPPORTED），它们
-/// 必须走原项目的「桌面可见输入框」AX 路径；其余 agent 走总线注入。
-/// 不再经过 handle_incoming_usb_message：那条链路的 realtime_chat、草稿确认、
-/// resolve_usb_inject_target（陈旧的 p4_session_binding）会截胡或投错 Agent。
-pub(crate) fn deliver_voice_draft_to_agent(
+/// Send a Wi-Fi PTT draft only to an explicit, previously pinned session.
+pub(crate) fn direct_inject_agent_input_to_session(
     text: &str,
     agent_id: &str,
+    session_id: &str,
 ) -> Result<serde_json::Value, String> {
-    if matches!(agent_id, "workbuddy" | "deepseek-harness") {
-        #[cfg(target_os = "macos")]
-        {
-            // 从 HachimiDock 里点「发送」会把焦点留在 HachimiDock，AX 就定位
-            // 不到目标输入框。先把目标桌面客户端带到前台再注入。
-            let app_name = if agent_id == "workbuddy" { "WorkBuddy" } else { "DeepSeek Harness" };
-            let script = format!("tell application \"{app_name}\" to activate");
-            let _ = std::process::Command::new("osascript")
-                .args(["-e", &script])
-                .output();
-            std::thread::sleep(Duration::from_millis(300));
-        }
-        let bridge = codex_composer::CodexComposerBridge::start_current_task_for(agent_id)
-            .map_err(|error| format!("{} 前台输入框未就绪：{}", agent_id, error))?;
-        let mode = bridge.dispatch_task(text)?;
-        return Ok(serde_json::json!({
-            "ok": true,
-            "via": "visible-composer",
-            "mode": mode,
-            "agentId": agent_id,
-        }));
+    if session_id.trim().is_empty() || matches!(session_id.trim().to_ascii_lowercase().as_str(), "auto" | "new") {
+        return Err("无线语音需要明确的目标会话，未发送".into());
     }
-    direct_inject_agent_input(text, agent_id)
-}
-
-pub(crate) fn direct_inject_agent_input(
-    text: &str,
-    agent_id: &str,
-) -> Result<serde_json::Value, String> {
     let input = UsbAgentInput {
         text: text.trim().to_string(),
         view: "voice_input",
@@ -3278,10 +3413,6 @@ pub(crate) fn direct_inject_agent_input(
         "transport": "wifi-http-draft",
         "requestId": format!("wifi-draft-{stamp}"),
     });
-    // claude-code 的 "auto" 会 resume 最近一次会话；陈旧/挂起的 session 会让
-    // CLI 长时间不返回，桥把请求排队直到 5 分钟 TTL 静默丢字（实测）。
-    // 设备语音每轮用新会话，先保证「一定发得过去」。
-    let session_id = if agent_id == "claude-code" { "new" } else { "auto" };
     forward_usb_agent_input_to_bridge(&payload, &input, agent_id, session_id)
 }
 
@@ -3476,7 +3607,8 @@ fn handle_incoming_usb_message(
     // 待确认语音草稿期间，左右摇杆 / 确认 / 返回被解释为发送 / 取消。
     // 必须在 emit("usb-message") 之前拦截：前端 useP4SessionSync 监听该事件，
     // 若先广播，session_next/previous 仍会切会话，等于「原有设定被激活」。
-    if crate::device_voice_bridge::try_draft_gesture(emitter, &topic, &payload) {
+    if try_workbuddy_device_draft_gesture(&topic, &payload)
+        || crate::device_voice_bridge::try_draft_gesture(emitter, &topic, &payload) {
         return;
     }
 
@@ -4140,6 +4272,14 @@ struct DeviceBinding {
     desktop_device_id: String,
     wifi_ssid: String,
     bound_at: u64,
+    /// The selected control route.  Legacy records omit it and retain USB
+    /// behavior; only an explicit TCP selection is eligible for LAN retry.
+    #[serde(default)]
+    transport: String,
+    #[serde(default)]
+    tcp_host: String,
+    #[serde(default)]
+    tcp_port: u16,
 }
 
 // ── WiFi operation commands ──
@@ -4559,18 +4699,48 @@ fn upsert_device_binding(bindings: &mut Vec<DeviceBinding>, binding: DeviceBindi
     bindings.push(binding);
 }
 
-#[tauri::command]
-fn save_device_binding(binding: DeviceBinding) -> Result<Vec<DeviceBinding>, String> {
-    let bindings_path = get_home_dir()?
-        .join(".claw-pet")
-        .join(DEVICE_BINDINGS_FILE_NAME);
-    let mut bindings = load_device_bindings_inner(&bindings_path)?;
+const USB_FIRST_BINDING_ERROR: &str = "设备尚未通过 USB 配对；请先使用可传输数据的 USB 线连接设备";
 
-    let desktop_device_id = binding.desktop_device_id.clone();
-    upsert_device_binding(&mut bindings, binding);
+/// The only caller of this helper is the USB hello path, after the transport
+/// has already verified a board identity.  Network/UI updates must use the
+/// existing-binding path below instead.
+fn upsert_verified_usb_binding(
+    bindings: &mut Vec<DeviceBinding>,
+    binding: DeviceBinding,
+) -> Result<(), String> {
+    if binding.board_device_id.trim().is_empty() {
+        return Err("USB handshake did not provide a board device id".to_string());
+    }
+    upsert_device_binding(bindings, binding);
+    Ok(())
+}
 
+/// Refresh metadata for a board that was previously admitted through USB.
+/// This deliberately makes a LAN endpoint a locator, never a creation
+/// authority for a new board identity.
+fn update_existing_device_binding(
+    bindings: &mut Vec<DeviceBinding>,
+    binding: DeviceBinding,
+) -> Result<(), String> {
+    let board_device_id = binding.board_device_id.trim();
+    if board_device_id.is_empty()
+        || !bindings
+            .iter()
+            .any(|existing| existing.board_device_id == board_device_id)
+    {
+        return Err(USB_FIRST_BINDING_ERROR.to_string());
+    }
+    upsert_device_binding(bindings, binding);
+    Ok(())
+}
+
+fn persist_device_bindings(
+    bindings_path: &Path,
+    bindings: Vec<DeviceBinding>,
+    desktop_device_id: String,
+) -> Result<Vec<DeviceBinding>, String> {
     let payload = serde_json::to_vec_pretty(&bindings).map_err(|e| e.to_string())?;
-    write_private_file(&bindings_path, &payload)?;
+    write_private_file(bindings_path, &payload)?;
 
     // Auto-create bridge profile if it doesn't exist, so ensure_bridge_runtime
     // can start the bridge without manual setup.
@@ -4597,25 +4767,181 @@ fn save_device_binding(binding: DeviceBinding) -> Result<Vec<DeviceBinding>, Str
     Ok(bindings)
 }
 
+#[tauri::command]
+fn save_device_binding(binding: DeviceBinding) -> Result<Vec<DeviceBinding>, String> {
+    let bindings_path = get_home_dir()?
+        .join(".claw-pet")
+        .join(DEVICE_BINDINGS_FILE_NAME);
+    let mut bindings = load_device_bindings_inner(&bindings_path)?;
+
+    let desktop_device_id = binding.desktop_device_id.clone();
+    update_existing_device_binding(&mut bindings, binding)?;
+    persist_device_bindings(&bindings_path, bindings, desktop_device_id)
+}
+
+fn automatic_usb_binding(
+    port_name: &str,
+    board_device_id: &str,
+    desktop_device_id: String,
+    bound_at: u64,
+    existing: Option<&DeviceBinding>,
+) -> DeviceBinding {
+    // USB discovery is a convenience fallback, not an instruction to forget
+    // a route the user explicitly chose.  Keeping the TCP endpoint lets the
+    // next app start return to wireless control without asking again.
+    if let Some(previous) = existing.filter(|item| {
+        item.board_device_id == board_device_id && tcp_endpoint_from_binding(item).is_some()
+    }) {
+        let mut preserved = previous.clone();
+        preserved.desktop_device_id = desktop_device_id;
+        preserved.bound_at = bound_at;
+        return preserved;
+    }
+    DeviceBinding {
+        board_device_id: board_device_id.to_string(),
+        desktop_device_id,
+        wifi_ssid: format!("USB({})", port_name.trim()),
+        bound_at,
+        transport: "usb".to_string(),
+        tcp_host: String::new(),
+        tcp_port: 0,
+    }
+}
+
 fn persist_connected_usb_binding(port_name: &str, board_device_id: &str) -> Result<(), String> {
     let board_device_id = board_device_id.trim();
     if board_device_id.is_empty() {
         return Err("USB handshake did not provide a board device id".to_string());
     }
     let desktop_device_id = get_or_create_desktop_device_id_inner()?;
+    let bindings_path = get_home_dir()?
+        .join(".claw-pet")
+        .join(DEVICE_BINDINGS_FILE_NAME);
+    let mut bindings = load_device_bindings_inner(&bindings_path)?;
+    let existing = bindings
+        .iter()
+        .find(|binding| binding.board_device_id == board_device_id)
+        .cloned();
+    let binding = automatic_usb_binding(
+        port_name,
+        board_device_id,
+        desktop_device_id.clone(),
+        current_timestamp_ms(),
+        existing.as_ref(),
+    );
+    upsert_verified_usb_binding(&mut bindings, binding)?;
+    persist_device_bindings(&bindings_path, bindings, desktop_device_id)?;
+    Ok(())
+}
+
+/// TCP endpoint persisted by an explicit device setup.  The endpoint is a
+/// locator only; reconnect additionally checks `board_device_id` before it is
+/// allowed to replace the current control connection.
+fn tcp_endpoint_from_binding(binding: &DeviceBinding) -> Option<(String, u16)> {
+    let host = binding.tcp_host.trim();
+    let port = binding.tcp_port;
+    if binding.transport.eq_ignore_ascii_case("tcp") && !host.is_empty() && port != 0 {
+        return Some((host.to_string(), port));
+    }
+
+    // Upgrade previously saved Route-A bindings without guessing a host from
+    // arbitrary display text.  ESP-P4 Route A is IPv4-only, so reject colon
+    // bearing host strings rather than misparse an unsupported IPv6 address.
+    let legacy = binding.wifi_ssid.strip_prefix("TCP(")?.strip_suffix(')')?;
+    let endpoint = legacy.strip_prefix(usb_serial::TCP_TRANSPORT_PREFIX)?;
+    let (host, raw_port) = endpoint.rsplit_once(':')?;
+    let port = raw_port.parse::<u16>().ok().filter(|port| *port != 0)?;
+    let host = host.trim();
+    (!host.is_empty() && !host.contains(':')).then(|| (host.to_string(), port))
+}
+
+fn preferred_tcp_auto_binding() -> Option<(String, u16, String)> {
+    let bindings_path = get_home_dir().ok()?.join(".claw-pet").join(DEVICE_BINDINGS_FILE_NAME);
+    let binding = load_device_bindings_inner(&bindings_path).ok()?.into_iter().last()?;
+    if is_preview_board_device_id(&binding.board_device_id) {
+        return None;
+    }
+    let (host, port) = tcp_endpoint_from_binding(&binding)?;
+    Some((host, port, binding.board_device_id))
+}
+
+fn persist_connected_tcp_binding(
+    host: &str,
+    port: u16,
+    board_device_id: &str,
+) -> Result<(), String> {
+    let board_device_id = board_device_id.trim();
+    let host = host.trim();
+    if board_device_id.is_empty() || host.is_empty() || port == 0 {
+        return Err("TCP handshake did not provide a persistable endpoint and board identity".to_string());
+    }
+    let desktop_device_id = get_or_create_desktop_device_id_inner()?;
+    let port_name = format!("{}{}:{}", usb_serial::TCP_TRANSPORT_PREFIX, host, port);
     save_device_binding(DeviceBinding {
         board_device_id: board_device_id.to_string(),
         desktop_device_id,
-        wifi_ssid: format!("USB({})", port_name.trim()),
+        wifi_ssid: format!("TCP({port_name})"),
         bound_at: current_timestamp_ms(),
+        transport: "tcp".to_string(),
+        tcp_host: host.to_string(),
+        tcp_port: port,
     })?;
     Ok(())
 }
 
+fn required_paired_tcp_identity<'a>(
+    expected_board_device_id: Option<&'a str>,
+    bindings: &[DeviceBinding],
+) -> Result<&'a str, String> {
+    let board_device_id = expected_board_device_id
+        .map(str::trim)
+        .filter(|board_device_id| !board_device_id.is_empty())
+        .ok_or_else(|| USB_FIRST_BINDING_ERROR.to_string())?;
+    if bindings
+        .iter()
+        .any(|binding| binding.board_device_id == board_device_id)
+    {
+        Ok(board_device_id)
+    } else {
+        Err(USB_FIRST_BINDING_ERROR.to_string())
+    }
+}
+
+fn should_disconnect_unbound_tcp(
+    connected: bool,
+    port_name: &str,
+    connected_board_device_id: &str,
+    removed_board_device_id: &str,
+) -> bool {
+    connected
+        && port_name.trim().starts_with(usb_serial::TCP_TRANSPORT_PREFIX)
+        && connected_board_device_id.trim() == removed_board_device_id.trim()
+}
+
+fn verified_usb_pairing_target<'a>(
+    connected: bool,
+    port_name: &'a str,
+    board_device_id: &'a str,
+) -> Result<(&'a str, &'a str), String> {
+    let port_name = port_name.trim();
+    let board_device_id = board_device_id.trim();
+    if !connected
+        || port_name.is_empty()
+        || port_name.starts_with(usb_serial::TCP_TRANSPORT_PREFIX)
+        || board_device_id.is_empty()
+    {
+        return Err("USB handshake did not provide a persistable board identity".to_string());
+    }
+    Ok((port_name, board_device_id))
+}
+
 #[tauri::command]
 #[allow(non_snake_case)]
-fn remove_device_binding(boardDeviceId: String) -> Result<Vec<DeviceBinding>, String> {
-    let board_device_id = boardDeviceId;
+fn remove_device_binding(
+    usb_manager: tauri::State<'_, usb_serial::UsbSerialManager>,
+    boardDeviceId: String,
+) -> Result<Vec<DeviceBinding>, String> {
+    let board_device_id = boardDeviceId.trim().to_string();
 
     let bindings_path = get_home_dir()?
         .join(".claw-pet")
@@ -4625,6 +4951,16 @@ fn remove_device_binding(boardDeviceId: String) -> Result<Vec<DeviceBinding>, St
 
     let payload = serde_json::to_vec_pretty(&bindings).map_err(|e| e.to_string())?;
     write_private_file(&bindings_path, &payload)?;
+
+    let status = usb_manager.status();
+    if should_disconnect_unbound_tcp(
+        status.connected,
+        &status.port_name,
+        &status.board_device_id,
+        &board_device_id,
+    ) {
+        usb_manager.disconnect();
+    }
 
     // Stop bridge and clear its profile since it was bound to the old device.
     let _ = clear_bridge_profile();
@@ -5026,6 +5362,9 @@ fn set_p4_session_binding_blocking(
     let board_device_id = input.board_device_id.trim().to_string();
     let agent_id = normalize_agent_id(&input.agent_id)
         .ok_or_else(|| "请选择一个受支持的 Agent".to_string())?;
+    if !p4_session_agent_allowed_by_profile(&agent_id) {
+        return Err("该 Agent 未在当前设备配置中启用".to_string());
+    }
     let raw_session_id = input.session_id.trim();
     let session_id = if raw_session_id.is_empty() || raw_session_id.eq_ignore_ascii_case("auto") {
         String::new()
@@ -7721,8 +8060,25 @@ async fn usb_connect(
     usb_manager.connect(&port_name, move |topic, payload| {
         handle_incoming_usb_message(&emitter, topic, payload);
     })?;
+    let status = usb_manager.status();
+    let pairing_target = verified_usb_pairing_target(
+        status.connected,
+        &status.port_name,
+        &status.board_device_id,
+    );
+    let (port_name, board_device_id) = match pairing_target {
+        Ok(target) => target,
+        Err(error) => {
+            usb_manager.disconnect();
+            return Err(error);
+        }
+    };
+    if let Err(error) = persist_connected_usb_binding(port_name, board_device_id) {
+        usb_manager.disconnect();
+        return Err(error);
+    }
     program_autostart::native::connected(usb_manager.inner());
-    Ok(usb_manager.status())
+    Ok(status)
 }
 
 #[tauri::command]
@@ -7731,9 +8087,20 @@ async fn usb_connect_tcp(
     usb_manager: tauri::State<'_, usb_serial::UsbSerialManager>,
     host: String,
     port: Option<u16>,
+    expected_board_device_id: Option<String>,
 ) -> Result<usb_serial::UsbConnectionStatus, String> {
+    let bindings_path = get_home_dir()?
+        .join(".claw-pet")
+        .join(DEVICE_BINDINGS_FILE_NAME);
+    let bindings = load_device_bindings_inner(&bindings_path)?;
+    let expected_board_device_id =
+        required_paired_tcp_identity(expected_board_device_id.as_deref(), &bindings)?;
     let emitter = app_handle.clone();
-    usb_manager.connect_tcp(&host, port, move |topic, payload| {
+    usb_manager.connect_tcp_expected(
+        &host,
+        port,
+        Some(expected_board_device_id),
+        move |topic, payload| {
         handle_incoming_usb_message(&emitter, topic, payload);
     })?;
     program_autostart::native::connected(usb_manager.inner());
@@ -8169,6 +8536,7 @@ async fn usb_update_bundled_firmware(
     if !status.runtime.eq_ignore_ascii_case("esp-p4") {
         return Err("bundled firmware update is only supported by ESP32-P4".to_string());
     }
+    usb_serial::validate_original_bundled_panel(&status.capabilities)?;
     if compare_firmware_versions(&status.firmware, &firmware_info.version)? != VersionOrdering::Less
     {
         return Err(format!(
@@ -10780,13 +11148,15 @@ fn load_selected_agent_for_usb() -> Option<String> {
 
 fn usb_source_allowed_by_follow(
     source: &str,
-    selected_agent: &Option<String>,
+    _selected_agent: &Option<String>,
     enabled_agents: &HashSet<String>,
 ) -> bool {
-    if let Some(selected) = selected_agent {
-        return source == selected;
-    }
     enabled_agents.is_empty() || enabled_agents.contains(source)
+}
+
+fn p4_session_agent_allowed_by_profile(agent_id: &str) -> bool {
+    let enabled_agents = load_enabled_agents_filter_for_usb();
+    enabled_agents.is_empty() || enabled_agents.contains(agent_id)
 }
 
 fn score_usb_state(state: &str) -> i32 {
@@ -11615,7 +11985,10 @@ fn usb_auto_retry_delay(failure_count: u32) -> Duration {
     Duration::from_secs(seconds)
 }
 
-/// Background thread: auto-connect USB serial on startup and reconnect on disconnect.
+/// Background thread: reconnect the explicitly selected TCP route first, or
+/// discover USB only when no wireless route was saved.  A saved LAN endpoint
+/// is never authority by itself: `connect_tcp_expected` verifies the persisted
+/// board id before publishing the connection.
 fn start_usb_auto_connect(usb_manager: usb_serial::UsbSerialManager, app_handle: tauri::AppHandle) {
     thread::spawn(move || {
         let mut failed_probes: HashMap<String, (u32, Instant)> = HashMap::new();
@@ -11624,6 +11997,73 @@ fn start_usb_auto_connect(usb_manager: usb_serial::UsbSerialManager, app_handle:
         loop {
             let status = usb_manager.status();
             if !status.connected {
+                if let Some((host, port, expected_board_device_id)) = preferred_tcp_auto_binding() {
+                    let probe_key = format!(
+                        "tcp|{}|{}|{}",
+                        expected_board_device_id.to_ascii_lowercase(),
+                        host.to_ascii_lowercase(),
+                        port
+                    );
+                    if !failed_probes
+                        .get(&probe_key)
+                        .is_some_and(|(_, retry_at)| Instant::now() < *retry_at)
+                    {
+                        eprintln!(
+                            "[tcp-auto] probing {}:{} for saved board {}",
+                            host, port, expected_board_device_id
+                        );
+                        let emitter = app_handle.clone();
+                        match usb_manager.connect_tcp_expected(
+                            &host,
+                            Some(port),
+                            Some(&expected_board_device_id),
+                            move |topic, payload| {
+                                handle_incoming_usb_message(&emitter, topic, payload);
+                            },
+                        ) {
+                            Ok(()) => {
+                                failed_probes.remove(&probe_key);
+                                program_autostart::native::connected(&usb_manager);
+                                let verified = usb_manager.status();
+                                eprintln!(
+                                    "[tcp-auto] connected to {} runtime={} board={}",
+                                    verified.port_name, verified.runtime, verified.board_device_id
+                                );
+                                if let Err(error) = persist_connected_tcp_binding(
+                                    &host, port, &verified.board_device_id,
+                                ) {
+                                    eprintln!(
+                                        "[tcp-auto] failed to refresh binding for {}: {}",
+                                        verified.board_device_id, error
+                                    );
+                                }
+                                if let Err(error) = forward_current_state_after_usb_connect(&usb_manager) {
+                                    eprintln!(
+                                        "[tcp-auto] failed to replay bridge state after connect: {}",
+                                        error
+                                    );
+                                }
+                            }
+                            Err(error) => {
+                                let failure_count = failed_probes
+                                    .get(&probe_key)
+                                    .map(|(count, _)| count.saturating_add(1))
+                                    .unwrap_or(1);
+                                let retry_delay = usb_auto_retry_delay(failure_count);
+                                failed_probes.insert(
+                                    probe_key,
+                                    (failure_count, Instant::now() + retry_delay),
+                                );
+                                eprintln!("[tcp-auto] rejected saved Route A endpoint: {error}");
+                            }
+                        }
+                    }
+                    // A user-selected TCP route must not silently fall through
+                    // to any enumerated USB board while it is unavailable.
+                    // They can still select USB explicitly from Setup.
+                    thread::sleep(Duration::from_secs(3));
+                    continue;
+                }
                 let devices = usb_manager.scan_devices();
                 let present_keys: HashSet<String> =
                     devices.iter().map(usb_auto_probe_key).collect();
@@ -11658,6 +12098,11 @@ fn start_usb_auto_connect(usb_manager: usb_serial::UsbSerialManager, app_handle:
                                     "[usb-auto] failed to refresh binding for {}: {}",
                                     verified.board_device_id, error
                                 );
+                                // A connected but unrecorded board would bypass the
+                                // USB-first rule for this app session.  Drop it and
+                                // leave the next scan to retry the verified USB pair.
+                                usb_manager.disconnect();
+                                continue;
                             }
                             if let Err(error) =
                                 forward_current_state_after_usb_connect(&usb_manager)
@@ -11741,38 +12186,6 @@ pub fn run() {
         .setup(move |app| {
             /* 本地 ASR：客户端启动即在后台拉起 sherpa-onnx 服务（幂等），
              * 不依赖任何 IPC 命令，避免命令未注册时静默失败。 */
-            /* Wi-Fi 音频（TCP 8898）：与 USB 并行的第二条通路。收到一整段
-             * PCM 后用同一个本地 ASR 识别，结果先落盘便于自检。 */
-            {
-                let receiver = voice_wifi::VoiceWifiReceiver::start(
-                    voice_wifi::VOICE_WIFI_PORT,
-                    |pcm: Vec<u8>| {
-                        let wav = local_asr::pcm_to_wav(
-                            &pcm,
-                            voice_wifi::VOICE_WIFI_RATE,
-                            1,
-                        );
-                        let _ = local_asr::ensure_ready(local_asr::DEFAULT_ENDPOINT);
-                        let text = match local_asr::transcribe_wav(
-                            local_asr::DEFAULT_ENDPOINT,
-                            local_asr::DEFAULT_ENGINE,
-                            &wav,
-                            std::time::Duration::from_secs(20),
-                        ) {
-                            Ok(transcript) => transcript.text,
-                            Err(error) => format!("ERR {error}"),
-                        };
-                        let _ = std::fs::write(
-                            "/tmp/hachimo-wifi-asr.log",
-                            format!("{text}\n"),
-                        );
-                    },
-                );
-                match receiver {
-                    Ok(receiver) => std::mem::forget(receiver),
-                    Err(error) => eprintln!("[voice-wifi] {error}"),
-                }
-            }
             if volcengine_asr::local_provider_prefs().is_some() {
                 std::thread::spawn(|| {
                     if let Err(error) = local_asr::ensure_service() {
@@ -13942,6 +14355,69 @@ fn current_timestamp_ms() -> u64 {
 mod tests {
 
     #[test]
+    fn bridge_injection_response_requires_explicit_success() {
+        assert!(super::parse_device_injection_response(r#"{"ok":true}"#).is_ok());
+        for body in ["not-json", "{}", r#"{"ok":"true"}"#, r#"{"ok":false}"#] {
+            assert!(super::parse_device_injection_response(body).is_err());
+        }
+    }
+
+    #[test]
+    fn workbuddy_device_draft_accepts_only_matching_joystick_decisions() {
+        let event = |action: &str, board: &str, handled: bool| serde_json::json!({
+            "action": action, "event": if action == "voice_draft_send" {"joystick.up"} else if action == "voice_draft_cancel" {"joystick.down"} else {"other"}, "boardDeviceId": board, "handledLocally": handled
+        });
+        assert_eq!(super::workbuddy_device_draft_decision("input/event", &event("voice_draft_send", "p4", false), "p4", true), Some(true));
+        assert_eq!(super::workbuddy_device_draft_decision("input/event", &event("voice_draft_cancel", "p4", false), "p4", true), Some(false));
+        for (topic, action, board, handled, ready) in [
+            ("input/event", "page_enter", "p4", false, true),
+            ("input/event", "voice_draft_send", "other", false, true),
+            ("input/event", "voice_draft_send", "p4", true, true),
+            ("input/event", "voice_draft_send", "p4", false, false),
+            ("state/other", "voice_draft_send", "p4", false, true),
+        ] {
+            assert_eq!(super::workbuddy_device_draft_decision(topic, &event(action, board, handled), "p4", ready), None);
+        }
+        let mut wrong_direction = event("voice_draft_send", "p4", false);
+        wrong_direction["event"] = serde_json::json!("knob.rotate_ccw");
+        assert_eq!(super::workbuddy_device_draft_decision("input/event", &wrong_direction, "p4", true), None);
+    }
+
+    #[test]
+    fn workbuddy_device_draft_rejects_clipped_or_multiline_text() {
+        assert!(super::workbuddy_device_draft_fits("测试语音识别"));
+        assert!(super::workbuddy_device_draft_fits(&"测".repeat(40)));
+        assert!(!super::workbuddy_device_draft_fits(&"测".repeat(41)));
+        assert!(!super::workbuddy_device_draft_fits(""));
+        assert!(!super::workbuddy_device_draft_fits("第一行\n第二行"));
+    }
+
+    #[test]
+    fn composer_startup_diagnostic_categories_do_not_include_error_text() {
+        assert_eq!(super::composer_startup_failure_kind("需要唯一的 WorkBuddy macOS 输入框，实际找到 2 个"), "multiple_composers");
+        assert_eq!(super::composer_startup_failure_kind("需要唯一的 WorkBuddy macOS 输入框，实际找到 0 个"), "no_composer");
+        assert_eq!(super::composer_startup_failure_kind("WorkBuddy macOS 输入框内容仍在变化"), "composer_changed");
+        assert_eq!(super::composer_startup_failure_kind("private user content"), "other");
+    }
+
+    #[test]
+    fn visible_composer_failure_keeps_recognition_as_an_unsubmitted_device_draft() {
+        assert!(super::allow_display_only_composer_failure("workbuddy", "窗口不可用"));
+        assert!(!super::allow_display_only_composer_failure("workbuddy", "DESKTOP_TASK_TARGET_CHANGED"));
+        assert!(super::allow_display_only_composer_failure("codex", "窗口不可用"));
+        assert!(super::allow_display_only_composer_failure("claude-code", "窗口不可用"));
+        assert!(super::allow_display_only_composer_failure("deepseek-harness", "窗口不可用"));
+        assert!(!super::allow_display_only_composer_failure("mimocode", "窗口不可用"));
+        let notice = super::display_only_voice_notice("测试文字", "workbuddy", "session-x");
+        assert_eq!(notice["displayContent"], "测试文字");
+        assert_eq!(notice["displayTitle"], "识别结果（未发送）");
+        assert_eq!(notice["agentId"], "workbuddy");
+        assert_eq!(notice["sessionId"], "session-x");
+        assert_eq!(notice["voiceNotice"], true);
+        assert!(notice.get("active").is_none());
+    }
+
+    #[test]
     fn visible_composer_lookup_failure_is_not_a_target_switch_receipt() {
         for error in ["No writable visible semantic composer was found", "NoTarget",
             "No writable semantic composer", "Visible Agent composer unavailable",
@@ -14101,7 +14577,7 @@ mod tests {
             &selected,
             &enabled
         ));
-        assert!(!usb_source_allowed_by_follow("codex", &selected, &enabled));
+        assert!(usb_source_allowed_by_follow("codex", &selected, &enabled));
     }
 
     #[test]
@@ -14984,11 +15460,15 @@ mod tests {
     }
 
     #[test]
-    fn workbuddy_only_receives_final_voice_text() {
+    fn device_confirmed_agents_do_not_stream_into_composers() {
         assert!(!agent_streams_voice_draft("workbuddy"));
-        assert!(agent_streams_voice_draft("codex"));
-        assert!(agent_streams_voice_draft("claude-code"));
+        assert!(!agent_streams_voice_draft("codex"));
+        assert!(!agent_streams_voice_draft("claude-code"));
         assert!(!agent_streams_voice_draft("mimocode"));
+        for agent in ["workbuddy", "codex", "claude-code"] {
+            assert!(super::device_uses_joystick_confirmation(agent));
+        }
+        assert!(!super::device_uses_joystick_confirmation("deepseek-harness"));
     }
 
     #[test]
@@ -15121,7 +15601,7 @@ mod tests {
     }
 
     #[test]
-    fn usb_source_allowed_by_follow_prefers_selected_agent() {
+    fn usb_source_allowed_by_follow_keeps_all_enabled_agents_visible() {
         let enabled = HashSet::from(["codex".to_string(), "claude-code".to_string()]);
         let selected = Some("claude-code".to_string());
 
@@ -15130,7 +15610,17 @@ mod tests {
             &selected,
             &enabled
         ));
-        assert!(!usb_source_allowed_by_follow("codex", &selected, &enabled));
+        assert!(usb_source_allowed_by_follow("codex", &selected, &enabled));
+        assert!(!usb_source_allowed_by_follow("workbuddy", &selected, &enabled));
+    }
+
+    #[test]
+    fn active_voice_binding_does_not_hide_a_sibling_agents_project_updates() {
+        let packet = serde_json::json!({
+            "sessionId": "claude-project-a",
+            "state": "working",
+        });
+        assert!(usb_session_binding_allows("p4-board", "claude-code", &packet));
     }
 
     #[test]
@@ -15176,12 +15666,18 @@ mod tests {
                 desktop_device_id: "desktop-a".to_string(),
                 wifi_ssid: "USB(/dev/old)".to_string(),
                 bound_at: 1,
+                transport: "usb".to_string(),
+                tcp_host: String::new(),
+                tcp_port: 0,
             },
             DeviceBinding {
                 board_device_id: "board-other".to_string(),
                 desktop_device_id: "desktop-a".to_string(),
                 wifi_ssid: "USB(/dev/other)".to_string(),
                 bound_at: 2,
+                transport: "usb".to_string(),
+                tcp_host: String::new(),
+                tcp_port: 0,
             },
         ];
 
@@ -15192,6 +15688,9 @@ mod tests {
                 desktop_device_id: "desktop-a".to_string(),
                 wifi_ssid: "USB(/dev/current)".to_string(),
                 bound_at: 3,
+                transport: "usb".to_string(),
+                tcp_host: String::new(),
+                tcp_port: 0,
             },
         );
 
@@ -15200,6 +15699,136 @@ mod tests {
         assert_eq!(latest.board_device_id, "board-current");
         assert_eq!(latest.wifi_ssid, "USB(/dev/current)");
         assert_eq!(latest.bound_at, 3);
+    }
+
+    #[test]
+    fn usb_first_wireless_rejects_unpaired_identity_and_refreshes_a_paired_endpoint() {
+        let usb = DeviceBinding {
+            board_device_id: "p4-paired".to_string(),
+            desktop_device_id: "desktop-a".to_string(),
+            wifi_ssid: "USB(/dev/cu.usbserial)".to_string(),
+            bound_at: 1,
+            transport: "usb".to_string(),
+            tcp_host: String::new(),
+            tcp_port: 0,
+        };
+        let tcp = DeviceBinding {
+            board_device_id: "p4-paired".to_string(),
+            desktop_device_id: "desktop-a".to_string(),
+            wifi_ssid: "TCP(tcp://192.168.1.97:3333)".to_string(),
+            bound_at: 2,
+            transport: "tcp".to_string(),
+            tcp_host: "192.168.1.97".to_string(),
+            tcp_port: 3333,
+        };
+        let unpaired = DeviceBinding {
+            board_device_id: "p4-unpaired".to_string(),
+            ..tcp.clone()
+        };
+        let mut bindings = Vec::new();
+
+        assert!(super::update_existing_device_binding(&mut bindings, unpaired).is_err());
+
+        super::upsert_verified_usb_binding(&mut bindings, usb).unwrap();
+        super::update_existing_device_binding(&mut bindings, tcp).unwrap();
+
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].board_device_id, "p4-paired");
+        assert_eq!(bindings[0].transport, "tcp");
+        assert_eq!(bindings[0].tcp_host, "192.168.1.97");
+    }
+
+    #[test]
+    fn usb_first_tcp_rejects_missing_identity_and_requires_a_verified_usb_target() {
+        let bindings = vec![DeviceBinding {
+            board_device_id: "p4-paired".to_string(),
+            desktop_device_id: "desktop-a".to_string(),
+            wifi_ssid: "USB(/dev/cu.usbserial)".to_string(),
+            bound_at: 1,
+            transport: "usb".to_string(),
+            tcp_host: String::new(),
+            tcp_port: 0,
+        }];
+
+        assert!(super::required_paired_tcp_identity(None, &bindings).is_err());
+        assert!(super::required_paired_tcp_identity(Some("   "), &bindings).is_err());
+        assert!(super::required_paired_tcp_identity(Some("p4-unpaired"), &bindings).is_err());
+        assert_eq!(
+            super::required_paired_tcp_identity(Some(" p4-paired "), &bindings).unwrap(),
+            "p4-paired"
+        );
+
+        assert!(super::verified_usb_pairing_target(false, "/dev/cu.usbserial", "p4-paired").is_err());
+        assert!(super::verified_usb_pairing_target(true, "/dev/cu.usbserial", " ").is_err());
+        assert!(super::verified_usb_pairing_target(true, "tcp://192.168.1.97:3333", "p4-paired").is_err());
+        assert_eq!(
+            super::verified_usb_pairing_target(true, "/dev/cu.usbserial", "p4-paired").unwrap(),
+            ("/dev/cu.usbserial", "p4-paired")
+        );
+        assert!(super::should_disconnect_unbound_tcp(true, "tcp://192.168.1.97:3333", "p4-paired", "p4-paired"));
+        assert!(!super::should_disconnect_unbound_tcp(true, "/dev/cu.usbserial", "p4-paired", "p4-paired"));
+        assert!(!super::should_disconnect_unbound_tcp(true, "tcp://192.168.1.97:3333", "p4-other", "p4-paired"));
+    }
+
+    #[test]
+    fn tcp_binding_endpoint_requires_an_explicit_or_legacy_tcp_route() {
+        let tcp = DeviceBinding {
+            board_device_id: "p4-expected".to_string(),
+            desktop_device_id: "desktop-a".to_string(),
+            wifi_ssid: "TCP(tcp://192.168.1.97:3333)".to_string(),
+            bound_at: 1,
+            transport: "tcp".to_string(),
+            tcp_host: "192.168.1.97".to_string(),
+            tcp_port: 3333,
+        };
+        assert_eq!(
+            tcp_endpoint_from_binding(&tcp),
+            Some(("192.168.1.97".to_string(), 3333))
+        );
+
+        let legacy = DeviceBinding {
+            transport: String::new(),
+            tcp_host: String::new(),
+            tcp_port: 0,
+            ..tcp.clone()
+        };
+        assert_eq!(
+            tcp_endpoint_from_binding(&legacy),
+            Some(("192.168.1.97".to_string(), 3333))
+        );
+
+        let usb = DeviceBinding {
+            wifi_ssid: "USB(/dev/cu.usbserial)".to_string(),
+            ..legacy
+        };
+        assert_eq!(tcp_endpoint_from_binding(&usb), None);
+    }
+
+    #[test]
+    fn automatic_usb_discovery_does_not_erase_explicit_tcp_route() {
+        let previous = DeviceBinding {
+            board_device_id: "p4-expected".to_string(),
+            desktop_device_id: "desktop-old".to_string(),
+            wifi_ssid: "TCP(tcp://192.168.1.97:3333)".to_string(),
+            bound_at: 1,
+            transport: "tcp".to_string(),
+            tcp_host: "192.168.1.97".to_string(),
+            tcp_port: 3333,
+        };
+        let refreshed = automatic_usb_binding(
+            "/dev/cu.wchusbserial", "p4-expected", "desktop-new".to_string(), 2, Some(&previous),
+        );
+        assert_eq!(refreshed.transport, "tcp");
+        assert_eq!(refreshed.tcp_host, "192.168.1.97");
+        assert_eq!(refreshed.tcp_port, 3333);
+        assert_eq!(refreshed.desktop_device_id, "desktop-new");
+        assert_eq!(refreshed.bound_at, 2);
+
+        let usb = automatic_usb_binding(
+            "/dev/cu.wchusbserial", "p4-other", "desktop-new".to_string(), 2, Some(&previous),
+        );
+        assert_eq!(usb.transport, "usb");
+        assert_eq!(usb.tcp_port, 0);
     }
 
     #[test]
@@ -15212,6 +15841,19 @@ mod tests {
 
         assert!(auto_connect.contains("persist_connected_usb_binding("));
         assert!(auto_connect.contains("forward_current_state_after_usb_connect("));
+    }
+
+    #[test]
+    fn auto_reconnect_keeps_saved_tcp_identity_scoped() {
+        let source = include_str!("lib.rs");
+        let auto_connect = &source[source
+            .find("fn start_usb_auto_connect(")
+            .expect("auto-connect")
+            ..source.find("pub fn run()").expect("Tauri run entry")];
+        assert!(auto_connect.contains("preferred_tcp_auto_binding()"));
+        assert!(auto_connect.contains("connect_tcp_expected("));
+        assert!(auto_connect.contains("Some(&expected_board_device_id)"));
+        assert!(auto_connect.contains("must not silently fall through"));
     }
 
     #[test]

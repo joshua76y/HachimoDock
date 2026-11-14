@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 import { prepareBuiltInP4Ready } from "./prepare-p4-ready-assets.mjs";
 import { cleanSkillBytecode } from "./clean-skill-bytecode.mjs";
 import { prepareVoiceRuntime } from "./voice-runtime-resources.mjs";
-import { copyNodeRuntimeLicense, verifyDesktopLicenseInventory } from "./dependency-license-resources.mjs";
+import { copyNodeRuntimeLicense, preflightNodeRuntimeLicense, validateStagedNodeLicense, verifyDesktopLicenseInventory } from "./dependency-license-resources.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(scriptDir, "../..");
@@ -429,6 +429,9 @@ let sourceRuntime = process.env.PET_MANAGER_NODE_BIN
 if (!process.env.PET_MANAGER_NODE_BIN && existsSync(targetRuntime)) {
   try {
     assertRuntimeMatchesTarget(targetRuntime, target, targetArch);
+    // Target compatibility alone is insufficient: a stale build artifact may
+    // be executable on this host while not being an audited distributable.
+    preflightNodeRuntimeLicense(targetRuntime, join(repositoryRoot, "licenses"));
     sourceRuntime = targetRuntime;
     console.log(`reusing validated staged Node runtime: ${targetRuntime}`);
   } catch {
@@ -446,6 +449,9 @@ if (!existsSync(sourceRuntime)) {
 }
 
 assertRuntimeMatchesTarget(sourceRuntime, target, targetArch);
+// Reject an unreviewed runtime before copying it into packaging resources.
+const nodeLicense = preflightNodeRuntimeLicense(sourceRuntime, join(repositoryRoot, "licenses"));
+validateStagedNodeLicense(generatedRuntime, nodeLicense);
 ensureBridgeDependencies();
 mkdirSync(generatedRuntime, { recursive: true });
 

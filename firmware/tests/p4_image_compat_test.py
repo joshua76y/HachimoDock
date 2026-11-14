@@ -45,10 +45,14 @@ def test_v3_build_is_separate_without_changing_transport_or_ui():
     assert "monitor_speed" not in v3
     assert "custom_p4_uart_baud = 4000000" in platform
     overlay = (ROOT / "sdkconfig.v3.defaults").read_text()
+    legacy_overlay = (ROOT / "sdkconfig.v1.defaults").read_text()
+    assert "CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y" in legacy_overlay
+    assert "CONFIG_ESP32P4_REV_MIN_1=y" in legacy_overlay
     assert "CONFIG_ESP32P4_REV_MIN_300=y" in overlay
     assert "CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_400=y" in overlay
     assert "CONFIG_ESP32P4_SELECTS_REV_LESS_V3 is not set" in overlay
     cmake = (ROOT / "CMakeLists.txt").read_text()
+    assert 'set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.v1.defaults")' in cmake
     assert "dependencies.v3.lock" in cmake
     for name, version in [("dependencies.lock", "5.5.1"), ("dependencies.v3.lock", "5.5.4")]:
         assert "version: " + version in (ROOT / name).read_text()

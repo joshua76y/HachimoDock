@@ -82,6 +82,18 @@ pub(crate) fn bundled_resource_for_chip(target: P4ChipTarget) -> &'static str {
     }
 }
 
+// Bundled images are built for the original 480 x 640 panel. An absent or
+// different panel description cannot establish compatibility.
+pub(crate) fn validate_original_bundled_panel(capabilities: &Value) -> Result<(), String> {
+    if capabilities.pointer("/display/physicalWidth").and_then(Value::as_u64) == Some(480)
+        && capabilities.pointer("/display/physicalHeight").and_then(Value::as_u64) == Some(640)
+    {
+        Ok(())
+    } else {
+        Err("无法确认内置固件与设备屏幕匹配，已阻止升级；请使用该开发板专用固件".into())
+    }
+}
+
 pub(crate) fn validate_firmware_chip(
     range: FirmwareChipRange,
     target: P4ChipTarget,
@@ -108,6 +120,13 @@ mod tests {
         image[15..17].copy_from_slice(&min.to_le_bytes());
         image[17..19].copy_from_slice(&max.to_le_bytes());
         image
+    }
+    #[test]
+    fn original_bundled_firmware_is_not_offered_to_waveshare_43_panel() {
+        assert!(validate_original_bundled_panel(&json!({"display":{"physicalWidth":480,"physicalHeight":800}})).is_err());
+        assert!(validate_original_bundled_panel(&json!({"display":{"physicalWidth":480,"physicalHeight":640}})).is_ok());
+        assert!(validate_original_bundled_panel(&json!({})).is_err());
+        assert!(validate_original_bundled_panel(&json!({"display":{"physicalWidth":"480","physicalHeight":640}})).is_err());
     }
     #[test]
     fn chip_family_matrix_rejects_cross_flash_and_unbounded_images() {

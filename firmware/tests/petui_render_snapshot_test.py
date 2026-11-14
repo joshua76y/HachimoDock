@@ -177,6 +177,10 @@ def test_app_frame_uses_one_publication_and_no_live_host_reads_after_capture(tmp
     resolver = text.split('static int32_t render_integer(', 1)[1].split('bool pet_p4_miniapp_media_config(', 1)[0]
     resolver = 'static int32_t render_integer(' + resolver
     resolver = '\n'.join(function(text,name) for name in ('runtime_host_variable','runtime_host_action','runtime_host_dashboard'))+'\n'+resolver
+    input_source = (ROOT / 'main/pet_p4_input.c').read_text()
+    input_header = (ROOT / 'main/pet_p4_input.h').read_text()
+    event_limit = next(line for line in input_header.splitlines() if line.startswith('#define PET_P4_INPUT_EVENT_MAX '))
+    resolver = event_limit + '\n' + function(input_source, 'pet_p4_input_legacy_alias') + '\n' + function(text, 'button_matches_event') + '\n' + resolver
     snapshot = 'static bool surface_images_locked(' + text.split('static bool surface_images_locked(', 1)[1].split('bool pet_p4_miniapp_side_snapshot(', 1)[0]
     (tmp_path / 'esp_err.h').write_text('typedef int esp_err_t;\n')
     suite=json.loads((ROOT.parent/'pc/skills/petui/contracts/host-collection-v1.json').read_text())

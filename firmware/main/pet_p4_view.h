@@ -31,6 +31,7 @@ typedef struct {
   unsigned long long caption_since_ms;
   // Main-page recording feedback when there is no Session card to host it.
   bool show_voice_overlay;
+  bool show_voice_notice;
   /* Main captures this under the state mutex; rendering never reads a live
    * activation job or takes ownership of its storage. */
   bool component_loading;

@@ -8,6 +8,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildP4MultiAgentRoutingSessions,
   buildP4ConversationQueue,
   buildP4DeviceSessionTransportPayload,
   buildP4RoutingSessions,
@@ -17,7 +18,58 @@ import {
   mergeP4SessionSnapshot,
   p4SessionHasMeaningfulTitle,
   p4SessionActivitySignature,
+  parseP4ScopedSessionId,
+  p4ScopedSessionId,
 } from "./p4-session-service.js";
+
+test("multi-Agent routing keeps equal source IDs distinct and reversible", () => {
+  const sessions = buildP4MultiAgentRoutingSessions([
+    {
+      agentId: "codex",
+      sessions: [{ id: "shared", name: "Codex task", state: "working", statusUpdatedAt: 10 }],
+    },
+    {
+      agentId: "claude-code",
+      sessions: [{ id: "shared", name: "Claude task", state: "working", statusUpdatedAt: 20 }],
+    },
+  ]);
+
+  assert.deepEqual(sessions.map((session) => session.id), [
+    "claude-code::shared",
+    "codex::shared",
+  ]);
+  assert.deepEqual(sessions.map((session) => [session.agentId, session.sourceSessionId]), [
+    ["claude-code", "shared"],
+    ["codex", "shared"],
+  ]);
+  assert.equal(p4ScopedSessionId("codex", "a::b"), "codex::a::b");
+  assert.deepEqual(parseP4ScopedSessionId("codex::a::b"), {
+    agentId: "codex",
+    sessionId: "a::b",
+  });
+});
+
+test("multi-Agent routing promotes the newest Agent activity without erasing other projects", () => {
+  const sessions = buildP4MultiAgentRoutingSessions([
+    {
+      agentId: "codex",
+      sessions: [
+        { id: "build", name: "Build board", state: "working", statusUpdatedAt: 100 },
+        { id: "docs", name: "Write docs", state: "thinking", statusUpdatedAt: 120 },
+      ],
+    },
+    {
+      agentId: "workbuddy",
+      sessions: [{ id: "reply", name: "Customer reply", state: "done", statusUpdatedAt: 200 }],
+    },
+  ]);
+
+  assert.deepEqual(sessions.map((session) => session.id), [
+    "workbuddy::reply",
+    "codex::docs",
+    "codex::build",
+  ]);
+});
 
 test("routing sessions deduplicate by id, sort by activity, and exclude internal review tasks", () => {
   const sessions = buildP4RoutingSessions([

@@ -4,7 +4,7 @@
  * 使用方式：
  *   main.c 启动时：pet_p4_voice_ptt_init(net_submit_line); pet_p4_voice_ptt_start_task();
  *   input.c voice_ptt 绑定 hold_start：pet_p4_voice_ptt_begin(queue_empty)
- *           返回 true 走本地闭环；返回 false 回退上游 USB 流式。
+ *           根据结果选择本地录音、USB 回退或提示忙碌。
  *   audio.c：send_audio_chunk 开头若 pet_p4_voice_ptt_capturing() 则
  *           pet_p4_voice_ptt_feed() 后直接返回（不上行 USB）；
  *           send_audio_end 里调 pet_p4_voice_ptt_notify_end()。
@@ -31,8 +31,14 @@ extern TaskHandle_t g_ptt_task_handle;
 void pet_p4_voice_ptt_init(pet_p4_voice_ptt_submit_fn submit_line);
 void pet_p4_voice_ptt_start_task(void);
 
-/* 按住开始：WiFi 在线才接管，返回 false 时调用方回退 USB 流式 */
-bool pet_p4_voice_ptt_begin(bool session_queue_empty);
+typedef enum {
+  PET_P4_VOICE_PTT_UNAVAILABLE,
+  PET_P4_VOICE_PTT_STARTED,
+  PET_P4_VOICE_PTT_BUSY,
+} pet_p4_voice_ptt_begin_result_t;
+
+/* BUSY 不能回退到另一条链路，否则可能把前一段录音送往错误目标。 */
+pet_p4_voice_ptt_begin_result_t pet_p4_voice_ptt_begin(bool session_queue_empty);
 bool pet_p4_voice_ptt_capturing(void);
 
 /* 仅 capturing 区间被 audio.c 调用 */
@@ -40,6 +46,8 @@ void pet_p4_voice_ptt_feed(const uint8_t *pcm, size_t len);
 
 /* capture 收尾（send_audio_end 内调用） */
 void pet_p4_voice_ptt_notify_end(void);
+/* Stop a failed recording without submitting partial audio. */
+void pet_p4_voice_ptt_abort(void);
 
 /* round-6 草稿确认模式：PC 在 ASR 识别完成后下发 voice/draft active=true，
  * 设备屏幕显示「发送/取消」提示，并暂时屏蔽左右摇杆等按键的原有本地设定；

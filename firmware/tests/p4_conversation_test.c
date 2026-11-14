@@ -49,7 +49,7 @@ int main(void) {
   assert(pet_p4_conversation_queue_cue(&state, "rtc-1-turn", 0, "宠物第一句"));
   assert(pet_p4_conversation_queue_cue(&state, "rtc-1-turn", 32000, "宠物第二句"));
   pet_p4_conversation_advance(&state, 0, false, 5);
-  assert(!state.conversation_text[0]); // prebuffering must not start subtitles
+  assert(!strcmp(state.conversation_text, "用户的话")); // Preserve the user caption until playback advances.
   pet_p4_conversation_advance(&state, 0, true, 6);
   pet_p4_build_view_model(&state, &view);
   assert(!strcmp(view.body, "宠物第一句") && !strcmp(view.title, "小西"));

@@ -92,7 +92,7 @@ def test_protocol_doc_declares_usb_only_p4_runtime():
     assert '"topic": "hello"' in doc
     assert '"runtime": "esp-p4"' in doc
     assert '"wireProtocol": "pet-usb-jsonl-v3"' in doc
-    assert '"usbOnly": true' in doc
+    assert '"usbOnly": false' in doc
     assert '"nativeUsb": true' in doc
     assert '"nativeProtocol": "pet-usb-native-v1"' in doc
     assert '"p4-h264-v1"' in doc
@@ -212,7 +212,10 @@ def test_firmware_contract_accepts_p4_assets_and_rejects_linux_mp4_ota():
     assert 'cJSON_AddStringToObject(hardware, "onChipSram", "768KB L2MEM + 32KB LP SRAM + 8KB TCM")' in source
     assert 'cJSON_AddStringToObject(hardware, "psram", "32MB In-package stacked")' in source
     assert 'cJSON_AddStringToObject(hardware, "flash", "32MB QSPI NOR Flash")' in source
-    assert 'cJSON_AddBoolToObject(capabilities, "usbOnly", true)' in source
+    assert 'cJSON_AddBoolToObject(capabilities, "usbOnly", false)' in source
+    assert 'cJSON_AddBoolToObject(transport, "usbOnly", false)' in source
+    assert 'cJSON_AddNumberToObject(display, "physicalWidth", BSP_LCD_H_RES)' in source
+    assert 'cJSON_AddNumberToObject(display, "physicalHeight", BSP_LCD_V_RES)' in source
     assert 'cJSON_AddBoolToObject(capabilities, "mp4", false)' in source
     assert 'cJSON_AddNumberToObject(capabilities, "version", 1)' in source
     assert 'cJSON_AddBoolToObject(capabilities, "widgets", true)' in source
@@ -1194,7 +1197,11 @@ def test_p4_conversation_queue_is_synced_and_rendered_with_pixel_ellipsis():
     assert "pet_p4_view_status_t marker_status = session_view_status(item->state)" in renderer
     assert "draw_working_markers || marker_status != PET_P4_VIEW_STATUS_WORKING" in renderer
     assert "draw_status_marker(marker_status, now_ms, x + w - 26, y + 26)" in renderer
-    assert "bool show_session_queue = !realtime && state && state->session_queue_count > 0;" in renderer
+    assert re.search(
+        r"bool show_session_queue = !realtime && state && state->session_queue_count > 0\s*"
+        r"&& !pet_p4_voice_ptt_draft_active\(\) && !\(view && view->show_voice_notice\);",
+        renderer,
+    )
     assert "bool needs_ellipsis = ellipsis && utf8_text_width(cursor, -1, scale) > max_px" in renderer
     assert "bool needs_ellipsis = ellipsis && utf8_text_width_medium(cursor) > max_px" in renderer
     assert "static bool glyph_visual_bounds(" in renderer
@@ -1756,6 +1763,7 @@ def test_p4_renderer_boot_diagnostic_is_visible_on_black_screen_failures():
 def test_p4_flash_layout_allocates_dual_3m_ota_and_17m_appearance_on_32m_flash():
     partitions = read("partitions.csv")
     platformio = read("platformio.ini")
+    protocol = read("main/pet_p4_protocol.c")
     sdkconfig = read("sdkconfig.defaults")
     migration = read_required("tools/migrate_to_ab.ps1")
     runtime_readme = read("README.md")
@@ -1781,6 +1789,7 @@ def test_p4_flash_layout_allocates_dual_3m_ota_and_17m_appearance_on_32m_flash()
     assert "Get-FileHash" in migration
     assert "device already uses an A/B partition table" in migration
     assert "P4_FIRMWARE_MAX_IMAGE_SIZE: usize = 0x300000" in desktop
+    assert 'cJSON_AddNumberToObject(firmware_update, "maxImageBytes", 0x300000)' in protocol
     assert "| `ota_0` | `0x010000` | 3 MiB |" in runtime_readme
     assert "| `ota_1` | `0x310000` | 3 MiB |" in runtime_readme
     assert "| `storage` | `0x620000` | 8.875 MiB |" in runtime_readme
@@ -2319,7 +2328,7 @@ def test_p4_hardware_inputs_are_debounced_persistent_and_configurable():
     # 微雪 ESP32-P4-WIFI6-Touch-LCD-4.3 移植：外接「模拟摇杆 + 5 键」模块，
     # 接线全部收在 J3 的 pin15~24（见 PORTING-PLAN §五）。
     # GPIO20 在这块板上是 BAT_ADC（VBAT/3，200K/100K 分压），不在排针上，
-    # 所以摇杆 Y 必须改到 GPIO22 / ADC1_CH6，不能用原板的 GPIO20。
+    # 实机验证 GPIO21 是垂直轴；GPIO22 用作水平轴，均不使用电池检测 GPIO20。
     assert "PET_P4_INPUT_KEY1_GPIO GPIO_NUM_29" in input_source        # 1 红
     assert "PET_P4_INPUT_KEY2_GPIO GPIO_NUM_30" in input_source        # 2 黄
     assert "PET_P4_INPUT_KEY3_GPIO GPIO_NUM_25" in input_source        # 3 蓝
@@ -2328,10 +2337,10 @@ def test_p4_hardware_inputs_are_debounced_persistent_and_configurable():
     assert "PET_P4_INPUT_BOOT_GPIO GPIO_NUM_35" in input_source        # 板载 BOOT B
     assert "PET_P4_INPUT_ENCODER_B_GPIO GPIO_NUM_3" in input_source
     assert "PET_P4_INPUT_ENCODER_A_GPIO GPIO_NUM_2" in input_source
-    assert "PET_P4_INPUT_JOYSTICK_X_GPIO GPIO_NUM_21" in input_source
-    assert "PET_P4_INPUT_JOYSTICK_Y_GPIO GPIO_NUM_22" in input_source
-    assert "PET_P4_INPUT_JOYSTICK_X_CHANNEL ADC1_GPIO21_CHANNEL" in input_source
-    assert "PET_P4_INPUT_JOYSTICK_Y_CHANNEL ADC1_GPIO22_CHANNEL" in input_source
+    assert "PET_P4_INPUT_JOYSTICK_X_GPIO GPIO_NUM_22" in input_source
+    assert "PET_P4_INPUT_JOYSTICK_Y_GPIO GPIO_NUM_21" in input_source
+    assert "PET_P4_INPUT_JOYSTICK_X_CHANNEL ADC1_GPIO22_CHANNEL" in input_source
+    assert "PET_P4_INPUT_JOYSTICK_Y_CHANNEL ADC1_GPIO21_CHANNEL" in input_source
     assert '"esp_adc"' in cmake or "esp_adc" in cmake
     assert "PET_P4_INPUT_SAMPLE_MS 5" in input_source
     assert "PET_P4_INPUT_DEBOUNCE_MS 25" in input_source
@@ -2392,8 +2401,14 @@ def test_p4_hardware_inputs_are_debounced_persistent_and_configurable():
     assert 'event_name = "joystick.up"' in input_source
     assert 'event_name = "joystick.down"' in input_source
     assert "catalog_delta" not in input_source
-    left_case = re.search(r'case PET_P4_JOYSTICK_LEFT:([\s\S]*?)break;', input_source)
-    right_case = re.search(r'case PET_P4_JOYSTICK_RIGHT:([\s\S]*?)break;', input_source)
+    # Scope this assertion to the physical-input dispatch switch.  The file
+    # also has a component-center direction conversion switch whose cases
+    # deliberately return rather than assign a transport delta.
+    joystick_dispatch = input_source.split(
+        "if (event.control == PET_P4_INPUT_CONTROL_JOYSTICK", 1
+    )[1].split("bool side_input", 1)[0]
+    left_case = re.search(r'case PET_P4_JOYSTICK_LEFT:([\s\S]*?)break;', joystick_dispatch)
+    right_case = re.search(r'case PET_P4_JOYSTICK_RIGHT:([\s\S]*?)break;', joystick_dispatch)
     assert left_case and "event.delta = -1;" in left_case.group(1)
     assert right_case and "event.delta = 1;" in right_case.group(1)
     assert "pet_p4_miniapp_catalog_move(direction)" in input_source
@@ -2408,7 +2423,7 @@ def test_p4_hardware_inputs_are_debounced_persistent_and_configurable():
     renderer = read_required("main/pet_p4_renderer.c")
     assert 'draw_text_line("组件中心"' in renderer
     assert '"已安装 %u 个"' in renderer
-    assert '"摇杆选择    确认键打开    全局键返回"' in renderer
+    assert '"上下左右选择    按下打开    全局键返回"' in renderer
     # The page-dot overlay was intentionally removed; navigation still uses the native catalog.
     assert 'draw_page_indicator(' not in renderer
     assert "dispatch_component_binding_event" in input_source

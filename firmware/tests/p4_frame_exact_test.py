@@ -29,13 +29,14 @@ struct lv_font_glyph_dsc{int box_w,box_h,ofs_x,ofs_y,req_raw_bitmap;font_t *reso
 static unsigned releases;
 static uint8_t bitmap[100];
 static const uint8_t *get_bitmap(lv_font_glyph_dsc_t*g,void*v){(void)v;return g->box_w==19?NULL:bitmap;}
-static font_t pet_p4_font_cn_16={24,5,get_bitmap};
+static font_t pet_p4_font_cn_16_a4={24,5,get_bitmap};
 static bool lv_font_get_glyph_dsc(font_t*f,lv_font_glyph_dsc_t*g,uint32_t cp,uint32_t next){
  (void)next;if(!cp)return false;
  *g=(lv_font_glyph_dsc_t){.box_w=7+cp%17,.box_h=9+cp%15,.ofs_x=(int)(cp%5)-2,.ofs_y=(int)(cp%7)-3,.resolved_font=f};return true;
 }
 static void lv_font_glyph_release_draw_data(lv_font_glyph_dsc_t*g){(void)g;releases++;}
 static float glyph_alpha_at(const uint8_t*p,const lv_font_glyph_dsc_t*g,int x,int y){(void)p;(void)g;return (x+y)%7<5?0:(x*53+y*29)%256;}
+#define pet_glyph_lookup(g,cp,next) lv_font_get_glyph_dsc(&pet_p4_font_cn_16_a4,(g),(cp),(next))
 static const pet_surface_font_t *app_font_glyph(uint32_t cp,int*index){
  static const pet_surface_font_t f={32,24};*index=3;return cp==1?&f:NULL;
 }
@@ -78,7 +79,7 @@ def _glyph_code(wide):
     code=GLYPH_HARNESS
     if wide:
         code=code.replace('.box_w=7+cp%17','.box_w=7+cp%97').replace('f={32,24}','f={32,96}')
-    for name in ('blend_rgb565','app_clip_contains','blend_px','app_glyph_sample','app_prepare_glyph_rows',
+    for name in ('blend_rgb565','app_clip_contains','blend_px','app_glyph_sample','app_font_cell_origin_y','app_prepare_glyph_rows',
                  'app_glyph_row_alpha','glyph_pixel_bounds','glyph_pixel_store'):
         code+=function(text,name)+'\n'
     for fast in (0,1):

@@ -18,6 +18,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 #include "esp_app_desc.h"
@@ -44,15 +45,8 @@ static httpd_handle_t s_server;
 static pet_p4_http_submit_fn s_submit;
 static uint32_t s_post_count;
 
-static void set_cors(httpd_req_t *req) {
-  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-  httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
-  httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-}
-
 static esp_err_t json_reply(httpd_req_t *req, const char *status, const char *body) {
   httpd_resp_set_type(req, "application/json");
-  set_cors(req);
   if (status) httpd_resp_set_status(req, status);
   return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
 }
@@ -223,7 +217,20 @@ static bool submit_body(httpd_req_t *req) {
   return ok;
 }
 
+static bool http_request_is_non_browser_json(httpd_req_t *req) {
+  /* This is a browser-CSRF guard, not authentication of LAN clients. */
+  if (httpd_req_get_hdr_value_len(req, "Origin") != 0) return false;
+  char type[64];
+  if (httpd_req_get_hdr_value_str(req, "Content-Type", type, sizeof(type)) != ESP_OK) return false;
+  static const char json_type[] = "application/json";
+  size_t n = sizeof(json_type) - 1;
+  return strncasecmp(type, json_type, n) == 0 && (type[n] == '\0' || type[n] == ';');
+}
+
 static esp_err_t state_post(httpd_req_t *req) {
+  if (!http_request_is_non_browser_json(req)) {
+    return json_reply(req, "403 Forbidden", "{\"ok\":false,\"error\":\"browser_origin_or_content_type\"}");
+  }
   if (!submit_body(req)) {
     return json_reply(req, "400 Bad Request",
                       "{\"ok\":false,\"error\":\"invalid_or_queue_busy\"}");
@@ -232,9 +239,7 @@ static esp_err_t state_post(httpd_req_t *req) {
 }
 
 static esp_err_t options_handler(httpd_req_t *req) {
-  set_cors(req);
-  httpd_resp_set_status(req, "204 No Content");
-  return httpd_resp_send(req, NULL, 0);
+  return json_reply(req, "403 Forbidden", "{\"ok\":false,\"error\":\"browser_origin\"}");
 }
 
 esp_err_t pet_p4_http_init(pet_p4_http_submit_fn submit) {

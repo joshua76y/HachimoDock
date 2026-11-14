@@ -61,7 +61,7 @@ import VoiceDraftCard from "./dashboard/VoiceDraftCard.jsx";
 import {voiceRuntimeTarget,createVoiceRuntimePoller} from "./dashboard/voice-runtime-target.js";
 import RealtimeChatPanel, { realtimeStateLabel } from "./dashboard/RealtimeChatPanel.jsx";
 import { isRecoveringAsr } from "./lib/realtime-feedback.js";
-import { useAgentSessionFeed } from "./dashboard/useAgentSessionFeed.js";
+import { useMultiAgentSessionFeed } from "./dashboard/useMultiAgentSessionFeed.js";
 import { useDeviceVoiceRouter } from "./dashboard/useDeviceVoiceRouter.js";
 import { subscribeAsrCredentialUpdates } from "./dashboard/voice-credential-events.js";
 import { useP4SessionSync } from "./dashboard/useP4SessionSync.js";
@@ -140,7 +140,7 @@ export const BUTTON_FUNCTION_OPTIONS = [
   { id: "session_next", label: "下一个会话", detail: "宠物界面切换到下一个会话气泡；组件中心切换到下一个组件。" },
   { id: "agent_next", label: "下一个 Agent", detail: "在本机检测到的 Agent 之间循环切换跟随目标（设备与 PC 同步切换）。" },
   { id: "agent_previous", label: "上一个 Agent", detail: "在本机检测到的 Agent 之间反向循环切换跟随目标。" },
-  { id: "session_clear", label: "清空主页会话", detail: "清除设备主页当前显示的全部会话；新会话或新活动会自动重新显示。" },
+  { id: "session_clear", label: "关闭消息提示", detail: "关闭宠物页当前消息提示，不停止 Agent、不影响录音；有新消息或新活动时会自动再次显示。" },
   { id: "dsh_interrupt", label: "打断 DSH 当前任务", detail: "仅在跟随 DeepSeek Harness 时可用：取消当前正在执行的回合。" },
   { id: "component_center", label: "切换宠物/组件", detail: "切换宠物界面和组件列表；组件运行时请先返回。" },
   { id: "page_enter", label: "确认", detail: "发送语音输入的文字，或打开选中的组件；组件内按其玩法操作。" },
@@ -808,6 +808,7 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
     agentOptions,
     agentAppearanceMap,
     appearances,
+    enabledAgents,
   } = useDeviceContext();
   const selectedAgentId = currentDisplay.agentId;
   const { push } = useToast();
@@ -1115,15 +1116,23 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
   const mergeDismissedP4Sessions = useCallback((dismissed) => {
     setDismissedP4Sessions((current) => ({ ...current, ...dismissed }));
   }, []);
-  const sessionFeed = useAgentSessionFeed({
-    agentId: selectedAgentId,
+  const monitoredP4AgentIds = useMemo(
+    () => [...(enabledAgents || [])].filter((agentId) => typeof agentId === "string" && agentId),
+    [enabledAgents],
+  );
+  const [deviceSessionAgentId, setDeviceSessionAgentId] = useState(selectedAgentId);
+  useEffect(() => {
+    setDeviceSessionAgentId(selectedAgentId);
+  }, [selectedAgentId]);
+  const sessionFeed = useMultiAgentSessionFeed({
+    agentIds: monitoredP4AgentIds,
     displayEnabled: true,
     dismissedSessions: dismissedP4Sessions,
   });
   const p4SessionSync = useP4SessionSync({
     enabled: isP4Runtime,
     boardDeviceId: p4TargetBoardDeviceId,
-    agentId: selectedAgentId,
+    agentId: deviceSessionAgentId || selectedAgentId,
     usbConnected: usb.connected,
     usbConnectionId: usb.connectionId,
     usbBootId: usb.bootId || usb.capabilities?.debugBootId || "",
@@ -1133,9 +1142,16 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
     sessionsLoaded: sessionFeed.loaded,
     dismissedSessions: dismissedP4Sessions,
     onDismissSessions: mergeDismissedP4Sessions,
+    onAgentChange: setDeviceSessionAgentId,
     formatSessionOption: formatVoiceSessionOption,
     push,
   });
+  useEffect(() => {
+    const activity = sessionFeed.latestActivity;
+    if (!activity?.agentId || !activity?.sessionId) return;
+    setDeviceSessionAgentId(activity.agentId);
+    p4SessionSync.onSessionChange(activity.sessionId);
+  }, [p4SessionSync.onSessionChange, sessionFeed.latestActivity]);
   const selectedAgentBusSessions = sessionFeed.sessions;
   const selectedAgentRoutingSessions = sessionFeed.routingSessions;
   const selectedAgentSessionsLoaded = sessionFeed.loaded;

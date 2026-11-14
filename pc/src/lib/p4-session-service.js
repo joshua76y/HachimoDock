@@ -12,6 +12,7 @@ import {
 } from "./session-display.js";
 
 const P4_DEVICE_SESSION_LIMIT = 8;
+const P4_SCOPED_SESSION_SEPARATOR = "::";
 
 // Keep ordering within one owner, but never execute a queued operation after
 // its Agent/USB scope has retired. A rejected operation is never replayed.
@@ -91,6 +92,43 @@ export function buildP4RoutingSessions(sessions) {
   );
   return [...sessionsById.values()]
     .sort((a, b) => recency(b) - recency(a));
+}
+
+// The board returns only one sessionId for a joystick action.  Session IDs are
+// scoped by their Agent before crossing that boundary, so two desktop Agents
+// can each expose an otherwise identical local id without selecting the wrong
+// conversation on the return trip.
+export function p4ScopedSessionId(agentId, sessionId) {
+  const agent = normalizeSessionText(agentId);
+  const id = normalizeSessionText(sessionId);
+  return agent && id ? `${agent}${P4_SCOPED_SESSION_SEPARATOR}${id}` : "";
+}
+
+export function parseP4ScopedSessionId(value) {
+  const scoped = normalizeSessionText(value);
+  const separator = scoped.indexOf(P4_SCOPED_SESSION_SEPARATOR);
+  if (separator <= 0 || separator >= scoped.length - P4_SCOPED_SESSION_SEPARATOR.length) {
+    return { agentId: "", sessionId: "" };
+  }
+  return {
+    agentId: scoped.slice(0, separator),
+    sessionId: scoped.slice(separator + P4_SCOPED_SESSION_SEPARATOR.length),
+  };
+}
+
+export function buildP4MultiAgentRoutingSessions(feeds) {
+  const routed = [];
+  for (const feed of Array.isArray(feeds) ? feeds : []) {
+    const agentId = normalizeSessionText(feed?.agentId);
+    if (!agentId) continue;
+    for (const session of buildP4RoutingSessions(feed?.sessions)) {
+      const sourceSessionId = normalizeSessionText(session?.id);
+      const id = p4ScopedSessionId(agentId, sourceSessionId);
+      if (!id) continue;
+      routed.push({ ...session, id, agentId, sourceSessionId });
+    }
+  }
+  return buildP4RoutingSessions(routed);
 }
 
 export function mergeP4SessionSnapshot(previousSessions, incomingSessions) {
