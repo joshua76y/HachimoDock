@@ -4,6 +4,30 @@ import subprocess
 from p4_render_trace_test import function
 ROOT=Path(__file__).resolve().parents[1]
 
+def test_catalog_boot_validation_reuses_verified_private_scratch():
+    source = (ROOT / 'main/pet_p4_miniapp.c').read_text()
+    assert 'static bool parse_runtime_impl(' in source
+    parser = source[source.index('static bool parse_runtime_impl('):source.index('static bool parse_runtime(', source.index('static bool parse_runtime_impl(') + 1)]
+    assert 'bool private_scratch' in parser
+    assert 'parsed = private_scratch ? runtime : (miniapp_runtime_t *) calloc(1, sizeof(*parsed));' in parser
+    assert 'if (!private_scratch) {' in parser
+    assert 'if (!private_scratch) free(parsed);' in parser
+
+    assert 'static bool catalog_reuse_verified_item(' in source
+    reuse = source[source.index('static bool catalog_reuse_verified_item('):source.index('static bool validate_catalog_snapshot(', source.index('static bool catalog_reuse_verified_item('))]
+    for field in ('widget_checksum', 'buttons_checksum', 'sprites_checksum', 'resource_state', 'image_count'):
+        assert field in reuse
+
+    validate = source[source.index('static bool validate_catalog_snapshot('):source.index('static bool load_catalog_snapshot(', source.index('static bool validate_catalog_snapshot('))]
+    assert 'catalog_reuse_verified_item(&snapshot->items[i], verified)' in validate
+    assert 'load_catalog_runtime_item_impl(' in validate
+    assert 'true,' in validate
+    assert 'unsigned *physical_loads' in validate
+
+    init = source[source.index('esp_err_t pet_p4_miniapp_init(void)'):]
+    assert 'load_catalog_snapshot(0, snapshot0, NULL)' in init
+    assert 'load_catalog_snapshot(1, snapshot1, snapshot0)' in init
+
 def run(tmp_path,code,name='entry'):
     src=tmp_path/f'{name}.c';exe=tmp_path/name;src.write_text(code)
     subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-Wno-misleading-indentation','-Wno-unused-function','-Wno-unused-variable','-Wno-unused-parameter','-fsanitize=address,undefined','-I',str(ROOT/'main'),'-I',str(ROOT/'tests/vendor/cjson'),str(src),'-o',str(exe)],check=True)
