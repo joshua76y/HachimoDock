@@ -38,7 +38,12 @@ static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 static SemaphoreHandle_t g_transport_mutex = &mutex;
 static bool g_transport_ready = true;
 static char g_transport_log_buffer[1024];
-typedef enum {PET_P4_TRANSPORT_BROADCAST, PET_P4_TRANSPORT_UART, PET_P4_TRANSPORT_USB_SERIAL_JTAG} pet_p4_transport_route_t;
+typedef enum {PET_P4_TRANSPORT_BROADCAST, PET_P4_TRANSPORT_UART, PET_P4_TRANSPORT_USB_SERIAL_JTAG, PET_P4_TRANSPORT_TCP} pet_p4_transport_route_t;
+/* TCP session delivery is covered separately; this queue test has no TCP
+ * context and therefore verifies only its physical media/log transport. */
+static bool pet_p4_tcp_context_is_tcp(void *ctx) {(void)ctx;return false;}
+static bool pet_p4_tcp_context_is_current(void *ctx) {(void)ctx;return false;}
+static void pet_p4_tcp_broadcast_line(const char *line) {(void)line;}
 static char usb_queue[262144], uart_queue[262144];
 static size_t usb_used, uart_used;
 static int drains, console_writes;

@@ -127,7 +127,7 @@ def test_default_off_module_empty_and_invalid_parent_refuses_compile(tmp_path):
   assert result.returncode and 'requires PET_FONT_BITMAP_PACKED and PET_FONT_METRICS_PACKED' in result.stderr
 
 
-def test_actual_renderer_routes_only_scale2_and_reads_baseline_before_release(tmp_path):
+def test_actual_renderer_routes_native32_at_scale2_or_larger_and_reads_baseline_before_release(tmp_path):
  from p4_render_trace_test import function
  text=(ROOT/'main/pet_p4_renderer.c').read_text()
  helpers=function(text,'scaled_glyph_dsc')+function(text,'scaled_glyph_baseline')+function(text,'glyph_visual_bounds')+function(text,'glyph_width')+function(text,'draw_lvgl_glyph')
@@ -142,6 +142,7 @@ static const lv_font_t pet_p4_font_cn_16={18,3},pet_p4_font_cn_32={36,6};
 static unsigned native_calls,legacy_calls,releases;
 static bool pet_p4_font_native32_has_glyph(uint32_t cp){return cp=='A';}
 static bool lv_font_get_glyph_dsc(const lv_font_t*f,lv_font_glyph_dsc_t*g,uint32_t cp,uint32_t next){(void)next;assert(cp);if(f==&pet_p4_font_cn_32)native_calls++;else legacy_calls++;*g=(lv_font_glyph_dsc_t){.resolved_font=f,.adv_w=f==&pet_p4_font_cn_32?19:9,.box_w=2,.box_h=4,.ofs_y=-2};return true;}
+static bool pet_glyph_lookup(lv_font_glyph_dsc_t*g,uint32_t cp,uint32_t next){return lv_font_get_glyph_dsc(&pet_p4_font_cn_16,g,cp,next);}
 static uint8_t glyph_alpha_at(const uint8_t*b,const lv_font_glyph_dsc_t*g,int x,int y){(void)b;(void)g;(void)x;(void)y;return 255;}
 static const void*bitmap(lv_font_glyph_dsc_t*g,void*b){(void)g;(void)b;static const uint8_t data[4]={255,255,255,255};return data;}
 static void lv_font_glyph_release_draw_data(lv_font_glyph_dsc_t*g){releases++;memset(g,0,sizeof(*g));}
@@ -159,7 +160,7 @@ static void draw_glyph5x7(int x,int y,char ch,uint16_t c,int scale){(void)x;(voi
 '''
  code+=helpers+r'''
 int main(void){
- lv_font_glyph_dsc_t g;for(int scale=1;scale<=3;scale++){int actual=scale;assert(scaled_glyph_dsc('A',0,&g,&actual));assert(g.resolved_font==(scale==2?&pet_p4_font_cn_32:&pet_p4_font_cn_16));assert(actual==(scale==2?1:scale));}
+ lv_font_glyph_dsc_t g;for(int scale=1;scale<=5;scale++){int actual=scale;assert(scaled_glyph_dsc('A',0,&g,&actual));assert(g.resolved_font==(scale>=2?&pet_p4_font_cn_32:&pet_p4_font_cn_16));assert(actual==(scale>=2?scale/2:scale));}
  int scale=2;assert(scaled_glyph_dsc(0x9f98,0,&g,&scale)&&scale==2&&g.resolved_font==&pet_p4_font_cn_16);
  unsigned before=native_calls;assert(glyph_width('A',0)==9&&native_calls==before);assert(glyph_width(0xfe0f,0)==0);
  int top,bottom;assert(glyph_visual_bounds('A',0,2,&top,&bottom)&&top==28&&bottom==31);

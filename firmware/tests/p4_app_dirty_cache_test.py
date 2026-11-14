@@ -60,7 +60,7 @@ static void draw_surface_image(const pet_surface_node_t*n){}
 static void draw_app_icon(int icon,int x,int y,int size,uint16_t color);
 static const char*draw_text_line(const char*t,int x,int y,int w,uint16_t c,int scale,bool last){return t+strlen(t);}
 static int app_glyph_width(uint32_t cp,uint32_t next){return cp>127?32:12+cp%9;}
-static void app_text_bounds(const char*text,int*top,int*bottom){*top=1;*bottom=29;}
+static void __attribute__((unused)) app_text_bounds(const char*text,int*top,int*bottom){(void)text;*top=1;*bottom=29;}
 '''
     for n in ('blend_rgb565','app_clip_contains','put_px','fill_rect','fill_ellipse','blend_px','blend_rect','blend_round_rect','fill_round_rect','draw_app_panel'):
         code+=function(text,n)+'\n'

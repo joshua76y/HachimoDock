@@ -145,7 +145,7 @@ def test_actual_common_overlay_commands_match_old_path_and_use_captured_state(tm
 #define PET_P4_UI_HEIGHT 480
 #define P4_BOOT_DIAGNOSTIC_MS 10000
 typedef struct {int local_touch_x,local_touch_y;unsigned asset_family_count;char desktop_device_id[8];bool native_usb_mounted,touch,connected;unsigned long long host_last_seen_ms;}pet_p4_runtime_state_t;
-static bool pet_p4_state_touch_feedback_active(const pet_p4_runtime_state_t*s,unsigned long long t){(void)t;return s&&s->touch;}
+static bool __attribute__((unused)) pet_p4_state_touch_feedback_active(const pet_p4_runtime_state_t*s,unsigned long long t){(void)t;return s&&s->touch;}
 static bool pet_p4_state_host_connected(const pet_p4_runtime_state_t*s,unsigned long long t){(void)t;return s&&s->connected;}
 typedef struct {int op,x,y,w,h,extra;uint16_t color;}command_t;
 static command_t commands[64],expected[64];static unsigned count;
@@ -160,7 +160,7 @@ static void draw_text_line_vcenter(const char*t,int x,int y,int h,int w,uint16_t
  add(4,x,y,w,h,(int)((hash&0xffff)^scale^(last<<20)),c);
 }
 '''
-    for name in ('draw_touch_feedback_pixels','draw_touch_feedback','draw_connection_banner_pixels','draw_connection_banner','draw_common_connection','draw_boot_diagnostic'):
+    for name in ('touch_feedback_overlay_active','draw_touch_feedback_pixels','draw_touch_feedback','draw_connection_banner_pixels','draw_connection_banner','draw_common_connection','draw_boot_diagnostic'):
         code+=function(text,name)+'\n'
     code+=r'''
 int main(void){
@@ -169,7 +169,7 @@ int main(void){
   if(bits&8)strcpy(s.desktop_device_id,"owned");unsigned long long now=bits&64?10001:10000;
   pet_p4_runtime_state_t *state=present?&s:NULL;
   pet_logical_common_plan_t p=pet_logical_common_plan(state!=NULL,
-   pet_p4_state_touch_feedback_active(state,now),state?state->local_touch_x:0,state?state->local_touch_y:0,
+   touch_feedback_overlay_active(state,now),state?state->local_touch_x:0,state?state->local_touch_y:0,
    state&&pet_p4_state_host_connected(state,now),state&&state->asset_family_count>0,state&&state->desktop_device_id[0],
    state&&state->native_usb_mounted,state&&state->host_last_seen_ms>0,now<=P4_BOOT_DIAGNOSTIC_MS);
   memset(commands,0,sizeof(commands));count=0;

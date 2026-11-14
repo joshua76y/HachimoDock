@@ -56,7 +56,12 @@ def actual_serial_tx_source():
 #define portMAX_DELAY UINT32_MAX
 #define PET_P4_UART_NUM 0
 #define ESP_OK 0
-typedef enum {PET_P4_TRANSPORT_BROADCAST,PET_P4_TRANSPORT_UART,PET_P4_TRANSPORT_USB_SERIAL_JTAG} pet_p4_transport_route_t;
+typedef enum {PET_P4_TRANSPORT_BROADCAST,PET_P4_TRANSPORT_UART,PET_P4_TRANSPORT_USB_SERIAL_JTAG,PET_P4_TRANSPORT_TCP} pet_p4_transport_route_t;
+/* TCP has dedicated session-identity coverage; this serial fixture only
+ * exercises the legacy physical routes. */
+static bool pet_p4_tcp_context_is_tcp(void *ctx){(void)ctx;return false;}
+static bool pet_p4_tcp_context_is_current(void *ctx){(void)ctx;return false;}
+static void pet_p4_tcp_broadcast_line(const char *line){(void)line;}
 static int g_transport_mutex=1;
 static unsigned locks,takes,gives,writes[2],drains[2],native_calls;
 static char wire[2][66000],native[66000];static size_t used[2];

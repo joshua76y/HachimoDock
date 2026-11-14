@@ -41,7 +41,13 @@ def test_native32_subset_retains_gray_ink_and_fallback_layout_advances():
     assert set(range(32,127))<=codes.keys() and codes.keys()<=ids.keys()
     renderer=(ROOT/'main/pet_p4_renderer.c').read_text()
     assert 'pet_p4_font_native32_has_glyph(cp)' in renderer
-    assert 'return lv_font_get_glyph_dsc(&pet_p4_font_cn_16,glyph,cp,next)' in renderer
+    # The production renderer first searches the primary 16px atlas, then the
+    # GB2312 level-2 extension.  Keep this test coupled to that fallback
+    # contract rather than to the old, single-font implementation detail.
+    assert 'static bool pet_glyph_lookup' in renderer
+    assert '&pet_p4_font_cn_16_a4' in renderer
+    assert '&pet_p4_font_cn_16_l2' in renderer
+    assert 'return pet_glyph_lookup(glyph, cp, next);' in renderer
     for cp,i in codes.items():
         offset,advance,w,h,_,_=glyphs[i];end=glyphs[i+1][0] if i+1<len(glyphs) else len(bitmap)
         assert offset+(w*h*2+7)//8==end

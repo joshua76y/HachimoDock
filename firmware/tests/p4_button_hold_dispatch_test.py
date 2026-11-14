@@ -7,7 +7,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_physical_hold_owns_depression_without_legacy_ptt_or_release_replay(tmp_path):
     source = (ROOT / "main/pet_p4_input.c").read_text()
-    controls = source[source.index("typedef enum {\n  PET_P4_INPUT_CONTROL_SW1"):]
+    # Input configuration v10 names physical keys after the silkscreen labels
+    # (button.1 … button.4), while retaining a migration path for sw1 aliases.
+    controls = source[source.index("typedef enum {\n  PET_P4_INPUT_CONTROL_KEY1"):]
     controls = controls[:controls.index("typedef struct {\n  gpio_num_t")]
     priority = source[source.index("static const pet_p4_input_binding_t *active_global_priority_binding("):]
     priority = priority[:priority.index("static bool dispatch_component_binding_event(")]
@@ -32,15 +34,15 @@ static pet_p4_input_binding_t hold={"voice_ptt"}, short_binding={"disabled"}, lo
 static bool conversation, motion=true, press, accept=true;
 static int starts, releases, cancels, dispatched, voice_events;
 static unsigned long long now;
-static const char *button_event_prefix(pet_p4_input_control_t c){return c==PET_P4_INPUT_CONTROL_SW1?"button.sw1":"button.sw2";}
+static const char *button_event_prefix(pet_p4_input_control_t c){return c==PET_P4_INPUT_CONTROL_KEY1?"button.1":"button.2";}
 static const pet_p4_input_binding_t *active_binding(const char *e){
-  if(!strcmp(e,"button.sw1.hold"))return &hold;
-  if(!strcmp(e,"button.sw1.short_press"))return &short_binding;
-  if(!strcmp(e,"button.sw1.long_press"))return &long_binding;
+  if(!strcmp(e,"button.1.hold"))return &hold;
+  if(!strcmp(e,"button.1.short_press"))return &short_binding;
+  if(!strcmp(e,"button.1.long_press"))return &long_binding;
   return NULL;
 }
 static bool pet_p4_conversation_active(const pet_p4_runtime_state_t *s){(void)s;return conversation;}
-static bool pet_p4_miniapp_hold_input(const char *e){return motion&&!strcmp(e,"button.sw1.short_press");}
+static bool pet_p4_miniapp_hold_input(const char *e){return motion&&!strcmp(e,"button.1.short_press");}
 static bool pet_p4_miniapp_input_policy(const char *e,bool down){(void)e;(void)down;return press;}
 static bool pet_p4_miniapp_has_input(const char *e){(void)e;return false;}
 static bool pet_p4_miniapp_resolve_input(const char *e,char *a,size_t n){(void)e;snprintf(a,n,"jump.charge");return true;}
@@ -61,7 +63,7 @@ static void queue_event(pet_p4_input_control_t c,pet_p4_input_gesture_t g,int d)
 }
 ''' + queue + r'''
 static void samples(pet_p4_button_decoder_t *d,bool down,int ms){
-  for(int i=0;i<ms;i+=5){now+=5;queue_button_flags(PET_P4_INPUT_CONTROL_SW1,pet_p4_button_decoder_update(d,down,5));}
+  for(int i=0;i<ms;i+=5){now+=5;queue_button_flags(PET_P4_INPUT_CONTROL_KEY1,pet_p4_button_decoder_update(d,down,5));}
 }
 static void stroke(int ms){
   pet_p4_button_decoder_t d;pet_p4_button_decoder_init(&d,false,25,700);

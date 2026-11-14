@@ -3676,14 +3676,29 @@ static void draw_touch_feedback_pixels(int x,int y) {
  * 确认「点击被识别」用的。移植到微雪 4.3" 后有实体 5 键 + 独立侧栏，不需要它；
  * 而且它画在逻辑帧上，经旋转 + 只推内容区后，擦除帧可能被 frame_unchanged
  * 优化跳过，留下一个不会消失的点。默认关闭，需要时改成 1 并配合下面的强制刷新。 */
+#ifndef PET_P4_TOUCH_FEEDBACK_DOTS
 #define PET_P4_TOUCH_FEEDBACK_DOTS 0
+#endif
+
+static bool touch_feedback_overlay_active(
+  const pet_p4_runtime_state_t *state,
+  unsigned long long now_ms
+) {
+#if PET_P4_TOUCH_FEEDBACK_DOTS
+  return pet_p4_state_touch_feedback_active(state, now_ms);
+#else
+  (void) state;
+  (void) now_ms;
+  return false;
+#endif
+}
 
 static void draw_touch_feedback(
   const pet_p4_runtime_state_t *state,
   unsigned long long now_ms
 ) {
 #if PET_P4_TOUCH_FEEDBACK_DOTS
-  if (!pet_p4_state_touch_feedback_active(state, now_ms)) return;
+  if (!touch_feedback_overlay_active(state, now_ms)) return;
   draw_touch_feedback_pixels(state->local_touch_x,state->local_touch_y);
 #else
   (void) state;
@@ -7449,7 +7464,7 @@ esp_err_t pet_p4_renderer_render(
 #if PET_P4_APP_RETAIN_LOGICAL
   /* Keep all new planning work INSIDE the unchanged whole-frame clock. */
   g_app_common_plan=pet_logical_common_plan(state!=NULL,
-    pet_p4_state_touch_feedback_active(state,now_ms),state?state->local_touch_x:0,state?state->local_touch_y:0,
+    touch_feedback_overlay_active(state,now_ms),state?state->local_touch_x:0,state?state->local_touch_y:0,
     state&&pet_p4_state_host_connected(state,now_ms),state&&state->asset_family_count>0,
     state&&state->desktop_device_id[0],state&&state->native_usb_mounted,state&&state->host_last_seen_ms>0,
     now_ms<=P4_BOOT_DIAGNOSTIC_MS);
@@ -7637,7 +7652,7 @@ esp_err_t pet_p4_renderer_render(
    * 面板改成「只推内容区 + 侧栏独立推」之后，若这一帧恰好被 frame_unchanged
    * 判为无变化，旧叠加层的像素就会永久留在屏上 —— 这是「点不消失」的根治点。 */
   static bool s_overlay_was_visible;
-  bool overlay_visible = pet_p4_state_touch_feedback_active(state, now_ms);
+  bool overlay_visible = touch_feedback_overlay_active(state, now_ms);
   if (s_overlay_was_visible && !overlay_visible) unchanged = false;
   s_overlay_was_visible = overlay_visible;
 #if PET_P4_RENDER_LCD_SPLIT_PROBE

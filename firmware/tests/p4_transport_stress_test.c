@@ -23,7 +23,11 @@ static SemaphoreHandle_t g_transport_mutex = &transport_mutex;
 static bool g_transport_ready = true;
 static char g_transport_log_buffer[1024];
 typedef enum { PET_P4_TRANSPORT_BROADCAST, PET_P4_TRANSPORT_UART,
-  PET_P4_TRANSPORT_USB_SERIAL_JTAG } pet_p4_transport_route_t;
+  PET_P4_TRANSPORT_USB_SERIAL_JTAG, PET_P4_TRANSPORT_TCP } pet_p4_transport_route_t;
+/* This physical driver stress harness never creates TCP context cookies. */
+static bool pet_p4_tcp_context_is_tcp(void *ctx) {(void)ctx;return false;}
+static bool pet_p4_tcp_context_is_current(void *ctx) {(void)ctx;return false;}
+static void pet_p4_tcp_broadcast_line(const char *line) {(void)line;}
 static struct { void *raw; int resources; } g_screenshot = {(void *)1, 0};
 static atomic_bool audio_busy;
 static atomic_uint fake_tick;
