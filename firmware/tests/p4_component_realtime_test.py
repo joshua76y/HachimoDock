@@ -19,7 +19,7 @@ def test_global_realtime_remapping_wins_over_components(tmp_path):
 #define PET_P4_MINIAPP_ACTION_MAX 64
 #define ESP_OK 0
 typedef struct {char event[64],action[64],value[64];} pet_p4_input_binding_t;
-typedef struct {char screen_page[24];bool session_voice_active;int session_queue_count;uint64_t last_update_ms;pet_p4_slice_t touch_test;uint64_t touch_test_until_ms;} pet_p4_runtime_state_t;
+typedef struct {char screen_page[24],voice_notice_text[96];bool session_voice_active;int session_queue_count;uint64_t last_update_ms,voice_notice_until_ms;pet_p4_slice_t touch_test;uint64_t touch_test_until_ms;} pet_p4_runtime_state_t;
 typedef struct {uint64_t ts_ms;} pet_p4_input_event_t;
 typedef void (*pet_p4_send_line_fn)(const char*,void*);
 static pet_p4_input_binding_t configured;
@@ -37,6 +37,15 @@ static bool dispatch_component_binding_event(pet_p4_runtime_state_t *s,pet_p4_se
 static int pet_p4_audio_capture_start(bool b){(void)b;return 0;}
 static int pet_p4_audio_capture_stop(void){return 0;}
 static void pet_p4_media_stop_background(pet_p4_send_line_fn f,void *ctx){(void)f;(void)ctx;assert(false);}
+typedef enum {PET_P4_VOICE_PTT_FAILED,PET_P4_VOICE_PTT_STARTED,PET_P4_VOICE_PTT_BUSY} pet_p4_voice_ptt_begin_result_t;
+static bool pet_p4_voice_ptt_draft_active(void){return false;}
+static const char *voice_draft_action_for_event(const char *event_name){(void)event_name;return NULL;}
+static pet_p4_voice_ptt_begin_result_t pet_p4_voice_ptt_begin(bool idle){(void)idle;return PET_P4_VOICE_PTT_FAILED;}
+/* Native component-page navigation has its own focused suite.  This fixture
+ * isolates the competing global realtime mapping, so it deliberately lets
+ * that earlier branch decline the event. */
+static bool native_joystick_event(const char *event_name){return event_name&&!strncmp(event_name,"joystick.",9);}
+static bool dispatch_native_joystick_event(pet_p4_runtime_state_t *s,pet_p4_send_line_fn f,void *c,const pet_p4_input_event_t *e,const char *n,const char *g){(void)s;(void)f;(void)c;(void)e;(void)n;(void)g;return false;}
 ''' + function("static bool component_system_action(") + function("static const pet_p4_input_binding_t *active_global_priority_binding(") + function("static void dispatch_binding_event(") + r'''
 int main(void){
   pet_p4_runtime_state_t state={.screen_page="app"};pet_p4_input_event_t event={0};
@@ -48,7 +57,11 @@ int main(void){
     dispatch_binding_event(&state,NULL,NULL,&event,keys[i],"long_press");
     assert(!package_calls&&emitted==1&&!strcmp(emitted_action,"realtime_chat"));
     conversation=true;dispatch_binding_event(&state,NULL,NULL,&event,keys[i],"long_press");
-    assert(emitted==2&&!moved); // Remapped directions also exit, not scroll.
+    /* While a conversation is active, its native joystick navigation owns
+     * directions.  Configured bindings remain the exit path for physical
+     * keys/knob; this keeps pet-page-only remapping from leaking here. */
+    if (!strcmp(keys[i],"joystick.up")) assert(emitted==1&&moved==-1);
+    else assert(emitted==2&&!moved);
   }
   conversation=false;copy_text(configured.action,sizeof(configured.action),"disabled");
   package_calls=0;dispatch_binding_event(&state,NULL,NULL,&event,configured.event,"short_press");assert(package_calls==1);
@@ -62,7 +75,7 @@ int main(void){
   dispatch_binding_event(&state,NULL,NULL,&event,configured.event,"long_press");
   assert(!strcmp(state.screen_page,"main")&&!strcmp(emitted_action,"realtime_chat"));
   copy_text(state.screen_page,sizeof(state.screen_page),"touch_test");
-  copy_text(configured.event,sizeof(configured.event),"button.sw1.short_press");
+  copy_text(configured.event,sizeof(configured.event),"button.1.short_press");
   copy_text(configured.action,sizeof(configured.action),"page_back");
   dispatch_binding_event(&state,NULL,NULL,&event,configured.event,"short_press");
   assert(!strcmp(state.screen_page,"main")&&!strcmp(emitted_action,"page_back"));

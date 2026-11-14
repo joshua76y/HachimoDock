@@ -329,7 +329,9 @@ static void redraw(const char *clock, const char *date, const char *net,
   text("电量", 14, 130, C_DIM, 1);
   draw_battery(14, 154, batt);
   if (batt >= 0) {
-    char buf[8];
+    /* Keep this safe even when a host/test caller supplies an unchecked int.
+     * A signed 32-bit decimal value plus '%' and NUL needs 13 bytes. */
+    char buf[16];
     snprintf(buf, sizeof(buf), "%d%%", batt);
     text(buf, 54, 153, C_TEXT, 1);
   } else {

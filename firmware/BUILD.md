@@ -1,6 +1,6 @@
 # 固件构建与烧录 / Firmware build and flashing
 
-当前源码版本 **0.7.103-p4-r179**，配套桌面端 **0.1.198**。版本号不是源码完全对应已发布安装包的证明；197 的具体对应关系见 [Release 源码说明](https://github.com/YizhengWw/HachimoDock/releases/tag/v0.1.197)。设备功能、输入、分区和出厂组件见 [固件说明](README.md)，字段契约见 [protocol.md](protocol.md)。
+当前源码版本 **0.7.103-p4-r183**，配套桌面端 **0.1.198**。版本号不是源码完全对应已发布安装包的证明；197 的具体对应关系见 [Release 源码说明](https://github.com/YizhengWw/HachimoDock/releases/tag/v0.1.197)。设备功能、输入、分区和出厂组件见 [固件说明](README.md)，字段契约见 [protocol.md](protocol.md)。
 
 ## 选择构建目标
 
