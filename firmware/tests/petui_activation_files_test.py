@@ -9,8 +9,8 @@ def test_actual_loader_preserves_input_metadata_on_io_and_checksum_errors(tmp_pa
     code = (ROOT / "main/pet_p4_miniapp.c").read_text()
     reads = code[code.index("static bool read_file_kind("):
                  code.index("bool pet_p4_miniapp_installed_id(")]
-    loader = code[code.index("static bool load_catalog_runtime_item("):
-                  code.index("static bool validate_catalog_snapshot(")]
+    loader = code[code.index("static bool load_catalog_runtime_item_impl("):
+                  code.index("static bool catalog_reuse_verified_item(")]
     src = r'''
 #include <assert.h>
 #include <errno.h>
@@ -29,7 +29,7 @@ def test_actual_loader_preserves_input_metadata_on_io_and_checksum_errors(tmp_pa
 #define pet_widget_trace_scope_end(p) ((void)(p))
 typedef struct {uint8_t count;size_t size;uint8_t bytes[128];} pet_p4_miniapp_sprite_pack_t;
 typedef struct {char widget_id[48];unsigned slot,package_generation,widget_checksum,buttons_checksum,sprites_checksum,resource_state,image_count;} miniapp_catalog_item_t;
-typedef struct {char widget_id[48];bool active;} miniapp_runtime_t;
+typedef struct {char widget_id[48];bool active;pet_p4_miniapp_sprite_pack_t sprites;} miniapp_runtime_t;
 static bool current=true,error_read,parse_fail;
 static unsigned opens,reads_count,closes,alloc_count,alloc_live,fail_alloc;
 static unsigned fault_file,fault_kind;
@@ -68,9 +68,9 @@ static bool load_sprite_pack(const char *json,size_t slot,uint8_t generation,pet
  if(!read_binary_file("sprite.bin",out->bytes,sizeof(out->bytes),&out->size))return false;
  out->count=1;return true;
 }
-static bool parse_runtime(miniapp_runtime_t *out,const char *id,const char *widget,const char *buttons,
- const pet_p4_miniapp_sprite_pack_t *sprites,char *error,size_t n){
- (void)error;(void)n;if(parse_fail)return false;
+static bool parse_runtime_impl(miniapp_runtime_t *out,const char *id,const char *widget,const char *buttons,
+ const pet_p4_miniapp_sprite_pack_t *sprites,bool private_scratch,char *error,size_t n){
+ (void)private_scratch;(void)error;(void)n;if(parse_fail)return false;
  assert(!strcmp(widget,"WIDGET")&&!strcmp(buttons,"BUTTONS")&&sprites->size==5);
  strcpy(out->widget_id,id);out->active=true;return true;
 }

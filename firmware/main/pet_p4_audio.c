@@ -832,6 +832,9 @@ static bool cext_mix_step(int16_t *pcm,bool blocked) {
  * 不走 PET_P4_SAMPLES（那是组件采样，编译关闭），而是作为一个额外的
  * PCM 源混进 sfx_drain_step 的同一块缓冲，最后由同一个 codec 出口播出。 */
 static FILE *g_prompt_file;
+/* The custom cue stays open across mixer frames. Its filesystem activity must
+ * therefore span the same lifetime, rather than only the initial WAV probe. */
+static pet_fs_activity_t g_prompt_file_activity;
 static size_t g_prompt_left;
 static atomic_bool g_prompt_active;
 
@@ -848,6 +851,7 @@ static bool prompt_mix_step(int16_t *pcm, size_t frames) {
   if (got < need || g_prompt_left == 0) {
     fclose(g_prompt_file);
     g_prompt_file = NULL;
+    pet_fs_activity_end(&g_prompt_file_activity);
     atomic_store(&g_prompt_active, false);
   }
   if (!got) return false;
@@ -868,11 +872,16 @@ bool pet_p4_audio_prompt_play(const char *event) {
   char path[96];
   if (!pet_p4_sound_catalog_custom_path(event, path, sizeof(path))) return false;
   if (!pet_p4_sound_catalog_has_custom(event)) return false;
+  pet_fs_activity_t file_activity = pet_fs_activity_begin();
   FILE *file = fopen(path, "rb");
-  if (!file) return false;
+  if (!file) {
+    pet_fs_activity_end(&file_activity);
+    return false;
+  }
   uint8_t header[44];
   if (fread(header, 1, sizeof(header), file) != sizeof(header)) {
     fclose(file);
+    pet_fs_activity_end(&file_activity);
     return false;
   }
   fseek(file, 0, SEEK_END);
@@ -880,10 +889,15 @@ bool pet_p4_audio_prompt_play(const char *event) {
   fseek(file, (long) sizeof(header), SEEK_SET);
   if (size <= (long) sizeof(header)) {
     fclose(file);
+    pet_fs_activity_end(&file_activity);
     return false;
   }
-  if (g_prompt_file) fclose(g_prompt_file);
+  if (g_prompt_file) {
+    fclose(g_prompt_file);
+    pet_fs_activity_end(&g_prompt_file_activity);
+  }
   g_prompt_file = file;
+  g_prompt_file_activity = file_activity;
   g_prompt_left = (size_t) (size - (long) sizeof(header));
   atomic_store(&g_prompt_active, true);
   return true;

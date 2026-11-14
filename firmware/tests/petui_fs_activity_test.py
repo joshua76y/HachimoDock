@@ -109,7 +109,12 @@ def test_all_independent_spiffs_entrypoints_are_observed():
     # New direct file entrypoints require explicit coverage review, not merely
     # retaining an enabled flag. Read helpers inherit the open-file scope.
     assert renderer.count("fopen(")==prepare.count("fopen(")==1
-    assert audio.count("fopen(")==playback.count("fopen(")==1
+    prompt=function(audio,"pet_p4_audio_prompt_play")
+    mixing=function(audio,"prompt_mix_step")
+    assert audio.count("fopen(")==2
+    assert prompt.index("file_activity = pet_fs_activity_begin()") < prompt.index("fopen(")
+    assert "g_prompt_file_activity = file_activity" in prompt
+    assert mixing.index("fclose(g_prompt_file)") < mixing.index("pet_fs_activity_end(&g_prompt_file_activity)")
     scope = playback.index("file_activity=pet_fs_activity_begin()")
     override = playback.index('file=fopen(fs_path,"rb")')
     assert scope < override < playback.index("wav_seek_pcm")

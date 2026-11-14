@@ -11,6 +11,8 @@ from input_policy import input_errors
 
 
 def guard_support(code):
+    binding_start=code.index("static bool binding_declares_short_press(")
+    binding_end=code.index('\n#include "nvs.h"',binding_start)
     start=code.index("static bool conditions_hold(")
     end=code.index("static int find_sfx_cue(",start)
     game=(ROOT/"firmware/main/pet_p4_game.c").read_text()
@@ -19,7 +21,7 @@ def guard_support(code):
     header=(ROOT/"firmware/main/pet_p4_game.h").read_text()
     a_enum=header.index("typedef enum {",header.index("PET_P4_GAME_CMP_LTE")-30)
     b_enum=header.index("} pet_p4_game_cmp_t;",a_enum)+len("} pet_p4_game_cmp_t;")
-    return header[a_enum:b_enum]+"\n"+game[a:b]+code[start:end]
+    return code[binding_start:binding_end]+"\n"+header[a_enum:b_enum]+"\n"+game[a:b]+code[start:end]
 
 def policy_harness_prefix():
     return r'''
@@ -32,6 +34,13 @@ def policy_harness_prefix():
 #include "pet_p4_app_navigation.h"
 #include "pet_p4_app_form.h"
 #define MINIAPP_VAR_INT 0
+#define PET_P4_INPUT_EVENT_MAX 64
+static bool pet_p4_input_legacy_alias(const char *event,char *out,size_t size){
+ const char *canonical[]={"button.1.","button.2.","button.3.","button.k."};
+ const char *legacy[]={"button.sw1.","button.sw2.","button.sw3.","button.encoder."};
+ for(unsigned i=0;i<sizeof(canonical)/sizeof(*canonical);i++){size_t n=strlen(canonical[i]);if(strncmp(event,canonical[i],n))continue;int written=snprintf(out,size,"%s%s",legacy[i],event+n);return written>=0&&(size_t)written<size;}
+ return false;
+}
 static uint32_t g_viewport_epoch;
 static int g_pressed_node;
 enum {MINIAPP_EFFECT_SET,MINIAPP_EFFECT_INC};
