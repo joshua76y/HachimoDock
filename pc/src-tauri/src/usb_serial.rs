@@ -1009,30 +1009,53 @@ fn probe_serial_port(
     desktop_device_id: &str,
     probe_timeout: Duration,
 ) -> Result<ProbedSerialPort, String> {
+    probe_serial_port_with(
+        port_name,
+        baud_candidates,
+        desktop_device_id,
+        probe_timeout,
+        open_serial_pair_with_retry,
+        |port, baud| port.set_baud_rate(baud),
+    )
+}
+
+fn probe_serial_port_with(
+    port_name: &str,
+    baud_candidates: &[u32],
+    desktop_device_id: &str,
+    probe_timeout: Duration,
+    mut open: impl FnMut(
+        &str,
+        u32,
+    ) -> Result<(
+        Box<dyn serialport::SerialPort>,
+        Box<dyn serialport::SerialPort>,
+    ), String>,
+    mut change_baud: impl FnMut(&mut dyn serialport::SerialPort, u32) -> serialport::Result<()>,
+) -> Result<ProbedSerialPort, String> {
+    if baud_candidates.is_empty() {
+        return Err("no baud candidates for serial probe".into());
+    }
+
+    // A physical driver may accept the standard baseline rate but reject a
+    // 4 Mbaud open outright. Keep one live pair and test candidates in place.
+    let (mut writer, reader) = open(port_name, LEGACY_USB_SERIAL_BAUD)?;
+    let mut reader = BufReader::new(reader);
+    let mut configured_baud = Some(LEGACY_USB_SERIAL_BAUD);
     let mut failures = Vec::new();
-    let mut reusable_pair: Option<(
-        Box<dyn serialport::SerialPort>,
-        Box<dyn serialport::SerialPort>,
-    )> = None;
     for (index, baud) in baud_candidates.iter().copied().enumerate() {
-        let pair = if let Some((mut writer, reader)) = reusable_pair.take() {
-            match writer.set_baud_rate(baud) {
-                Ok(()) => {
-                    let _ = writer.clear(serialport::ClearBuffer::Input);
-                    Ok((writer, reader))
-                }
-                Err(error) => Err(error.to_string()),
-            }
-        } else {
-            open_serial_pair_with_retry(port_name, baud)
-        };
-        let (mut writer, reader) = match pair {
-            Ok(ports) => ports,
-            Err(error) => {
-                failures.push(error);
+        if configured_baud != Some(baud) {
+            configured_baud = None;
+            if let Err(error) = change_baud(writer.as_mut(), baud) {
+                failures.push(format!("{baud} baud: {error}"));
                 continue;
             }
-        };
+            configured_baud = Some(baud);
+            // No unverified bytes may cross a requested line-rate change.
+            // A verified hello returns the existing reader unchanged below.
+            reader = BufReader::new(reader.into_inner());
+            let _ = writer.clear(serialport::ClearBuffer::Input);
+        }
 
         // Runtime connections must not assert boot/reset control lines on
         // any platform. Firmware flashing keeps its separate esptool path.
@@ -1054,7 +1077,6 @@ fn probe_serial_port(
 
         let started = Instant::now();
         let mut next_handshake_at = started + SERIAL_PROBE_HANDSHAKE_RETRY_INTERVAL;
-        let mut reader = BufReader::new(reader);
         let mut line_buffer = Vec::with_capacity(32 * 1024);
         let mut rejections = receive_diagnostics::Rejections::default();
         let mut integrity_rejections=[0u64;6];
@@ -1102,9 +1124,6 @@ fn probe_serial_port(
             return Ok(ProbedSerialPort::from_verified_reader(writer, reader, baud, message));
         }
         failures.push(format!("{baud} baud: no valid protocol hello"));
-        if cfg!(windows) {
-            reusable_pair = Some((writer, reader.into_inner()));
-        }
     }
 
     Err(format!(
@@ -8835,6 +8854,82 @@ manager.activate_memory_test_connection();
             }
             assert!(read_serial_line_lossy(&mut connected.reader, &mut line).unwrap().is_none());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fallback_baud_keeps_the_same_open_port_and_buffered_tail() {
+        use super::*;
+        use serialport::SerialPort;
+
+        let (mut host, mut board) = serialport::TTYPort::pair().expect("create test PTY");
+        // Let the host-side read wait for the peer that replies immediately
+        // after the second handshake instead of observing an empty PTY slice.
+        host.set_timeout(Duration::from_millis(500)).unwrap();
+        board.set_timeout(Duration::from_millis(20)).unwrap();
+        let mut handles = Some((
+            Box::new(host.try_clone_native().unwrap()) as Box<dyn SerialPort>,
+            Box::new(host) as Box<dyn SerialPort>,
+        ));
+        let peer = thread::spawn(move || {
+            let mut first_nonce = None;
+            let deadline = Instant::now() + Duration::from_secs(12);
+            let mut reader = BufReader::new(&mut board);
+            let mut pending = Vec::new();
+            while Instant::now() < deadline {
+                match read_serial_frame(&mut reader, &mut pending) {
+                    Ok(Some(frame)) => {
+                        let Some(message) = parse_serial_frame(&frame) else { continue };
+                        if message.topic != "bind" { continue; }
+                        let nonce = message.payload["serialControl"]["nonce"].as_str().unwrap();
+                        match &first_nonce {
+                            None => first_nonce = Some(nonce.to_owned()),
+                            Some(first) if first != nonce => {
+                                reader.get_mut().write_all(concat!(
+                                    r#"{"topic":"hello","payload":{"runtime":"esp-p4","boardDeviceId":"pty-board"}}"#, "\n",
+                                    r#"{"topic":"debug/test","payload":{}}"#, "\n"
+                                ).as_bytes()).unwrap();
+                                reader.get_mut().flush().unwrap();
+                                return board;
+                            }
+                            _ => {}
+                        }
+                    }
+                    Err(error) if serial_read_recovery_delay(&error).is_some() => {}
+                    other => panic!("test board read failed: {}", other.is_ok()),
+                }
+            }
+            panic!("fallback handshake did not arrive");
+        });
+
+        let mut changed = Vec::new();
+        let mut probed = probe_serial_port_with(
+            "test-pty",
+            &[4_000_000, 9_600, 19_200],
+            "desktop-1",
+            Duration::from_millis(250),
+            |_, baud| {
+                assert_eq!(baud, LEGACY_USB_SERIAL_BAUD);
+                Ok(handles.take().expect("a fallback must never reopen the port"))
+            },
+            |_, baud| {
+                // A PTY carries the real handshake bytes but has no hardware baud control.
+                changed.push(baud);
+                if baud == 4_000_000 {
+                    return Err(serialport::Error::new(
+                        serialport::ErrorKind::InvalidInput,
+                        "test driver does not support this rate",
+                    ));
+                }
+                Ok(())
+            },
+        ).expect("fallback hello");
+
+        assert_eq!(changed, [4_000_000, 9_600, 19_200]);
+        assert_eq!(probed.baud, 19_200);
+        let _board = peer.join().unwrap();
+        let frame = read_serial_frame(&mut probed.reader, &mut Vec::new()).unwrap().unwrap();
+        assert_eq!(parse_serial_frame(&frame).unwrap().topic, "debug/test");
     }
 
     #[test]
