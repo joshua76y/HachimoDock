@@ -194,6 +194,22 @@ test("conversation queue admits active cards and exports only the remaining term
   assert.equal("terminalUntilMs" in payload[0], false);
 });
 
+test("a quiet completed reply keeps its own terminal card until the original deadline", () => {
+  const active = buildP4ConversationQueue(
+    [{ id: "chat", name: "Question", state: "working", statusUpdatedAt: 1_000 }],
+    [],
+    1_000,
+  );
+  const quietReply = { id: "chat", name: "Question", state: "reply_complete",
+    statusUpdatedAt: 1_500, displayContent: "Answer" };
+  const completed = buildP4ConversationQueue([quietReply], active, 1_500);
+
+  assert.equal(completed[0]?.state, "reply_complete");
+  assert.equal(completed[0]?.displayContent, "Answer");
+  assert.equal(buildP4ConversationQueue([quietReply], completed, 61_499).length, 1);
+  assert.deepEqual(buildP4ConversationQueue([quietReply], completed, 61_500), []);
+});
+
 test("dismissed sessions return only after their activity signature changes", () => {
   const initial = {
     id: "task",

@@ -218,6 +218,28 @@ test("CodexLogMonitor maps Desktop diagnostic lifecycle rows without exposing th
   assert.equal(Object.prototype.hasOwnProperty.call(started, "feedback_log_body"), false);
 });
 
+test("CodexLogMonitor marks only completed mutating task items as completed work", () => {
+  const events = [];
+  const monitor = new CodexLogMonitor({ SESSION_INDEX_PATH: "" },
+    (_sessionId, _state, _event, extra) => events.push(extra));
+  const entry = monitor.createEntry("codex:work-proof", 0, false);
+
+  monitor.processLine(JSON.stringify({
+    type: "event_msg", payload: { type: "task_started", turn_id: "turn-work" },
+  }), entry);
+  monitor.processLine(JSON.stringify({
+    type: "event_msg", payload: {
+      type: "item_completed", turn_id: "turn-work",
+      item: { type: "fileChange", status: "completed", changes: [{ path: "firmware/main.c" }] },
+    },
+  }), entry);
+  monitor.processLine(JSON.stringify({
+    type: "event_msg", payload: { type: "task_complete", turn_id: "turn-work" },
+  }), entry);
+
+  assert.equal(events.at(-1)?.turn?.completedWork, true);
+});
+
 test("CodexLogMonitor Desktop fallback emits only a fresh active bootstrap state", () => {
   const events = [];
   const activity = new Map([

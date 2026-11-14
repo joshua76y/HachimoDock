@@ -20,6 +20,7 @@ const {
   HookHttpServer,
   LocalStatePublisher,
   injectViaAgentBus,
+  mapCodexStateToStatus,
   mapClawdStateToStatus,
   normalizeStatus,
   resolveMockButtonInjectRequest,
@@ -82,6 +83,12 @@ test("Codex live commentary and tool calls remain visible to device clients", ()
   ]) {
     assert.match(headlessSource, new RegExp(`visibleCodexEvents[\\s\\S]*${event}`));
   }
+});
+
+test("Codex quiet completion is session-visible while mutating work remains done", () => {
+  assert.equal(mapCodexStateToStatus("attention", "event_msg:task_complete", false), "reply_complete");
+  assert.equal(mapCodexStateToStatus("attention", "event_msg:task_complete", true), "done");
+  assert.equal(mapCodexStateToStatus("working", "event_msg:task_started", false), "working");
 });
 
 test("Claude hook events produce stable device card content", () => {

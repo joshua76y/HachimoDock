@@ -122,6 +122,17 @@ def test_protocol_doc_declares_usb_only_p4_runtime():
     assert '"componentCatalogMax": 16' in doc
 
 
+def test_quiet_reply_completion_is_terminal_but_does_not_play_a_completion_cue():
+    protocol = read("main/pet_p4_protocol.c")
+    renderer = read("main/pet_p4_renderer.c")
+    audio = read("main/pet_p4_audio.c")
+
+    assert 'lifecycle_is(value, "reply_complete")' in protocol
+    assert 'lifecycle_is(candidate.state, "reply_complete")' in protocol
+    assert 'strcmp(status, "reply_complete")' in renderer
+    assert 'strcmp(lifecycle, "reply_complete") == 0) return;' in audio
+
+
 def test_p4_native_usb_vendor_bulk_contract_is_declared():
     doc = read("protocol.md")
     cmake = read("main/CMakeLists.txt")
