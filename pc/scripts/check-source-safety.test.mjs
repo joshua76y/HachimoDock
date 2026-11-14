@@ -34,6 +34,20 @@ test('a binary asset cannot bypass credential scanning with a null byte', () => 
   assert.ok(!result.output.includes(token));
 });
 
+test('a binary asset with a PEM private-key body is rejected', () => {
+  const pem = '-----BEGIN PRIVATE KEY-----\n' + 'A'.repeat(64) + '\n-----END PRIVATE KEY-----';
+  const result = check({ 'firmware.bin': Buffer.concat([Buffer.from([0]), Buffer.from(pem)]) });
+  assert.equal(result.status, 1);
+  assert.match(result.output, /potential credential; value redacted/);
+  assert.ok(!result.output.includes(pem));
+});
+
+test('firmware PEM envelope constants without a body remain publishable', () => {
+  const envelope = '-----BEGIN EC PRIVATE KEY----------END EC PRIVATE KEY-----';
+  const result = check({ 'firmware.bin': Buffer.concat([Buffer.from([0]), Buffer.from(envelope)]) });
+  assert.equal(result.status, 0, result.output);
+});
+
 test('binary assets cannot carry a developer home path', () => {
   const result = check({ 'firmware.bin': Buffer.from('\0' + homedir() + '/private-build/source.c') });
   assert.equal(result.status, 1);

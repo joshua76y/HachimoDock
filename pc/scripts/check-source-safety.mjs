@@ -11,6 +11,9 @@ const BLOCKED_PUBLICATION_MEDIA = new Set([
   'dba713d4f929eb69e7537fcac84bc4ff92dde2eb89f55bfa32ed999e30c0f746',
   '6eec1e03174f797057e27074a67569cf64b82423cf80405d4109888af88f6ffd',
 ]);
+// A PEM envelope string alone appears in public SDK format tables. Treat it as
+// a credential only when a conventional encoded body and matching footer exist.
+const PEM_PRIVATE_KEY = /-----BEGIN ((?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY)-----\r?\n(?:[A-Za-z0-9+/=]{16,}\r?\n)+-----END \1-----/;
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const paths = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], {cwd: root})
   .toString().split('\0').filter(Boolean);
@@ -30,7 +33,7 @@ for (const file of new Set(paths)) {
   // Scan ASCII credential markers in binary assets as well as source text.
   // Null bytes in a generated firmware image must not bypass this check.
   const text = bytes.toString();
-  if (/-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/.test(text)
+  if (PEM_PRIVATE_KEY.test(text)
       || /\b(?:ark-[a-f0-9-]{25,}|sk-[A-Za-z0-9_-]{24,}|gh[pousr]_[A-Za-z0-9]{24,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|glpat-[A-Za-z0-9_-]{20,}|AIza[0-9A-Za-z_-]{30,})/.test(text)) {
     problems.push(`${file}: potential credential; value redacted`);
   }
