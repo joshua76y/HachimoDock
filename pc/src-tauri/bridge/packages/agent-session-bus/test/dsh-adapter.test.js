@@ -91,7 +91,7 @@ $rows | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress
 `
   const r = spawnSync(path.win32.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
-    { encoding: 'utf8', windowsHide: true, timeout: 5000, maxBuffer: 32768, stdio: ['ignore', 'pipe', 'pipe'],
+    { encoding: 'utf8', windowsHide: true, timeout: 15000, maxBuffer: 32768, stdio: ['ignore', 'pipe', 'pipe'],
       env: { SystemRoot: root, WINDIR: root, PSModulePath: path.win32.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules'), DSH_FIXTURE_PROBE_DIRECTORY: container } })
   try {
     assert.equal(r.status, 0)

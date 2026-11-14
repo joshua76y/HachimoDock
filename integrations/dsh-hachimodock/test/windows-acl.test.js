@@ -43,7 +43,7 @@ test('PowerShell invocation is fixed, bounded, NoProfile/NonInteractive; only pa
     const script = Buffer.from(args.at(-1), 'base64').toString('utf16le')
     assert.equal(script, fs.readFileSync(path.join(__dirname, '../windows-acl.ps1'), 'utf8'))
     assert.ok(script.includes('GetCurrent().User')); assert.ok(script.includes('Get-Acl -LiteralPath')); assert.ok(script.includes('SetAccessRuleProtection($true, $false)'))
-    assert.equal(opts.timeout, 5000); assert.equal(opts.maxBuffer, 32768); assert.equal(opts.env.API_TOKEN, undefined)
+    assert.equal(opts.timeout, 15000); assert.equal(opts.maxBuffer, 32768); assert.equal(opts.env.API_TOKEN, undefined)
     assert.equal(opts.env.HACHIMODOCK_DSH_ACL_PATH, file); assert.equal(args.join(' ').includes(file), false)
     assert.equal(script.includes('ReadAllText'), false); assert.equal(script.includes('Get-Content'), false)
     return { status: 0, stdout: JSON.stringify(receipt()), stderr: '' }

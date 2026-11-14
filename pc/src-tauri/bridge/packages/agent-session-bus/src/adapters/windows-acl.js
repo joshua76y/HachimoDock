@@ -3,6 +3,9 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { spawnSync } = require('node:child_process')
 const SYSTEM = 'S-1-5-18', FULL = 2032127
+// PowerShell's cold start on fresh Windows workers can exceed five seconds;
+// this bounds only the local ACL verifier, which still rejects every timeout.
+const ACL_TIMEOUT_MS = 15000
 const OPERATIONS = new Set(['prepare-directory', 'create-file', 'protect-file', 'verify-directory', 'verify-file'])
 function windowsPath(value) {
   if (typeof value !== 'string' || value.length > 2048 || !/^[A-Za-z]:\\/.test(value) || /[\x00-\x1f]/.test(value) || value.slice(2).includes(':') || value.includes('/')) throw new Error('invalid Windows capability path')
@@ -36,7 +39,7 @@ function windowsAcl(operation, target, options = {}) {
   const executable = path.win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
   const script = fs.readFileSync(path.join(__dirname, 'windows-acl.ps1'), 'utf8')
   const result = (options.spawn || spawnSync)(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], {
-    windowsHide: true, encoding: 'utf8', timeout: 5000, maxBuffer: 32768,
+    windowsHide: true, encoding: 'utf8', timeout: ACL_TIMEOUT_MS, maxBuffer: 32768,
     env: { SystemRoot: systemRoot, WINDIR: systemRoot, PSModulePath: path.win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules'), HACHIMODOCK_DSH_ACL_OPERATION: operation, HACHIMODOCK_DSH_ACL_PATH: target },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
