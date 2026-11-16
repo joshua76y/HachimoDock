@@ -27,8 +27,17 @@ static void leave(int *l){(void)l;depth--;if(!depth&&deferred){deferred=0;update
 #define taskENTER_CRITICAL(l) enter(l)
 #define taskEXIT_CRITICAL(l) leave(l)
 static char *test_strncpy(char *d,const char *s,size_t n){
-  size_t i=0;for(;i<n;i++){if(i==4&&!injected){injected=1;if(depth)deferred=1;else update();} d[i]=s[i];if(!s[i]){i++;break;}}
-  for(;i<n;i++)d[i]=0;return d;
+  size_t i=0;
+  for(;i<n;i++){
+    if(i==4&&!injected){
+      injected=1;
+      if(depth)deferred=1;else update();
+    }
+    d[i]=s[i];
+    if(!s[i]){i++;break;}
+  }
+  for(;i<n;i++)d[i]=0;
+  return d;
 }
 #undef strncpy
 #define strncpy test_strncpy
