@@ -643,6 +643,13 @@ fn p4_raw_asset_chunk_size_for_limit(advertised_limit: Option<u64>) -> usize {
         .unwrap_or(P4_RAW_APPEARANCE_SAFE_CHUNK_SIZE)
 }
 
+/// The P4 TCP listener deliberately accepts JSON Lines only.  Raw asset
+/// payloads are valid on the physical serial receive tasks, but would be
+/// accumulated as a malformed TCP line and never reach the raw-asset parser.
+fn p4_asset_uses_raw_chunks(port_name: &str, raw_capability: bool) -> bool {
+    raw_capability && !is_tcp_port(port_name.trim())
+}
+
 fn should_downgrade_p4_raw_chunk_size(error: &str) -> bool {
     error.contains("raw chunk checksum mismatch")
         || error.contains("timed out waiting for raw P4 asset chunk")
@@ -6068,7 +6075,11 @@ impl UsbSerialManager {
             }
         }
 
-        let use_raw_chunks = self.supports_p4_raw_asset_chunks();
+        let transport_status = self.status();
+        let use_raw_chunks = p4_asset_uses_raw_chunks(
+            &transport_status.port_name,
+            self.supports_p4_raw_asset_chunks(),
+        );
         let use_raw_slot = use_raw_chunks && self.supports_p4_raw_appearance_slot();
         if use_raw_slot {
             let capabilities = self.status().capabilities;
@@ -6088,7 +6099,7 @@ impl UsbSerialManager {
                 ));
             }
         }
-        let negotiated_baud = self.status().baud_rate;
+        let negotiated_baud = transport_status.baud_rate;
         let preferred_chunk_size = if use_raw_chunks {
             self.p4_raw_asset_chunk_size()
         } else {
@@ -9922,6 +9933,13 @@ manager.activate_memory_test_connection();
                     .div_ceil(usb_uart_wire_bytes_per_sec(P4_USB_UART_BAUD))
             ) < Duration::from_millis(350)
         );
+    }
+
+    #[test]
+    fn p4_asset_transport_uses_raw_only_for_physical_serial() {
+        assert!(p4_asset_uses_raw_chunks("/dev/cu.wchusbserial5CF71963151", true));
+        assert!(!p4_asset_uses_raw_chunks("tcp://192.168.1.97:3333", true));
+        assert!(!p4_asset_uses_raw_chunks("COM15", false));
     }
 
     #[test]
