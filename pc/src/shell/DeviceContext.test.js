@@ -223,6 +223,7 @@ test("provider applies manual route selection and lets auto rescan USB before Wi
   assert.match(source, /await invoke\(["']usb_disconnect["']\)/);
   assert.match(source, /allowTcpFallback:\s*route\s*===\s*["']auto["']/);
   assert.match(source, /tcpHost\s*\|\|\s*binding\?\.tcpHost\s*\|\|\s*window\.localStorage/);
+  assert.match(source, /\}, \[binding\?\.boardDeviceId, binding\?\.tcpHost\]\);/);
   assert.match(source, /expectedBoardDeviceId:\s*boardDeviceId/);
 });
 

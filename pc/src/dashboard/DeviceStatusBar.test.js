@@ -49,7 +49,12 @@ test("DeviceStatusBar delegates an explicit route preference with the configured
 
 test("DeviceStatusBar initializes the automatic Wi-Fi fallback from the paired device", () => {
   assert.match(source, /binding\?\.tcpHost\s*\|\|\s*window\.localStorage/);
-  assert.match(source, /setTcpHostTouched/);
+  assert.match(source, /setTcpHostDraft/);
+});
+
+test("DeviceStatusBar does not carry a typed Wi-Fi address to a different bound board", () => {
+  assert.match(source, /tcpHostDraft\.boardDeviceId\s*===\s*boardDeviceId/);
+  assert.match(source, /setTcpHostDraft/);
 });
 
 test("DeviceStatusBar reads the board id and tolerates the legacy USB port field", () => {

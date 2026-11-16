@@ -5,7 +5,7 @@
  * [Sync] If this file changes, update `pc/src/dashboard/.folder.md`.
  */
 
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import { Monitor, Usb, Wifi } from "lucide-react";
 import { useDeviceContext } from "../shell/DeviceContext.jsx";
 import { useToast } from "../shell/ToastStack.jsx";
@@ -13,7 +13,8 @@ import { useToast } from "../shell/ToastStack.jsx";
 export default function DeviceStatusBar() {
   const { binding, usb, switchConnectionRoute } = useDeviceContext();
   const { push } = useToast();
-  const [tcpHost, setTcpHost] = useState(() => {
+  const boardDeviceId = String(binding?.boardDeviceId || "").trim();
+  const savedTcpHost = (() => {
     try {
       return String(
         binding?.tcpHost || window.localStorage.getItem("pet-manager:tcp-host") || "192.168.1.97",
@@ -21,20 +22,16 @@ export default function DeviceStatusBar() {
     } catch {
       return String(binding?.tcpHost || "192.168.1.97").trim();
     }
+  })();
+  const [tcpHostDraft, setTcpHostDraft] = useState({
+    boardDeviceId: "",
+    value: "",
+    edited: false,
   });
-  const [tcpHostTouched, setTcpHostTouched] = useState(false);
+  const tcpHost = tcpHostDraft.boardDeviceId === boardDeviceId && tcpHostDraft.edited
+    ? tcpHostDraft.value
+    : savedTcpHost;
   const [switchingRoute, setSwitchingRoute] = useState(false);
-
-  useEffect(() => {
-    if (tcpHostTouched) return;
-    try {
-      setTcpHost(String(
-        binding?.tcpHost || window.localStorage.getItem("pet-manager:tcp-host") || "192.168.1.97",
-      ).trim());
-    } catch {
-      setTcpHost(String(binding?.tcpHost || "192.168.1.97").trim());
-    }
-  }, [binding?.tcpHost, tcpHostTouched]);
 
   const handleRouteSelect = async (route) => {
     const host = String(tcpHost || "").trim();
@@ -137,8 +134,11 @@ export default function DeviceStatusBar() {
           type="text"
           value={tcpHost}
           onChange={(event) => {
-            setTcpHostTouched(true);
-            setTcpHost(event.target.value);
+            setTcpHostDraft({
+              boardDeviceId,
+              value: event.target.value,
+              edited: true,
+            });
           }}
           aria-label="设备 Wi-Fi 地址"
           disabled={switchingRoute}

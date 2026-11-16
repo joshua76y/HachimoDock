@@ -394,7 +394,7 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
     setUsb(nextUsb);
     if (!nextUsb.connected && lastError) throw lastError;
     return { devices: list, status: nextUsb };
-  }, [binding?.boardDeviceId]);
+  }, [binding?.boardDeviceId, binding?.tcpHost]);
 
   const currentDisplay = useMemo(
     () => deriveCurrentDisplay(agentAppearanceMap, enabledAgents, appearances, agentOptions),
