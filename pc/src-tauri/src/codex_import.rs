@@ -685,15 +685,22 @@ fn npx_child_path(npx_path: &Path) -> Option<std::ffi::OsString> {
     crate::merged_host_path(npx_path.parent())
 }
 
+/// Makes Node's built-in `fetch` honor HTTP(S)_PROXY for community pet downloads.
+/// Node otherwise ignores those environment variables unless this opt-in is set.
+fn configure_npx_runtime(command: &mut std::process::Command, npx_path: &Path) {
+    if let Some(path) = npx_child_path(npx_path) {
+        command.env("PATH", path);
+    }
+    command.env("NODE_USE_ENV_PROXY", "1");
+}
+
 pub fn install_codex_community_pet(pet_id: &str) -> Result<CodexCommunityInstallResult, String> {
     let pet_id = validate_community_pet_id(pet_id)?;
     let npx = resolve_npx_executable()
         .ok_or_else(|| "未找到 npx，请先安装 Node.js/npm 后重试。".to_string())?;
     let extra_ca = crate::llm_network::community_ca_file()?;
     let mut command = crate::command_for_host(&npx);
-    if let Some(path) = npx_child_path(Path::new(&npx)) {
-        command.env("PATH", path);
-    }
+    configure_npx_runtime(&mut command, Path::new(&npx));
     if let Some(file) = &extra_ca {
         command.env("NODE_EXTRA_CA_CERTS", file.path());
     }
@@ -1144,6 +1151,22 @@ mod tests {
         let mut entries = std::env::split_paths(&path);
 
         assert_eq!(entries.next(), Some(PathBuf::from("/test-runtime/node-bin")));
+    }
+
+    #[test]
+    fn npx_runtime_enables_node_environment_proxy_discovery() {
+        let mut command = std::process::Command::new("npx");
+
+        configure_npx_runtime(&mut command, Path::new("/test-runtime/node-bin/npx"));
+
+        let node_proxy = command
+            .get_envs()
+            .find_map(|(key, value)| {
+                (key.to_string_lossy() == "NODE_USE_ENV_PROXY")
+                    .then(|| value.as_ref().map(|value| value.to_string_lossy().into_owned()))
+                    .flatten()
+            });
+        assert_eq!(node_proxy.as_deref(), Some("1"));
     }
 
     #[test]
