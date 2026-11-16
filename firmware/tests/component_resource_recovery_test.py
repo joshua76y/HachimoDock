@@ -37,20 +37,21 @@ static void vTaskDelay(unsigned ticks){assert(ticks>=1);assert(!model_depth&&!st
 typedef struct {char widget_id[48],title[64];uint8_t slot,package_generation;uint32_t widget_checksum,buttons_checksum,sprites_checksum;uint8_t resource_state,image_count;} miniapp_catalog_item_t;
 typedef struct {bool parsed,valid,needs_upgrade;uint8_t file_generation;uint32_t sequence;char active_widget_id[48];miniapp_catalog_item_t items[32];size_t count;} miniapp_catalog_snapshot_t;
 typedef struct {int unused;} miniapp_runtime_t;
-static bool load_catalog_runtime_item(miniapp_catalog_item_t *i, miniapp_runtime_t *r,bool missing,char *e,size_t n){
- physical_loads++;model_depth++;storage_depth++;state_depth++;
- (void)r;(void)missing;(void)e;(void)n;
+static bool load_catalog_runtime_item_impl(miniapp_catalog_item_t *i, miniapp_runtime_t *r,bool missing,bool private_scratch,char *e,size_t n){
+ model_depth++;storage_depth++;state_depth++;
+ (void)r;(void)missing;(void)private_scratch;(void)e;(void)n;
  state_depth--;storage_depth--;model_depth--;
  if(i->widget_checksum==999)return false;
  i->resource_state=i->sprites_checksum?1:2;return true;
 }
 static int catalog_find(const miniapp_catalog_item_t*a,size_t n,const char*id){for(size_t i=0;i<n;i++)if(!strcmp(a[i].widget_id,id))return i;return -1;}
+static bool catalog_reuse_verified_item(miniapp_catalog_item_t *item,const miniapp_catalog_snapshot_t *verified){(void)item;(void)verified;return false;}
 ''' + validate + recovery + r'''
 int main(void){
- assert(!validate_catalog_snapshot(NULL));assert(!yields&&!physical_loads);
+ assert(!validate_catalog_snapshot(NULL,NULL,&physical_loads));assert(!yields&&!physical_loads);
  miniapp_catalog_snapshot_t empty={0};allocation_fail=true;
- assert(!validate_catalog_snapshot(&empty));assert(!yields&&!physical_loads);
- allocation_fail=false;assert(validate_catalog_snapshot(&empty));assert(!yields&&!physical_loads);
+ assert(!validate_catalog_snapshot(&empty,NULL,&physical_loads));assert(!yields&&!physical_loads);
+ allocation_fail=false;assert(validate_catalog_snapshot(&empty,NULL,&physical_loads));assert(!yields&&!physical_loads);
  miniapp_catalog_snapshot_t latest={.parsed=true,.count=3,.sequence=12},older={.parsed=true,.count=3,.sequence=11};
  for(int i=0;i<3;i++){
   snprintf(latest.items[i].widget_id,48,"component-%d",i);
@@ -58,24 +59,24 @@ int main(void){
  }
  older=latest;older.sequence=11;
  latest.items[0].widget_checksum=999;latest.items[1].widget_checksum=80;
- assert(!validate_catalog_snapshot(&latest));assert(latest.items[0].resource_state==3);
+ assert(!validate_catalog_snapshot(&latest,NULL,&physical_loads));assert(latest.items[0].resource_state==3);
  assert(latest.items[1].resource_state==1&&latest.items[2].resource_state==1);
  assert(physical_loads==3&&yields==3);
- assert(validate_catalog_snapshot(&older));assert(physical_loads==6&&yields==6);
+ assert(validate_catalog_snapshot(&older,NULL,&physical_loads));assert(physical_loads==6&&yields==6);
  assert(recover_catalog_items(&latest,&older));
  assert(latest.items[0].widget_checksum==10);assert(latest.items[1].widget_checksum==80);
  assert(latest.sequence==12&&latest.count==3);
  // Reproduce original all-or-nothing rejection: one common damaged component
  // made both catalogs invalid. New path retains all IDs/order and good files.
  latest.items[0].widget_checksum=999;older.items[0].widget_checksum=999;
- assert(!validate_catalog_snapshot(&latest));assert(!validate_catalog_snapshot(&older));
+ assert(!validate_catalog_snapshot(&latest,NULL,&physical_loads));assert(!validate_catalog_snapshot(&older,NULL,&physical_loads));
  assert(!recover_catalog_items(&latest,&older));assert(latest.count==3);
  assert(latest.items[1].widget_checksum==80&&latest.items[2].resource_state==1);
  // Known full package cannot recover to a bootstrap, an orphan, different ID
  // or another slot; deletion in newest catalog must not resurrect old IDs.
  older.items[0].widget_checksum=10;older.items[0].sprites_checksum=0;
- validate_catalog_snapshot(&older);assert(!recover_catalog_items(&latest,&older));
- older.items[0].sprites_checksum=30;validate_catalog_snapshot(&older);
+ validate_catalog_snapshot(&older,NULL,&physical_loads);assert(!recover_catalog_items(&latest,&older));
+ older.items[0].sprites_checksum=30;validate_catalog_snapshot(&older,NULL,&physical_loads);
  older.items[0].slot=4;assert(!recover_catalog_items(&latest,&older));
  older.items[0].slot=0;older.parsed=false;assert(!recover_catalog_items(&latest,&older));
  older.parsed=true;latest.count=0;assert(!recover_catalog_items(&latest,&older));assert(latest.count==0);
@@ -88,7 +89,7 @@ int main(void){
  }
  older=latest;older.items[31].widget_checksum=0;
  unsigned before=physical_loads;
- assert(!validate_catalog_snapshot(&latest));assert(!validate_catalog_snapshot(&older));
+ assert(!validate_catalog_snapshot(&latest,NULL,&physical_loads));assert(!validate_catalog_snapshot(&older,NULL,&physical_loads));
  assert(physical_loads==before+64&&yields==physical_loads&&older.needs_upgrade);
  for(int i=0;i<32;i++)assert(latest.items[i].resource_state==(i?1:3));
  return 0;
@@ -202,14 +203,17 @@ def test_boot_yield_boundary_is_normal_task_code_after_both_snapshot_loads():
     code = (ROOT / 'main/pet_p4_miniapp.c').read_text()
     validate = code[code.index('static bool validate_catalog_snapshot('):code.index('static bool load_catalog_snapshot(')]
     assert validate.count('vTaskDelay(1)') == 1
-    assert 'continue;' not in validate
+    # A same-boot verified package can skip physical I/O entirely; that is the
+    # sole permitted continue and it occurs before the per-read yield boundary.
+    assert validate.count('continue;') == 1
+    assert validate.index('if (catalog_reuse_verified_item(') < validate.index('continue;') < validate.index('vTaskDelay(1)')
     assert 'IRAM_ATTR' not in validate
     assert 'cache lease cleanup' in validate.split('vTaskDelay(1)')[0]
     # These production call sites have no enclosing model/storage/state lock.
     init = code[code.index('esp_err_t pet_p4_miniapp_init(void)'):]
     prefix = init[:init.index('selected=catalog_latest_snapshot(')]
-    assert prefix.count('load_catalog_snapshot(0, snapshot0)') == 1
-    assert prefix.count('load_catalog_snapshot(1, snapshot1)') == 1
+    assert prefix.count('load_catalog_snapshot(0, snapshot0, NULL)') == 1
+    assert prefix.count('load_catalog_snapshot(1, snapshot1, snapshot0)') == 1
     retire = 'miniapp_runtime_lock();component_program_retire_locked();miniapp_runtime_unlock();'
     assert retire in prefix
     prefix = prefix.replace(retire, '')

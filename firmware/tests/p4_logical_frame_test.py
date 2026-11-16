@@ -57,6 +57,7 @@ def test_actual_renderer_tail_retains_index_pointer_reference_failure_and_transf
 #define PET_P4_UI_HEIGHT 4
 #define BSP_LCD_H_RES 4
 #define BSP_LCD_V_RES 4
+#define PET_P4_PANEL_CONTENT_H 4
 #define PET_P4_NATIVE_OUTPUT_BUFFER_COUNT 2
 #define ESP_OK 0
 #define ESP_RETURN_ON_ERROR(value,tag,message) do{int error=(value);if(error)return error;}while(0)
@@ -68,6 +69,9 @@ static uint32_t g_last_compare_us;
 static pet_lcd_observation_t g_last_lcd_observation;
 static struct {uint32_t logical_compare_us,common_overlay_us;}g_render_trace;
 static int64_t now;static int rotate_error,lcd_error;
+static bool touch_feedback_overlay_active(const void *state,unsigned long long now_ms){(void)state;(void)now_ms;return false;}
+static void pet_p4_panel_chrome_tick(const void *state,unsigned long long now_ms){(void)state;(void)now_ms;}
+static void pet_p4_panel_chrome_flush(void){}
 static int64_t esp_timer_get_time(void){return ++now;}
 static uint32_t elapsed_us_clamped(int64_t a,int64_t b){assert(b>=a);return (uint32_t)(b-a);}
 static esp_err_t rotate_landscape_to_panel(void){
@@ -80,6 +84,7 @@ static esp_err_t pet_p4_lcd_draw_rgb565_observed(int x,int y,int w,int h,const v
  *out=(pet_lcd_observation_t){.valid=true,.submitted=!lcd_error,.refresh_waited=!lcd_error};return lcd_error;
 }
 static esp_err_t draw(bool hint){
+ void *state=NULL;unsigned long long now_ms=0;
 '''+prelude+r'''
  g_app_logical_same=hint;int64_t common_overlay_started_us=esp_timer_get_time(),overlay_started_us=common_overlay_started_us;
 '''+tail+r'''

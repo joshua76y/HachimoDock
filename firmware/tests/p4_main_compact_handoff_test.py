@@ -5,6 +5,18 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 
+COMPACT_STUBS = '''
+static bool pet_p4_voice_ptt_draft_active(void){return false;}
+static void draw_px_line(int x0,int y0,int x1,int y1,int width,uint16_t color){(void)x0;(void)y0;(void)x1;(void)y1;(void)width;(void)color;}
+'''
+
+VIEW_STUBS = '''
+#include <stdbool.h>
+#include <stddef.h>
+bool pet_p4_voice_ptt_draft_active(void){return false;}
+void pet_p4_voice_ptt_copy_draft_text(char *out,size_t size){if(size)out[0]=0;}
+'''
+
 def function(source, name):
     match = re.search(r"^static [^\n]*\b" + name + r"\(", source, re.M)
     assert match, name
@@ -15,7 +27,7 @@ def compile_run(tmp_path, source, *extra):
     path.write_text(source)
     binary = tmp_path / "test"
     subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror",
-        "-I", str(ROOT / "main"), "-I", str(ROOT / "tests/vendor/cjson"),
+        "-I", str(tmp_path), "-I", str(ROOT / "main"), "-I", str(ROOT / "tests/vendor/cjson"),
         str(path), *map(str, extra), "-o", str(binary)], check=True)
     subprocess.run([str(binary)], check=True)
 
@@ -27,9 +39,9 @@ VIEW_CASES = '\n#include <assert.h>\n#include <stdio.h>\n#include <string.h>\n#i
 
 def test_main_compact_roi_handoff_uses_real_renderer_functions(tmp_path):
     source = (ROOT / "main/pet_p4_renderer.c").read_text()
-    names = ["draw_home_white_panel", "main_compact_underlay_prepare", "draw_bubble",
+    names = ["draw_home_white_panel", "main_compact_underlay_prepare", "draw_draft_glyphs", "draw_bubble",
              "scan_session_overlay_cache_runs", "copy_session_overlay_cache"]
-    compile_run(tmp_path, PRELUDE + "\n" + "\n\n".join(function(source, n) for n in names) + "\n" + CASES)
+    compile_run(tmp_path, PRELUDE + COMPACT_STUBS + "\n" + "\n\n".join(function(source, n) for n in names) + "\n" + CASES)
     main = source.split("esp_err_t pet_p4_renderer_render(", 1)[1]
     assert main.index("main_compact_underlay_prepare(drew_asset, compact_requested)") < main.index("if(g_main_appearance_ready)") < main.index("draw_session_queue(state, now_ms)")
     # The ROI copy/reset stays inside both content trace and the inclusive
@@ -44,4 +56,8 @@ def test_main_compact_roi_handoff_uses_real_renderer_functions(tmp_path):
 
 
 def test_done_metadata_does_not_hide_real_reply_or_realtime(tmp_path):
-    compile_run(tmp_path, VIEW_CASES, ROOT / "main/pet_p4_view.c", ROOT / "main/pet_p4_conversation.c")
+    (tmp_path / "freertos").mkdir()
+    (tmp_path / "esp_err.h").write_text("#pragma once\ntypedef int esp_err_t;\n#define ESP_OK 0\n")
+    (tmp_path / "freertos/FreeRTOS.h").write_text("#pragma once\n")
+    (tmp_path / "freertos/task.h").write_text("#pragma once\ntypedef void *TaskHandle_t;\n")
+    compile_run(tmp_path, VIEW_STUBS + VIEW_CASES, ROOT / "main/pet_p4_view.c", ROOT / "main/pet_p4_conversation.c")
