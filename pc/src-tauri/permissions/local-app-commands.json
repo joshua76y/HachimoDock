@@ -60,6 +60,7 @@
           "device_poll_pairing_result",
           "get_or_create_desktop_device_id",
           "save_device_binding",
+          "set_connection_route_preference",
           "load_device_bindings",
           "remove_device_binding",
           "audio_bridge_signal",

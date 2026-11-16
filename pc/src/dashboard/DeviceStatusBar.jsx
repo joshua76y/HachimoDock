@@ -1,106 +1,86 @@
 /**
- * [Input] useDeviceContext for binding/usb/rescanUsbDevices; Tauri connection commands; useToast for manual result notices.
- * [Output] Region 1 of the P4 dashboard: single-row card showing board id, verified transport state, a manual USB rescan, and an identity-scoped Wi-Fi switch.
+ * [Input] useDeviceContext for binding/usb/switchConnectionRoute; useToast for manual result notices.
+ * [Output] Region 1 of the P4 dashboard: single-row card showing board id, verified transport state, a persistent USB-first automatic route and explicit USB/Wi-Fi route switches.
  * [Pos] component node in pc/src/dashboard
  * [Sync] If this file changes, update `pc/src/dashboard/.folder.md`.
  */
 
-import React, { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { Monitor, RefreshCw, Usb, Wifi } from "lucide-react";
+import React, { useEffect, useState } from "react";
+import { Monitor, Usb, Wifi } from "lucide-react";
 import { useDeviceContext } from "../shell/DeviceContext.jsx";
 import { useToast } from "../shell/ToastStack.jsx";
 
 export default function DeviceStatusBar() {
-  const { binding, usb, rescanUsbDevices } = useDeviceContext();
+  const { binding, usb, switchConnectionRoute } = useDeviceContext();
   const { push } = useToast();
-  const [scanningUsb, setScanningUsb] = useState(false);
   const [tcpHost, setTcpHost] = useState(() => {
     try {
-      return String(window.localStorage.getItem("pet-manager:tcp-host") || "192.168.1.97").trim();
+      return String(
+        binding?.tcpHost || window.localStorage.getItem("pet-manager:tcp-host") || "192.168.1.97",
+      ).trim();
     } catch {
-      return "192.168.1.97";
+      return String(binding?.tcpHost || "192.168.1.97").trim();
     }
   });
-  const [switchingWifi, setSwitchingWifi] = useState(false);
+  const [tcpHostTouched, setTcpHostTouched] = useState(false);
+  const [switchingRoute, setSwitchingRoute] = useState(false);
 
-  const handleRescanUsb = async () => {
-    setScanningUsb(true);
+  useEffect(() => {
+    if (tcpHostTouched) return;
     try {
-      const result = await rescanUsbDevices();
-      if (result?.status?.connected) {
-        const isTcp = result.status.transport === "tcp"
-          || String(result.status.portName || "").startsWith("tcp://");
+      setTcpHost(String(
+        binding?.tcpHost || window.localStorage.getItem("pet-manager:tcp-host") || "192.168.1.97",
+      ).trim());
+    } catch {
+      setTcpHost(String(binding?.tcpHost || "192.168.1.97").trim());
+    }
+  }, [binding?.tcpHost, tcpHostTouched]);
+
+  const handleRouteSelect = async (route) => {
+    const host = String(tcpHost || "").trim();
+    if (route === "tcp" && !host) return;
+    setSwitchingRoute(true);
+    try {
+      const result = await switchConnectionRoute({
+        route,
+        host: tcpHost,
+        port: 3333,
+      });
+      const status = result?.status;
+      if (status?.connected) {
+        const isTcp = status.transport === "tcp"
+          || String(status.portName || "").startsWith("tcp://");
+        const selectedLabel = route === "auto" ? "自动连接" : route === "usb" ? "USB" : "Wi-Fi";
         push({
           tone: "success",
-          title: `已连接${isTcp ? " Wi-Fi" : " USB 串口"} ${result.status.portName || ""}`.trim(),
-        });
-      } else if (result?.devices?.length) {
-        push({
-          tone: "warning",
-          title: "已扫描到 USB 串口，但连接未完成",
-          message: result.devices.map((device) => device.portName).join(" / "),
+          title: `${selectedLabel}：已连接${isTcp ? " Wi-Fi" : " USB"} ${status.portName || ""}`.trim(),
         });
       } else {
         push({
           tone: "warning",
-          title: "未检测到 USB 串口设备",
-          message: "请确认设备端 USB gadget 已启动，或重新插拔线缆后再扫描。",
+          title: route === "usb" ? "未检测到 USB 设备" : "暂未建立设备连接",
+          message: route === "usb"
+            ? "请确认数据线已接入后再选择 USB。"
+            : "自动模式会优先使用 USB；未连接时会尝试已保存的 Wi-Fi 地址。",
         });
       }
-    } catch (err) {
-      push({
-        tone: "error",
-        title: "USB 串口扫描失败",
-        message: String(err?.message || err),
-      });
-    } finally {
-      setScanningUsb(false);
-    }
-  };
-
-  const handleConnectWifi = async () => {
-    const host = String(tcpHost || "").trim();
-    const boardDeviceId = String(binding?.boardDeviceId || "").trim();
-    if (!host || !boardDeviceId) return;
-    setSwitchingWifi(true);
-    try {
-      const status = await invoke("usb_connect_tcp", {
-        host,
-        port: 3333,
-        expectedBoardDeviceId: boardDeviceId,
-      });
-      if (!status?.connected || status?.boardDeviceId !== boardDeviceId) {
-        throw new Error("Wi-Fi 已建立连接，但设备身份未通过校验");
-      }
-      const desktopDeviceId = await invoke("get_or_create_desktop_device_id");
-      await invoke("save_device_binding", {
-        binding: {
-          boardDeviceId,
-          desktopDeviceId,
-          wifiSsid: `TCP(tcp://${host}:3333)`,
-          boundAt: Date.now(),
-          transport: "tcp",
-          tcpHost: host,
-          tcpPort: 3333,
-        },
-      });
-      try { window.localStorage.setItem("pet-manager:tcp-host", host); } catch { /* optional */ }
-      push({ tone: "success", title: `已通过 Wi-Fi 连接 ${host}:3333` });
     } catch (error) {
       push({
         tone: "error",
-        title: "Wi-Fi 连接失败",
+        title: route === "tcp" ? "Wi-Fi 连接失败" : "连接方式切换失败",
         message: String(error?.message || error),
       });
     } finally {
-      setSwitchingWifi(false);
+      setSwitchingRoute(false);
     }
   };
 
   if (!binding) return null;
 
   const legacyTransportLabel = String(binding.wifiSsid || "").trim();
+  const routePreference = ["auto", "usb", "tcp"].includes(
+    String(binding.routePreference || "").trim().toLowerCase(),
+  ) ? String(binding.routePreference).trim().toLowerCase() : "auto";
   const usbOnlyBindingMatch = legacyTransportLabel.match(/^USB\((.+)\)$/);
   const savedUsbPortName = usbOnlyBindingMatch?.[1] || "";
   const isTcp = usb.transport === "tcp" || String(usb.portName || "").startsWith("tcp://");
@@ -128,36 +108,42 @@ export default function DeviceStatusBar() {
           {connectionChip.label}
         </span>
       </div>
+      <div className="dashboard-status-bar__route-switch" role="group" aria-label="设备连接方式">
+        <button
+          type="button"
+          className={`dashboard-status-bar__route-btn${routePreference === "auto" ? " is-active" : ""}`}
+          onClick={() => handleRouteSelect("auto")}
+          disabled={switchingRoute}
+          title="优先连接 USB；没有 USB 时才连接已保存的 Wi-Fi 地址"
+        >自动（USB 优先）</button>
+        <button
+          type="button"
+          className={`dashboard-status-bar__route-btn${routePreference === "usb" ? " is-active" : ""}`}
+          onClick={() => handleRouteSelect("usb")}
+          disabled={switchingRoute}
+          title="只连接 USB，不自动切换到 Wi-Fi"
+        >USB</button>
+        <button
+          type="button"
+          className={`dashboard-status-bar__route-btn${routePreference === "tcp" ? " is-active" : ""}`}
+          onClick={() => handleRouteSelect("tcp")}
+          disabled={switchingRoute || !String(tcpHost || "").trim()}
+          title="立即通过指定 Wi-Fi 地址连接"
+        >Wi-Fi</button>
+      </div>
       <label className="dashboard-status-bar__wifi" title="输入设备当前局域网 IP；连接前会校验板卡身份">
         <Wifi size={14} />
         <input
           type="text"
           value={tcpHost}
-          onChange={(event) => setTcpHost(event.target.value)}
+          onChange={(event) => {
+            setTcpHostTouched(true);
+            setTcpHost(event.target.value);
+          }}
           aria-label="设备 Wi-Fi 地址"
-          disabled={switchingWifi}
+          disabled={switchingRoute}
         />
       </label>
-      <button
-        type="button"
-        className="dashboard-status-bar__scan-btn"
-        onClick={handleConnectWifi}
-        disabled={switchingWifi || !String(tcpHost || "").trim()}
-        title="连接到指定 Wi-Fi 地址，并核验保存的设备身份"
-      >
-        <Wifi size={14} className={switchingWifi ? "spin" : undefined} />
-        {switchingWifi ? "连接中..." : "Wi-Fi 直连"}
-      </button>
-      <button
-        type="button"
-        className="dashboard-status-bar__scan-btn"
-        onClick={handleRescanUsb}
-        disabled={scanningUsb}
-        title="重新扫描 USB 串口设备"
-      >
-        <RefreshCw size={14} className={scanningUsb ? "spin" : undefined} />
-        {scanningUsb ? "扫描中..." : "重新扫描串口"}
-      </button>
     </div>
   );
 }

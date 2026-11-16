@@ -209,12 +209,21 @@ test("provider hydrates followed channels locally without network availability r
 });
 
 test("provider exposes manual USB serial rescan and connect action", () => {
-  assert.match(source, /const\s+rescanUsbDevices\s*=\s*useCallback\(\s*async\s*\(\)\s*=>/);
+  assert.match(source, /const\s+rescanUsbDevices\s*=\s*useCallback\(\s*async\s*\(/);
   assert.match(source, /invoke\(["']usb_scan_devices["']\)/);
   assert.match(source, /invoke\(["']usb_connect["'],\s*\{\s*portName(?:\s*:|\s*\})/);
   assert.match(source, /for\s*\(const device of list\)/);
   assert.match(source, /candidateStatus\.connected/);
   assert.match(source, /rescanUsbDevices/);
+});
+
+test("provider applies manual route selection and lets auto rescan USB before Wi-Fi fallback", () => {
+  assert.match(source, /const\s+switchConnectionRoute\s*=\s*useCallback\(\s*async/);
+  assert.match(source, /invoke\(["']set_connection_route_preference["']/);
+  assert.match(source, /await invoke\(["']usb_disconnect["']\)/);
+  assert.match(source, /allowTcpFallback:\s*route\s*===\s*["']auto["']/);
+  assert.match(source, /tcpHost\s*\|\|\s*binding\?\.tcpHost\s*\|\|\s*window\.localStorage/);
+  assert.match(source, /expectedBoardDeviceId:\s*boardDeviceId/);
 });
 
 test("provider exposes a focused force-refresh for immediate picker use", () => {
@@ -255,6 +264,7 @@ test("provider exposes the documented context shape fields", () => {
     "applyDesktopPet",
     "cancelAppearanceSync",
     "rescanUsbDevices",
+    "switchConnectionRoute",
     "refreshAgents",
     "refresh",
   ]) {

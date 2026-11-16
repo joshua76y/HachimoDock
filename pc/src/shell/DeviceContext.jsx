@@ -1,6 +1,6 @@
 /**
- * [Input] children tree consuming useDeviceContext; Tauri invoke/listen for verified P4 USB status, appearance sync progress, manual serial rescan, bindings, and agents; lib helpers for appearance/agent storage.
- * [Output] Single USB-only source of polling and derived state (binding, USB status, deviceOnline, force-refreshable appearances, agentAppearanceMap, enabledAgents, bridge-authoritative selectedAgentId, agentOptions, agentScan, currentDisplay, target-verified per-device currentComponent, cancellable appearanceSync); USB polling is single-flight and suppresses unchanged Context updates; defaults a truly unconfigured first run to Codex while preserving saved local/Bridge selection, exposes deduplicated manual Agent refresh plus focus-triggered stale refresh, hydrates the active channel from the bridge profile before trusting localStorage cache, and keeps follow changes explicitly USB-only; Rust owns background serial auto-connect while manual rescan can explicitly scan/connect.
+ * [Input] children tree consuming useDeviceContext; Tauri invoke/listen for verified P4 USB/TCP status, appearance sync progress, bindings, and agents; lib helpers for appearance/agent storage.
+ * [Output] Single source of polling and derived state (binding, verified transport status, USB-first automatic/manual route switch, deviceOnline, force-refreshable appearances, agentAppearanceMap, enabledAgents, bridge-authoritative selectedAgentId, agentOptions, agentScan, currentDisplay, target-verified per-device currentComponent, cancellable appearanceSync); status polling is single-flight and suppresses unchanged Context updates; defaults a truly unconfigured first run to Codex while preserving saved local/Bridge selection, exposes deduplicated manual Agent refresh plus focus-triggered stale refresh, hydrates the active channel from the bridge profile before trusting localStorage cache, and keeps follow changes explicitly USB-only; Rust owns background auto-connect while a manual route selection can immediately reconnect.
  *          Saved-persona events refresh the current target immediately; every conversation start reads fresh disk settings.
  *          Current-key usage help is published by the dashboard and consumed across setup surfaces.
  * [Pos] component node in pc/src/shell
@@ -329,7 +329,14 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
     ]);
   }, [loadBridgeSelection, refreshAgents, refreshAppearances]);
 
-  const rescanUsbDevices = useCallback(async () => {
+  // A manual USB scan is also used by the route switcher.  In automatic mode
+  // it tries the local cable first and only then falls back to the paired TCP
+  // endpoint; a manual USB choice deliberately disables that fallback.
+  const rescanUsbDevices = useCallback(async ({
+    allowTcpFallback = true,
+    tcpHost = "",
+    tcpPort = 3333,
+  } = {}) => {
     const devices = await invoke("usb_scan_devices");
     const list = Array.isArray(devices) ? devices : [];
     let connectedStatus = null;
@@ -351,14 +358,15 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
     }
     // Route A fallback: the bound board may be reachable over Wi-Fi TCP
     // (:3333) while no USB serial port is present (e.g. running on battery).
-    if (!connectedStatus) {
+    if (!connectedStatus && allowTcpFallback) {
       try {
         /* 没有记忆过主机时，用设备当前局域网地址兜底：拔掉 USB 也能自动
          * 走 TCP:3333。地址来自设备 /status 的 wifi.ip，可被界面覆盖。 */
         const DEFAULT_WIFI_HOST = "192.168.1.97";
         let rememberedHost = String(
-          window.localStorage.getItem("pet-manager:tcp-host") || "192.168.1.97",
+          tcpHost || binding?.tcpHost || window.localStorage.getItem("pet-manager:tcp-host") || DEFAULT_WIFI_HOST,
         ).trim();
+        const requestedTcpPort = Number(tcpPort) || 3333;
         if (!rememberedHost) {
           rememberedHost = DEFAULT_WIFI_HOST;
           window.localStorage.setItem("pet-manager:tcp-host", rememberedHost);
@@ -367,7 +375,7 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
           const tcpStatus = normalizeUsbStatusPayload(
             await invoke("usb_connect_tcp", {
               host: rememberedHost,
-              port: 3333,
+              port: requestedTcpPort,
               // The remembered IP is a locator, not an identity.  Do not
               // silently attach this dashboard to a different board on LAN.
               expectedBoardDeviceId: String(binding?.boardDeviceId || "").trim() || undefined,
@@ -553,6 +561,86 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
     [onBindingChange],
   );
 
+  const switchConnectionRoute = useCallback(async ({
+    route: requestedRoute,
+    host = "",
+    port = 3333,
+  } = {}) => {
+    const route = String(requestedRoute || "").trim().toLowerCase();
+    if (!['auto', 'usb', 'tcp'].includes(route)) {
+      throw new Error("未知的连接方式");
+    }
+    const boardDeviceId = String(binding?.boardDeviceId || "").trim();
+    if (!boardDeviceId) throw new Error("尚未绑定设备，无法切换连接方式");
+
+    const tcpHost = String(host || "").trim();
+    const tcpPort = Number(port) || 3333;
+    if (route === "tcp" && !tcpHost) {
+      throw new Error("请输入设备的 Wi-Fi 地址");
+    }
+
+    const bindings = await invoke("set_connection_route_preference", {
+      input: {
+        boardDeviceId,
+        routePreference: route,
+      },
+    });
+    const savedPreference = Array.isArray(bindings)
+      ? bindings.find((item) => item?.boardDeviceId === boardDeviceId)
+      : null;
+    if (savedPreference) setBinding(savedPreference);
+
+    const saveTcpEndpoint = async () => {
+      const desktopDeviceId = await invoke("get_or_create_desktop_device_id");
+      const savedBindings = await invoke("save_device_binding", {
+        binding: {
+          boardDeviceId,
+          desktopDeviceId,
+          wifiSsid: `TCP(tcp://${tcpHost}:${tcpPort})`,
+          boundAt: Date.now(),
+          transport: "tcp",
+          tcpHost,
+          tcpPort,
+          routePreference: route,
+        },
+      });
+      const saved = Array.isArray(savedBindings)
+        ? savedBindings.find((item) => item?.boardDeviceId === boardDeviceId)
+        : null;
+      if (saved) setBinding(saved);
+      try { window.localStorage.setItem("pet-manager:tcp-host", tcpHost); } catch { /* optional */ }
+    };
+
+    if (route === "tcp") {
+      // The native TCP connector verifies HELLO before it retires the working
+      // USB session, so a mistyped Wi-Fi address does not needlessly drop USB.
+      const status = normalizeUsbStatusPayload(await invoke("usb_connect_tcp", {
+        host: tcpHost,
+        port: tcpPort,
+        expectedBoardDeviceId: boardDeviceId,
+      }));
+      if (!status.connected || status.boardDeviceId !== boardDeviceId) {
+        throw new Error("Wi-Fi 已建立连接，但设备身份未通过校验");
+      }
+      await saveTcpEndpoint();
+      setUsb(status);
+      return { route, status, devices: [] };
+    }
+
+    // USB and automatic choices intentionally replace the active route.  The
+    // latter still asks rescanUsbDevices to prefer USB before its TCP fallback.
+    await invoke("usb_disconnect");
+    const result = await rescanUsbDevices({
+      allowTcpFallback: route === "auto",
+      tcpHost,
+      tcpPort,
+    });
+    const isTcp = result?.status?.transport === "tcp"
+      || String(result?.status?.portName || "").startsWith("tcp://");
+    if (isTcp && tcpHost) await saveTcpEndpoint();
+    return { route, ...result };
+  }, [binding?.boardDeviceId, rescanUsbDevices, setBinding]);
+
   const realtimeTargetRef = useRef({ appearance: null, boardDeviceId: "" });
   const componentVoiceSync = useRef(null);
   if (!componentVoiceSync.current) componentVoiceSync.current = createComponentVoiceSync(invoke);
@@ -675,6 +763,7 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
       cancelAppearanceSync,
       saveAgentAppearance,
       rescanUsbDevices,
+      switchConnectionRoute,
       refreshAgents,
       refreshAppearances,
       refresh,
@@ -705,6 +794,7 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
       cancelAppearanceSync,
       saveAgentAppearance,
       rescanUsbDevices,
+      switchConnectionRoute,
       refreshAgents,
       refreshAppearances,
       refresh,

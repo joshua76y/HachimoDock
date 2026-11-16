@@ -421,6 +421,47 @@ select:focus-visible {
   background: var(--warning-soft);
 }
 
+.dashboard-status-bar__route-switch {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-elevated);
+}
+
+.dashboard-status-bar__route-btn {
+  height: 30px;
+  padding: 0 9px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.dashboard-status-bar__route-btn:last-child {
+  border-right: 0;
+}
+
+.dashboard-status-bar__route-btn:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-muted);
+}
+
+.dashboard-status-bar__route-btn.is-active {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.dashboard-status-bar__route-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
 .dashboard-status-bar__scan-btn {
   display: inline-flex;
   align-items: center;

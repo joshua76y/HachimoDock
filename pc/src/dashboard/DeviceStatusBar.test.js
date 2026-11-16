@@ -24,10 +24,12 @@ test("DeviceStatusBar consumes useDeviceContext without local status polling", (
   assert.doesNotMatch(source, /check_device_availability/);
 });
 
-test("DeviceStatusBar exposes a manual USB serial rescan button", () => {
-  assert.match(source, /rescanUsbDevices/);
-  assert.match(source, /重新扫描串口/);
-  assert.match(source, /handleRescanUsb/);
+test("DeviceStatusBar exposes the three manual connection routes", () => {
+  assert.match(source, /自动（USB 优先）/);
+  assert.match(source, />USB</);
+  assert.match(source, /Wi-Fi/);
+  assert.match(source, /dashboard-status-bar__route-switch/);
+  assert.match(source, /switchConnectionRoute/);
 });
 
 test("DeviceStatusBar renders the verified current transport", () => {
@@ -37,13 +39,17 @@ test("DeviceStatusBar renders the verified current transport", () => {
   assert.doesNotMatch(source, /wifiOnline|wifiChip|WiFi 在线|WiFi 离线/);
 });
 
-test("DeviceStatusBar switches Wi-Fi only after the bound board identity is checked", () => {
-  assert.match(source, /invoke\("usb_connect_tcp"/);
-  assert.match(source, /expectedBoardDeviceId: boardDeviceId/);
-  assert.match(source, /status\?\.boardDeviceId !== boardDeviceId/);
-  assert.match(source, /invoke\("save_device_binding"/);
-  assert.match(source, /transport: "tcp"/);
+test("DeviceStatusBar delegates an explicit route preference with the configured Wi-Fi host", () => {
+  assert.match(source, /handleRouteSelect/);
+  assert.match(source, /routePreference/);
+  assert.match(source, /host: tcpHost/);
+  assert.match(source, /port: 3333/);
   assert.match(source, /aria-label="设备 Wi-Fi 地址"/);
+});
+
+test("DeviceStatusBar initializes the automatic Wi-Fi fallback from the paired device", () => {
+  assert.match(source, /binding\?\.tcpHost\s*\|\|\s*window\.localStorage/);
+  assert.match(source, /setTcpHostTouched/);
 });
 
 test("DeviceStatusBar reads the board id and tolerates the legacy USB port field", () => {
@@ -55,6 +61,6 @@ test("DeviceStatusBar reads the board id and tolerates the legacy USB port field
 test("DeviceStatusBar uses the documented class names", () => {
   assert.match(source, /className="dashboard-status-bar/);
   assert.match(source, /dashboard-status-bar__chip/);
-  assert.match(source, /dashboard-status-bar__scan-btn/);
+  assert.match(source, /dashboard-status-bar__route-switch/);
   assert.match(source, /dashboard-status-bar__wifi/);
 });

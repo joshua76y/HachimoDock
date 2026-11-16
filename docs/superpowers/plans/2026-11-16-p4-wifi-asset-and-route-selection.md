@@ -36,10 +36,10 @@
 **Interfaces:**
 - Produces: a pure transport policy helper that maps a port name plus raw-capability flag to raw or JSON/Base64 chunks.
 
-- [ ] **Step 1: Write a failing unit test** for USB raw enabled, TCP raw disabled, and unsupported raw disabled.
-- [ ] **Step 2: Run** `cargo test --lib p4_asset_transport -- --nocapture` **and verify RED**.
-- [ ] **Step 3: Implement the helper and use it in** `sync_appearance_p4_with_stages`, keeping raw-slot handling conditional on raw transport.
-- [ ] **Step 4: Run the focused test and existing P4 chunk-size test; verify GREEN.**
+- [x] **Step 1: Write a failing unit test** for USB raw enabled, TCP raw disabled, and unsupported raw disabled.
+- [x] **Step 2: Run** `cargo test --lib p4_asset_transport -- --nocapture` **and verify RED**.
+- [x] **Step 3: Implement the helper and use it in** `sync_appearance_p4_with_stages`, keeping raw-slot handling conditional on raw transport.
+- [x] **Step 4: Run the focused test and existing P4 chunk-size test; verify GREEN.**
 
 ### Task 2: Persist and apply USB-first route preference
 
@@ -50,11 +50,11 @@
 **Interfaces:**
 - Produces: `ConnectionRoutePreference` normalization, a binding update command, and an auto-connect policy that orders USB/TCP probes.
 
-- [ ] **Step 1: Write failing Rust tests** for default `auto`, preference normalization, and the three probe orders.
-- [ ] **Step 2: Run** `cargo test --lib route_preference -- --nocapture` **and verify RED**.
-- [ ] **Step 3: Add the serde-defaulted route preference to `DeviceBinding`; expose a validated Tauri command that updates an existing binding.**
-- [ ] **Step 4: Refactor auto-connect into preference-based ordering:** auto scans verified USB before TCP, USB skips TCP, TCP skips USB; keep `connect_tcp_expected` and backoff.
-- [ ] **Step 5: Run focused Rust tests and the existing USB-first binding tests; verify GREEN.**
+- [x] **Step 1: Write failing Rust tests** for default `auto`, preference normalization, and the three probe orders.
+- [x] **Step 2: Run** `cargo test --lib route_preference -- --nocapture` **and verify RED**.
+- [x] **Step 3: Add the serde-defaulted route preference to `DeviceBinding`; expose a validated Tauri command that updates an existing binding.**
+- [x] **Step 4: Refactor auto-connect into preference-based ordering:** auto scans verified USB before TCP, USB skips TCP, TCP skips USB; keep `connect_tcp_expected` and backoff.
+- [x] **Step 5: Run focused Rust tests and the existing USB-first binding tests; verify GREEN.**
 
 ### Task 3: Provide a manual route switch in the dashboard
 
@@ -68,16 +68,16 @@
 - Consumes: `set_connection_route_preference(route, boardDeviceId, host, port)` and `rescanUsbDevices`.
 - Produces: a three-state route selector with immediate transition and status feedback.
 
-- [ ] **Step 1: Write failing frontend assertions** for the selector labels, explicit backend preference update, and an auto-mode USB-first rescan.
-- [ ] **Step 2: Run** `node --test src/dashboard/DeviceStatusBar.test.js src/shell/DeviceContext.test.js` **and verify RED**.
-- [ ] **Step 3: Implement a context route-switch callback** that selects USB, TCP, or auto and refreshes the shared status; update `DeviceStatusBar` to render compact selectable route controls.
-- [ ] **Step 4: Run focused frontend tests; verify GREEN.**
+- [x] **Step 1: Write failing frontend assertions** for the selector labels, explicit backend preference update, and an auto-mode USB-first rescan.
+- [x] **Step 2: Run** `node --test src/dashboard/DeviceStatusBar.test.js src/shell/DeviceContext.test.js` **and verify RED**.
+- [x] **Step 3: Implement a context route-switch callback** that selects USB, TCP, or auto and refreshes the shared status; update `DeviceStatusBar` to render compact selectable route controls.
+- [x] **Step 4: Run focused frontend tests; verify GREEN.**
 
 ### Task 4: Verify end-to-end behavior
 
 **Files:**
 - Verify: the Task 1–3 files
 
-- [ ] **Step 1: Run targeted Rust and frontend tests.**
-- [ ] **Step 2: Build the desktop app and manually verify the connected P4 on Wi-Fi:** switch a pet/appearance and confirm the transfer reaches completion; use the route controls to switch Wi-Fi → USB → auto.
-- [ ] **Step 3: Commit the coherent implementation with tests and both design documents.**
+- [x] **Step 1: Run targeted Rust and frontend tests.**
+- [ ] **Step 2: Build the desktop app and manually verify the connected P4 on Wi-Fi:** switch a pet/appearance and confirm the transfer reaches completion; use the route controls to switch Wi-Fi → USB → auto. (Desktop build completed; hardware acceptance pending.)
+- [x] **Step 3: Commit the coherent implementation with tests and both design documents.**
