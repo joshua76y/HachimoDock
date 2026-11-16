@@ -2275,36 +2275,23 @@ impl UsbSerialManager {
 
     /// Scan for CDC-ACM USB serial devices
     pub fn scan_devices(&self) -> Vec<UsbDeviceInfo> {
-        let ports = match serialport::available_ports() {
-            Ok(ports) => ports,
-            Err(_) => return Vec::new(),
-        };
-
-        let devices = ports
+        let mut devices = serialport::available_ports()
+            .unwrap_or_default()
             .into_iter()
-            .filter_map(|port| {
-                if let SerialPortType::UsbPort(info) = &port.port_type {
-                    // Match CDC-ACM / USB gadget and common USB-UART serial devices:
-                    // - macOS CDC: port name contains "usbmodem"
-                    // - macOS USB-UART: port name contains "usbserial" / "SLAB_USBtoUART"
-                    // - Linux: port name contains "ttyACM" / "ttyUSB"
-                    // - VID 0x1d6b = Linux Foundation (configfs gadget)
-                    // - VID 0x0525 = Netchip/PLX (g_serial default)
-                    let port_name = &port.port_name;
-                    if is_supported_usb_serial_port(port_name, info.vid) {
-                        return Some(UsbDeviceInfo {
-                            port_name: port.port_name.clone(),
-                            vid: info.vid,
-                            pid: info.pid,
-                            serial_number: info.serial_number.clone().unwrap_or_default(),
-                            manufacturer: info.manufacturer.clone().unwrap_or_default(),
-                            product: info.product.clone().unwrap_or_default(),
-                        });
-                    }
-                }
-                None
-            })
-            .collect();
+            .filter_map(serial_port_info_to_usb_device)
+            .collect::<Vec<_>>();
+        #[cfg(target_os = "macos")]
+        {
+            let known_ports: HashSet<String> = devices
+                .iter()
+                .map(|device| device.port_name.to_ascii_lowercase())
+                .collect();
+            devices.extend(
+                macos_wch_callout_fallback_devices()
+                    .into_iter()
+                    .filter(|device| !known_ports.contains(&device.port_name.to_ascii_lowercase())),
+            );
+        }
         prioritize_usb_serial_devices(devices)
     }
 
@@ -7964,6 +7951,75 @@ fn is_supported_usb_serial_port(port_name: &str, vid: u16) -> bool {
         || vid == 0x0403
 }
 
+fn serial_port_info_to_usb_device(port: serialport::SerialPortInfo) -> Option<UsbDeviceInfo> {
+    // macOS DriverKit may expose WCH CH34x callouts as `PciPort` or `Unknown`
+    // to the serialport crate even though their `/dev/cu.wchusbserial*` names
+    // are stable, explicitly supported USB-UART candidates.  Such names still
+    // must pass the conservative name filter; the later HELLO probe validates
+    // the board identity before the port becomes a control connection.
+    let port_name = port.port_name;
+    let (vid, pid, serial_number, manufacturer, product) = match port.port_type {
+        SerialPortType::UsbPort(info) => (
+            info.vid,
+            info.pid,
+            info.serial_number.unwrap_or_default(),
+            info.manufacturer.unwrap_or_default(),
+            info.product.unwrap_or_default(),
+        ),
+        SerialPortType::PciPort | SerialPortType::Unknown => {
+            (0, 0, String::new(), String::new(), String::new())
+        }
+        _ => return None,
+    };
+    is_supported_usb_serial_port(&port_name, vid).then_some(UsbDeviceInfo {
+        port_name,
+        vid,
+        pid,
+        serial_number,
+        manufacturer,
+        product,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn macos_wch_callout_fallback_devices() -> Vec<UsbDeviceInfo> {
+    let Ok(entries) = std::fs::read_dir("/dev") else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter_map(|file_name| macos_wch_callout_device(&file_name))
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn macos_wch_callout_device(file_name: &str) -> Option<UsbDeviceInfo> {
+    use std::os::unix::fs::FileTypeExt;
+
+    let suffix = file_name.strip_prefix("cu.wchusbserial")?;
+    if suffix.is_empty()
+        || !suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return None;
+    }
+    let port_name = format!("/dev/{file_name}");
+    let metadata = std::fs::symlink_metadata(&port_name).ok()?;
+    if !metadata.file_type().is_char_device() {
+        return None;
+    }
+    Some(UsbDeviceInfo {
+        port_name,
+        vid: 0,
+        pid: 0,
+        serial_number: String::new(),
+        manufacturer: "WCH".to_string(),
+        product: "CH34x USB serial".to_string(),
+    })
+}
+
 fn canonical_binding_for_control(control: &str) -> Option<(&'static str, &'static str)> {
     let binding = match control {
         "屏幕点击" => ("屏幕区域", "screen.region.tap"),
@@ -9178,6 +9234,54 @@ manager.activate_memory_test_connection();
             "/dev/cu.usbserial-210",
             0x1a86
         ));
+    }
+
+    #[test]
+    fn scanner_keeps_wch_callout_port_when_driverkit_hides_usb_ancestry() {
+        // The current WCH DriverKit extension exposes `/dev/cu.wchusbserial*`
+        // as a PCI entry to the serialport crate because its USB parent is not
+        // reachable from the DriverKit serial service.  It is still safe to
+        // offer that name to the protocol probe; identity is verified by the
+        // board HELLO before a control connection is accepted.
+        let device = serial_port_info_to_usb_device(serialport::SerialPortInfo {
+            port_name: "/dev/cu.wchusbserial5CF71963151".to_string(),
+            port_type: SerialPortType::PciPort,
+        })
+        .expect("WCH callout port should remain a probe candidate");
+        assert_eq!(device.port_name, "/dev/cu.wchusbserial5CF71963151");
+        assert_eq!((device.vid, device.pid), (0, 0));
+    }
+
+    #[test]
+    fn scanner_has_a_macos_wch_filesystem_fallback_when_iokit_enumeration_fails() {
+        // `serialport::available_ports()` can fail the entire enumeration when
+        // an unrelated macOS system serial service omits a dial-in or callout
+        // property.  The fallback must stay scoped to WCH callout names.
+        let source = include_str!("usb_serial.rs");
+        let scanner = &source[source
+            .find("pub fn scan_devices(&self)")
+            .expect("scan_devices")
+            ..source.find("/// Connect to a USB serial device").expect("connect")];
+        assert!(scanner.contains("macos_wch_callout_fallback_devices"));
+        assert!(source.contains("cu.wchusbserial"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_wch_filesystem_fallback_finds_the_connected_driverkit_callout() {
+        let Some(path) = std::fs::read_dir("/dev")
+            .ok()
+            .and_then(|entries| entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .find(|path| path.to_string_lossy().contains("/cu.wchusbserial")))
+        else {
+            return;
+        };
+        let expected = path.to_string_lossy().into_owned();
+        assert!(macos_wch_callout_fallback_devices()
+            .iter()
+            .any(|device| device.port_name == expected));
     }
 
     #[test]

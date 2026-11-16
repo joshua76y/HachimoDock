@@ -20,6 +20,14 @@ fn port_key(port:&str)->String{
     #[cfg(windows)] {return port.trim_start_matches(r"\\.\").to_ascii_uppercase();}
     #[cfg(not(windows))] port.to_owned()
 }
+// A TCP JSON-lines connection has no persistent raw-byte parser state after a
+// disconnect.  Older clients nevertheless recorded a raw quarantine while
+// streaming appearance data over Route A.  Preserve the unknown mutation
+// latch, but let a later verified connection perform read-only recovery and
+// ordinary control negotiation; physical serial quarantines remain fail-closed.
+fn is_identityless_tcp_quarantine(quarantine:&RawQuarantine)->bool{
+    quarantine.identity.is_none()&&quarantine.port.starts_with(TCP_TRANSPORT_PREFIX)
+}
 fn legacy_schema()->u32{1}
 #[derive(Clone,Serialize,Deserialize)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
@@ -101,7 +109,7 @@ impl Journal {
         let state=self.state.lock().map_err(|_|ERROR)?;
         if state.blocked{return Err(ERROR.into());}
         let pending=state.disk.pending.iter().any(|p|p.board==board);
-        if state.disk.quarantines.iter().any(|q|q.board==board)
+        if state.disk.quarantines.iter().any(|q|q.board==board&&!is_identityless_tcp_quarantine(q))
             ||(state.disk.schema_version==1&&pending){
             return Err("appearance_raw_stream_quarantined_no_probe".into());
         }
@@ -110,7 +118,7 @@ impl Journal {
     pub(super) fn pending_for_recovery(&self,board:&str,intent:&str)->Result<Pending,String>{
         let state=self.state.lock().map_err(|_|ERROR)?;
         if state.blocked||state.disk.schema_version==1{return Err(ERROR.into());}
-        if state.disk.quarantines.iter().any(|q|q.board==board){return Err("appearance_raw_stream_quarantined_no_probe".into());}
+        if state.disk.quarantines.iter().any(|q|q.board==board&&!is_identityless_tcp_quarantine(q)){return Err("appearance_raw_stream_quarantined_no_probe".into());}
         if state.disk.archives.iter().any(|a|a.user_intent_id==intent){return Err("appearance_recovery_fresh_intent_required".into());}
         let pending=state.disk.pending.iter().find(|p|p.board==board).cloned().ok_or("appearance_recovery_no_pending")?;
         if pending.attempt==intent{return Err("appearance_recovery_fresh_intent_required".into());}
@@ -120,12 +128,15 @@ impl Journal {
         let mut state=self.state.lock().map_err(|_|ERROR)?;
         if state.blocked||state.disk.schema_version==1||!observed.valid()||observed.board!=pending.board
             ||state.disk.archives.len()>=64||state.disk.archives.iter().any(|a|a.user_intent_id==intent)
-            ||state.disk.quarantines.iter().any(|q|q.board==pending.board)
+            ||state.disk.quarantines.iter().any(|q|q.board==pending.board&&!is_identityless_tcp_quarantine(q))
             ||!state.disk.pending.iter().any(|p|p==pending){return Err(ERROR.into());}
         let mut next=state.disk.clone();
         next.archives.push(Archived{original:pending.clone(),observation:observed.clone(),user_intent_id:intent.into(),
             resolution:"observed-current-state/quiescent".into(),old_result:"unknown".into()});
         next.pending.retain(|p|p!=pending);
+        // A current exact quiescence observation proves that this Route A
+        // stream no longer owns parser state. Keep every physical quarantine.
+        next.quarantines.retain(|q|q.attempt!=pending.attempt||!is_identityless_tcp_quarantine(q));
         next.schema_version=3;
         // Persist a single atomic replacement containing BOTH the immutable old
         // evidence and the observation before releasing its unresolved gate.
@@ -152,7 +163,7 @@ impl Journal {
         let state=self.state.lock().map_err(|_|ERROR)?;
         if state.blocked{return Err(ERROR.into());}
         if (state.disk.schema_version==1&&!state.disk.pending.is_empty())||state.disk.quarantines.iter().any(|q|
-            port_key(&q.port)==port_key(port)||board==Some(q.board.as_str())){
+            !is_identityless_tcp_quarantine(q)&&(port_key(&q.port)==port_key(port)||board==Some(q.board.as_str()))){
             return Err("appearance_raw_stream_quarantined_no_probe".into());
         }
         Ok(())
@@ -160,7 +171,7 @@ impl Journal {
     fn probe_candidate(&self,port:&str,device:Option<&UsbDeviceInfo>)->Result<(),String>{
         self.wire_available(port,None)?;
         let state=self.state.lock().map_err(|_|ERROR)?;
-        for q in &state.disk.quarantines{
+        for q in state.disk.quarantines.iter().filter(|q|!is_identityless_tcp_quarantine(q)){
             match (&q.identity,device){
                 (Some(old),Some(new)) if old.vid!=new.vid||old.pid!=new.pid
                     ||(!old.serial.is_empty()&&!new.serial_number.is_empty()&&old.serial!=new.serial_number)=>{},
@@ -401,5 +412,79 @@ impl UsbSerialManager {
                 Err(format!("{outcome} {error}"))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn journal_with_unknown_quarantine(port: &str, identity: Option<UsbIdentity>) -> Journal {
+        let journal = Journal::memory();
+        let attempt = "f46368d7-7f21-47c6-a92d-21da6e927fde".to_string();
+        let mut state = journal.state.lock().unwrap();
+        state.disk.pending.push(Pending {
+            board: "p4-board".to_string(),
+            generation: 2,
+            attempt: attempt.clone(),
+            phase: "asset/begin".to_string(),
+            state: "submitted_unknown".to_string(),
+            transfer_id: "p4-1794815533456".to_string(),
+        });
+        state.disk.quarantines.push(RawQuarantine {
+            board: "p4-board".to_string(),
+            generation: 2,
+            attempt,
+            port: port.to_string(),
+            identity,
+        });
+        drop(state);
+        journal
+    }
+
+    #[test]
+    fn identityless_tcp_quarantine_allows_control_probe_but_keeps_mutation_latched() {
+        let journal = journal_with_unknown_quarantine("tcp://192.168.1.97:3333", None);
+        let device = UsbDeviceInfo {
+            port_name: "/dev/cu.wchusbserial5CF71963151".to_string(),
+            vid: 0x1a86,
+            pid: 0x55d3,
+            serial_number: String::new(),
+            manufacturer: "WCH".to_string(),
+            product: "CH34x".to_string(),
+        };
+
+        assert_eq!(journal.needs_observation("p4-board"), Ok(true));
+        assert!(journal
+            .pending_for_recovery("p4-board", "b917ba5a-1d4b-41f1-8b06-5c56b3b3f5b3")
+            .is_ok());
+        assert!(journal
+            .probe_candidate(&device.port_name, Some(&device))
+            .is_ok());
+        assert_eq!(journal.available("p4-board"), Err(UNKNOWN.to_string()));
+    }
+
+    #[test]
+    fn serial_raw_quarantine_still_blocks_a_control_probe() {
+        let journal = journal_with_unknown_quarantine(
+            "/dev/cu.wchusbserial5CF71963151",
+            Some(UsbIdentity {
+                vid: 0x1a86,
+                pid: 0x55d3,
+                serial: "board-serial".to_string(),
+            }),
+        );
+        let device = UsbDeviceInfo {
+            port_name: "/dev/cu.wchusbserial5CF71963151".to_string(),
+            vid: 0x1a86,
+            pid: 0x55d3,
+            serial_number: "board-serial".to_string(),
+            manufacturer: "WCH".to_string(),
+            product: "CH34x".to_string(),
+        };
+
+        assert!(journal
+            .probe_candidate(&device.port_name, Some(&device))
+            .is_err());
     }
 }
