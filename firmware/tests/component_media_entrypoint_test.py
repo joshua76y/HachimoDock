@@ -297,6 +297,7 @@ static bool render_asset_pet_frame(const pet_p4_runtime_state_t*s,const pet_p4_v
 #define draw_standalone_voice_overlay(...) ((void)0)
 #define pet_p4_voice_ptt_draft_active() false
 #define pet_p4_state_touch_feedback_active(...) false
+    #define touch_feedback_overlay_active(...) false
 #define pet_p4_panel_chrome_tick(...) ((void)0)
 #define pet_p4_panel_chrome_flush(...) ((void)0)
 #define pet_compact_underlay_forget(...) ((void)0)
