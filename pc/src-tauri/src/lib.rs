@@ -4265,6 +4265,60 @@ struct ApplyConfigResponse {
     error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionRoutePreference {
+    Auto,
+    Usb,
+    Tcp,
+}
+
+impl ConnectionRoutePreference {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Usb => "usb",
+            Self::Tcp => "tcp",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionRoute {
+    Usb,
+    Tcp,
+}
+
+fn parse_connection_route_preference(value: &str) -> Result<ConnectionRoutePreference, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(ConnectionRoutePreference::Auto),
+        "usb" => Ok(ConnectionRoutePreference::Usb),
+        "tcp" => Ok(ConnectionRoutePreference::Tcp),
+        _ => Err("连接方式必须是 auto、usb 或 tcp".to_string()),
+    }
+}
+
+fn persisted_connection_route_preference(value: &str) -> ConnectionRoutePreference {
+    parse_connection_route_preference(value).unwrap_or(ConnectionRoutePreference::Auto)
+}
+
+fn connection_probe_order(
+    preference: ConnectionRoutePreference,
+    tcp_available: bool,
+) -> Vec<ConnectionRoute> {
+    match preference {
+        ConnectionRoutePreference::Auto => {
+            let mut routes = vec![ConnectionRoute::Usb];
+            if tcp_available {
+                routes.push(ConnectionRoute::Tcp);
+            }
+            routes
+        }
+        ConnectionRoutePreference::Usb => vec![ConnectionRoute::Usb],
+        ConnectionRoutePreference::Tcp if tcp_available => vec![ConnectionRoute::Tcp],
+        ConnectionRoutePreference::Tcp => Vec::new(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DeviceBinding {
@@ -4280,6 +4334,16 @@ struct DeviceBinding {
     tcp_host: String,
     #[serde(default)]
     tcp_port: u16,
+    /// Missing or malformed legacy values use USB-first automatic routing.
+    #[serde(default)]
+    route_preference: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetConnectionRoutePreferenceInput {
+    board_device_id: String,
+    route_preference: String,
 }
 
 // ── WiFi operation commands ──
@@ -4734,6 +4798,23 @@ fn update_existing_device_binding(
     Ok(())
 }
 
+fn set_device_binding_route_preference(
+    bindings: &mut Vec<DeviceBinding>,
+    board_device_id: &str,
+    preference: ConnectionRoutePreference,
+    bound_at: u64,
+) -> Result<(), String> {
+    let board_device_id = board_device_id.trim();
+    let mut binding = bindings
+        .iter()
+        .find(|binding| binding.board_device_id == board_device_id)
+        .cloned()
+        .ok_or_else(|| USB_FIRST_BINDING_ERROR.to_string())?;
+    binding.route_preference = preference.as_str().to_string();
+    binding.bound_at = bound_at;
+    update_existing_device_binding(bindings, binding)
+}
+
 fn persist_device_bindings(
     bindings_path: &Path,
     bindings: Vec<DeviceBinding>,
@@ -4779,6 +4860,28 @@ fn save_device_binding(binding: DeviceBinding) -> Result<Vec<DeviceBinding>, Str
     persist_device_bindings(&bindings_path, bindings, desktop_device_id)
 }
 
+#[tauri::command]
+fn set_connection_route_preference(
+    input: SetConnectionRoutePreferenceInput,
+) -> Result<Vec<DeviceBinding>, String> {
+    let preference = parse_connection_route_preference(&input.route_preference)?;
+    let bindings_path = get_home_dir()?
+        .join(".claw-pet")
+        .join(DEVICE_BINDINGS_FILE_NAME);
+    let mut bindings = load_device_bindings_inner(&bindings_path)?;
+    set_device_binding_route_preference(
+        &mut bindings,
+        &input.board_device_id,
+        preference,
+        current_timestamp_ms(),
+    )?;
+    let desktop_device_id = bindings
+        .last()
+        .map(|binding| binding.desktop_device_id.clone())
+        .unwrap_or_default();
+    persist_device_bindings(&bindings_path, bindings, desktop_device_id)
+}
+
 fn automatic_usb_binding(
     port_name: &str,
     board_device_id: &str,
@@ -4805,6 +4908,7 @@ fn automatic_usb_binding(
         transport: "usb".to_string(),
         tcp_host: String::new(),
         tcp_port: 0,
+        route_preference: ConnectionRoutePreference::Auto.as_str().to_string(),
     }
 }
 
@@ -4865,6 +4969,19 @@ fn preferred_tcp_auto_binding() -> Option<(String, u16, String)> {
     Some((host, port, binding.board_device_id))
 }
 
+fn preferred_connection_route_preference() -> ConnectionRoutePreference {
+    let bindings_path = match get_home_dir() {
+        Ok(home) => home.join(".claw-pet").join(DEVICE_BINDINGS_FILE_NAME),
+        Err(_) => return ConnectionRoutePreference::Auto,
+    };
+    load_device_bindings_inner(&bindings_path)
+        .ok()
+        .and_then(|bindings| bindings.into_iter().last())
+        .filter(|binding| !is_preview_board_device_id(&binding.board_device_id))
+        .map(|binding| persisted_connection_route_preference(&binding.route_preference))
+        .unwrap_or(ConnectionRoutePreference::Auto)
+}
+
 fn persist_connected_tcp_binding(
     host: &str,
     port: u16,
@@ -4876,6 +4993,18 @@ fn persist_connected_tcp_binding(
         return Err("TCP handshake did not provide a persistable endpoint and board identity".to_string());
     }
     let desktop_device_id = get_or_create_desktop_device_id_inner()?;
+    let bindings_path = get_home_dir()?
+        .join(".claw-pet")
+        .join(DEVICE_BINDINGS_FILE_NAME);
+    let route_preference = load_device_bindings_inner(&bindings_path)
+        .ok()
+        .and_then(|bindings| {
+            bindings
+                .into_iter()
+                .find(|binding| binding.board_device_id == board_device_id)
+        })
+        .map(|binding| binding.route_preference)
+        .unwrap_or_default();
     let port_name = format!("{}{}:{}", usb_serial::TCP_TRANSPORT_PREFIX, host, port);
     save_device_binding(DeviceBinding {
         board_device_id: board_device_id.to_string(),
@@ -4885,6 +5014,7 @@ fn persist_connected_tcp_binding(
         transport: "tcp".to_string(),
         tcp_host: host.to_string(),
         tcp_port: port,
+        route_preference,
     })?;
     Ok(())
 }
@@ -11985,149 +12115,156 @@ fn usb_auto_retry_delay(failure_count: u32) -> Duration {
     Duration::from_secs(seconds)
 }
 
-/// Background thread: reconnect the explicitly selected TCP route first, or
-/// discover USB only when no wireless route was saved.  A saved LAN endpoint
-/// is never authority by itself: `connect_tcp_expected` verifies the persisted
-/// board id before publishing the connection.
+fn try_auto_connect_tcp(
+    usb_manager: &usb_serial::UsbSerialManager,
+    app_handle: &tauri::AppHandle,
+    failed_probes: &mut HashMap<String, (u32, Instant)>,
+    target: Option<(String, u16, String)>,
+) -> bool {
+    let Some((host, port, expected_board_device_id)) = target else {
+        return false;
+    };
+    let probe_key = format!(
+        "tcp|{}|{}|{}",
+        expected_board_device_id.to_ascii_lowercase(),
+        host.to_ascii_lowercase(),
+        port
+    );
+    if failed_probes
+        .get(&probe_key)
+        .is_some_and(|(_, retry_at)| Instant::now() < *retry_at)
+    {
+        return false;
+    }
+    eprintln!(
+        "[tcp-auto] probing {}:{} for saved board {}",
+        host, port, expected_board_device_id
+    );
+    let emitter = app_handle.clone();
+    match usb_manager.connect_tcp_expected(
+        &host,
+        Some(port),
+        Some(&expected_board_device_id),
+        move |topic, payload| handle_incoming_usb_message(&emitter, topic, payload),
+    ) {
+        Ok(()) => {
+            failed_probes.remove(&probe_key);
+            program_autostart::native::connected(usb_manager);
+            let verified = usb_manager.status();
+            eprintln!(
+                "[tcp-auto] connected to {} runtime={} board={}",
+                verified.port_name, verified.runtime, verified.board_device_id
+            );
+            if let Err(error) = persist_connected_tcp_binding(&host, port, &verified.board_device_id) {
+                eprintln!(
+                    "[tcp-auto] failed to refresh binding for {}: {}",
+                    verified.board_device_id, error
+                );
+            }
+            if let Err(error) = forward_current_state_after_usb_connect(usb_manager) {
+                eprintln!("[tcp-auto] failed to replay bridge state after connect: {error}");
+            }
+            true
+        }
+        Err(error) => {
+            let failure_count = failed_probes
+                .get(&probe_key)
+                .map(|(count, _)| count.saturating_add(1))
+                .unwrap_or(1);
+            failed_probes.insert(
+                probe_key,
+                (failure_count, Instant::now() + usb_auto_retry_delay(failure_count)),
+            );
+            eprintln!("[tcp-auto] rejected saved Route A endpoint: {error}");
+            false
+        }
+    }
+}
+
+fn try_auto_connect_usb(
+    usb_manager: &usb_serial::UsbSerialManager,
+    app_handle: &tauri::AppHandle,
+    failed_probes: &mut HashMap<String, (u32, Instant)>,
+) -> bool {
+    let devices = usb_manager.scan_devices();
+    let present_keys: HashSet<String> = devices.iter().map(usb_auto_probe_key).collect();
+    failed_probes.retain(|key, _| key.starts_with("tcp|") || present_keys.contains(key));
+    for dev in devices {
+        let probe_key = usb_auto_probe_key(&dev);
+        if failed_probes
+            .get(&probe_key)
+            .is_some_and(|(_, retry_at)| Instant::now() < *retry_at)
+        {
+            continue;
+        }
+        let port_name = dev.port_name.clone();
+        eprintln!("[usb-auto] probing {port_name}");
+        let emitter = app_handle.clone();
+        match usb_manager.connect_for_auto(&port_name, move |topic, payload| {
+            handle_incoming_usb_message(&emitter, topic, payload);
+        }) {
+            Ok(_) => {
+                failed_probes.remove(&probe_key);
+                program_autostart::native::connected(usb_manager);
+                let verified = usb_manager.status();
+                eprintln!(
+                    "[usb-auto] connected to {} runtime={} board={}",
+                    port_name, verified.runtime, verified.board_device_id
+                );
+                if let Err(error) = persist_connected_usb_binding(&port_name, &verified.board_device_id) {
+                    eprintln!(
+                        "[usb-auto] failed to refresh binding for {}: {}",
+                        verified.board_device_id, error
+                    );
+                    usb_manager.disconnect();
+                    continue;
+                }
+                if let Err(error) = forward_current_state_after_usb_connect(usb_manager) {
+                    eprintln!("[usb-auto] failed to replay bridge state after connect: {error}");
+                }
+                return true;
+            }
+            Err(error) => {
+                let failure_count = failed_probes
+                    .get(&probe_key)
+                    .map(|(count, _)| count.saturating_add(1))
+                    .unwrap_or(1);
+                failed_probes.insert(
+                    probe_key,
+                    (failure_count, Instant::now() + usb_auto_retry_delay(failure_count)),
+                );
+                eprintln!("[usb-auto] rejected {}: {}", port_name, error);
+            }
+        }
+    }
+    false
+}
+
+/// Background auto-connect keeps exactly one control connection.  The
+/// persisted preference decides whether to scan USB first, USB only, or the
+/// identity-scoped TCP endpoint only.
 fn start_usb_auto_connect(usb_manager: usb_serial::UsbSerialManager, app_handle: tauri::AppHandle) {
     thread::spawn(move || {
         let mut failed_probes: HashMap<String, (u32, Instant)> = HashMap::new();
-        // Wait for app to initialize
         thread::sleep(Duration::from_secs(2));
         loop {
-            let status = usb_manager.status();
-            if !status.connected {
-                if let Some((host, port, expected_board_device_id)) = preferred_tcp_auto_binding() {
-                    let probe_key = format!(
-                        "tcp|{}|{}|{}",
-                        expected_board_device_id.to_ascii_lowercase(),
-                        host.to_ascii_lowercase(),
-                        port
-                    );
-                    if !failed_probes
-                        .get(&probe_key)
-                        .is_some_and(|(_, retry_at)| Instant::now() < *retry_at)
-                    {
-                        eprintln!(
-                            "[tcp-auto] probing {}:{} for saved board {}",
-                            host, port, expected_board_device_id
-                        );
-                        let emitter = app_handle.clone();
-                        match usb_manager.connect_tcp_expected(
-                            &host,
-                            Some(port),
-                            Some(&expected_board_device_id),
-                            move |topic, payload| {
-                                handle_incoming_usb_message(&emitter, topic, payload);
-                            },
-                        ) {
-                            Ok(()) => {
-                                failed_probes.remove(&probe_key);
-                                program_autostart::native::connected(&usb_manager);
-                                let verified = usb_manager.status();
-                                eprintln!(
-                                    "[tcp-auto] connected to {} runtime={} board={}",
-                                    verified.port_name, verified.runtime, verified.board_device_id
-                                );
-                                if let Err(error) = persist_connected_tcp_binding(
-                                    &host, port, &verified.board_device_id,
-                                ) {
-                                    eprintln!(
-                                        "[tcp-auto] failed to refresh binding for {}: {}",
-                                        verified.board_device_id, error
-                                    );
-                                }
-                                if let Err(error) = forward_current_state_after_usb_connect(&usb_manager) {
-                                    eprintln!(
-                                        "[tcp-auto] failed to replay bridge state after connect: {}",
-                                        error
-                                    );
-                                }
-                            }
-                            Err(error) => {
-                                let failure_count = failed_probes
-                                    .get(&probe_key)
-                                    .map(|(count, _)| count.saturating_add(1))
-                                    .unwrap_or(1);
-                                let retry_delay = usb_auto_retry_delay(failure_count);
-                                failed_probes.insert(
-                                    probe_key,
-                                    (failure_count, Instant::now() + retry_delay),
-                                );
-                                eprintln!("[tcp-auto] rejected saved Route A endpoint: {error}");
-                            }
+            if !usb_manager.status().connected {
+                let preference = preferred_connection_route_preference();
+                let tcp_target = preferred_tcp_auto_binding();
+                for route in connection_probe_order(preference, tcp_target.is_some()) {
+                    let connected = match route {
+                        ConnectionRoute::Usb => {
+                            try_auto_connect_usb(&usb_manager, &app_handle, &mut failed_probes)
                         }
-                    }
-                    // A user-selected TCP route must not silently fall through
-                    // to any enumerated USB board while it is unavailable.
-                    // They can still select USB explicitly from Setup.
-                    thread::sleep(Duration::from_secs(3));
-                    continue;
-                }
-                let devices = usb_manager.scan_devices();
-                let present_keys: HashSet<String> =
-                    devices.iter().map(usb_auto_probe_key).collect();
-                failed_probes.retain(|key, _| present_keys.contains(key));
-                for dev in devices {
-                    let probe_key = usb_auto_probe_key(&dev);
-                    if failed_probes
-                        .get(&probe_key)
-                        .is_some_and(|(_, retry_at)| Instant::now() < *retry_at)
-                    {
-                        continue;
-                    }
-                    let port_name = dev.port_name.clone();
-                    eprintln!("[usb-auto] probing {}", port_name);
-                    let emitter = app_handle.clone();
-                    let result = usb_manager.connect_for_auto(&port_name, move |topic, payload| {
-                        handle_incoming_usb_message(&emitter, topic, payload);
-                    });
-                    match result {
-                        Ok(_) => {
-                            failed_probes.remove(&probe_key);
-                            program_autostart::native::connected(&usb_manager);
-                            let verified = usb_manager.status();
-                            eprintln!(
-                                "[usb-auto] connected to {} runtime={} board={}",
-                                port_name, verified.runtime, verified.board_device_id
-                            );
-                            if let Err(error) =
-                                persist_connected_usb_binding(&port_name, &verified.board_device_id)
-                            {
-                                eprintln!(
-                                    "[usb-auto] failed to refresh binding for {}: {}",
-                                    verified.board_device_id, error
-                                );
-                                // A connected but unrecorded board would bypass the
-                                // USB-first rule for this app session.  Drop it and
-                                // leave the next scan to retry the verified USB pair.
-                                usb_manager.disconnect();
-                                continue;
-                            }
-                            if let Err(error) =
-                                forward_current_state_after_usb_connect(&usb_manager)
-                            {
-                                eprintln!(
-                                    "[usb-auto] failed to replay bridge state after connect: {}",
-                                    error
-                                );
-                            }
-                            break;
-                        }
-                        Err(e) => {
-                            let failure_count = failed_probes
-                                .get(&probe_key)
-                                .map(|(count, _)| count.saturating_add(1))
-                                .unwrap_or(1);
-                            let retry_delay = usb_auto_retry_delay(failure_count);
-                            failed_probes
-                                .insert(probe_key, (failure_count, Instant::now() + retry_delay));
-                            eprintln!("[usb-auto] rejected {}: {}", port_name, e);
-                            // connect_for_auto retires its own previous generation
-                            // under connect_guard before probing and cannot return
-                            // Err after publishing a connection. A later unscoped
-                            // disconnect could retire a fresh manual connection.
-                        }
+                        ConnectionRoute::Tcp => try_auto_connect_tcp(
+                            &usb_manager,
+                            &app_handle,
+                            &mut failed_probes,
+                            tcp_target.clone(),
+                        ),
+                    };
+                    if connected {
+                        break;
                     }
                 }
             }
@@ -12405,6 +12542,7 @@ pub fn run() {
             usb_scan_devices,
             usb_connect,
             usb_connect_tcp,
+            set_connection_route_preference,
             usb_disconnect,
             usb_send_state,
             usb_send_speech,
@@ -15670,6 +15808,7 @@ mod tests {
                 transport: "usb".to_string(),
                 tcp_host: String::new(),
                 tcp_port: 0,
+                route_preference: "auto".to_string(),
             },
             DeviceBinding {
                 board_device_id: "board-other".to_string(),
@@ -15679,6 +15818,7 @@ mod tests {
                 transport: "usb".to_string(),
                 tcp_host: String::new(),
                 tcp_port: 0,
+                route_preference: "auto".to_string(),
             },
         ];
 
@@ -15692,6 +15832,7 @@ mod tests {
                 transport: "usb".to_string(),
                 tcp_host: String::new(),
                 tcp_port: 0,
+                route_preference: "auto".to_string(),
             },
         );
 
@@ -15700,6 +15841,80 @@ mod tests {
         assert_eq!(latest.board_device_id, "board-current");
         assert_eq!(latest.wifi_ssid, "USB(/dev/current)");
         assert_eq!(latest.bound_at, 3);
+    }
+
+    #[test]
+    fn route_preference_defaults_legacy_bindings_to_usb_first_auto() {
+        assert_eq!(
+            persisted_connection_route_preference(""),
+            ConnectionRoutePreference::Auto
+        );
+        assert_eq!(
+            persisted_connection_route_preference("an-unknown-future-route"),
+            ConnectionRoutePreference::Auto
+        );
+        assert_eq!(
+            parse_connection_route_preference(" USB ").unwrap(),
+            ConnectionRoutePreference::Usb
+        );
+        assert_eq!(
+            parse_connection_route_preference("tcp").unwrap(),
+            ConnectionRoutePreference::Tcp
+        );
+        assert!(parse_connection_route_preference("bluetooth").is_err());
+    }
+
+    #[test]
+    fn route_preference_orders_auto_usb_before_available_tcp() {
+        assert_eq!(
+            connection_probe_order(ConnectionRoutePreference::Auto, true),
+            vec![ConnectionRoute::Usb, ConnectionRoute::Tcp]
+        );
+        assert_eq!(
+            connection_probe_order(ConnectionRoutePreference::Auto, false),
+            vec![ConnectionRoute::Usb]
+        );
+        assert_eq!(
+            connection_probe_order(ConnectionRoutePreference::Usb, true),
+            vec![ConnectionRoute::Usb]
+        );
+        assert_eq!(
+            connection_probe_order(ConnectionRoutePreference::Tcp, true),
+            vec![ConnectionRoute::Tcp]
+        );
+        assert!(connection_probe_order(ConnectionRoutePreference::Tcp, false).is_empty());
+    }
+
+    #[test]
+    fn route_preference_update_only_changes_the_paired_target() {
+        let mut bindings = vec![DeviceBinding {
+            board_device_id: "p4-paired".to_string(),
+            desktop_device_id: "desktop-a".to_string(),
+            wifi_ssid: "TCP(tcp://192.168.1.97:3333)".to_string(),
+            bound_at: 1,
+            transport: "tcp".to_string(),
+            tcp_host: "192.168.1.97".to_string(),
+            tcp_port: 3333,
+            route_preference: "auto".to_string(),
+        }];
+
+        set_device_binding_route_preference(
+            &mut bindings,
+            "p4-paired",
+            ConnectionRoutePreference::Tcp,
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(bindings[0].route_preference, "tcp");
+        assert_eq!(bindings[0].bound_at, 2);
+        assert!(set_device_binding_route_preference(
+            &mut bindings,
+            "p4-unknown",
+            ConnectionRoutePreference::Usb,
+            3,
+        )
+        .is_err());
     }
 
     #[test]
@@ -15712,6 +15927,7 @@ mod tests {
             transport: "usb".to_string(),
             tcp_host: String::new(),
             tcp_port: 0,
+            route_preference: "auto".to_string(),
         };
         let tcp = DeviceBinding {
             board_device_id: "p4-paired".to_string(),
@@ -15721,6 +15937,7 @@ mod tests {
             transport: "tcp".to_string(),
             tcp_host: "192.168.1.97".to_string(),
             tcp_port: 3333,
+            route_preference: "auto".to_string(),
         };
         let unpaired = DeviceBinding {
             board_device_id: "p4-unpaired".to_string(),
@@ -15749,6 +15966,7 @@ mod tests {
             transport: "usb".to_string(),
             tcp_host: String::new(),
             tcp_port: 0,
+            route_preference: "auto".to_string(),
         }];
 
         assert!(super::required_paired_tcp_identity(None, &bindings).is_err());
@@ -15781,6 +15999,7 @@ mod tests {
             transport: "tcp".to_string(),
             tcp_host: "192.168.1.97".to_string(),
             tcp_port: 3333,
+            route_preference: "auto".to_string(),
         };
         assert_eq!(
             tcp_endpoint_from_binding(&tcp),
@@ -15815,6 +16034,7 @@ mod tests {
             transport: "tcp".to_string(),
             tcp_host: "192.168.1.97".to_string(),
             tcp_port: 3333,
+            route_preference: "auto".to_string(),
         };
         let refreshed = automatic_usb_binding(
             "/dev/cu.wchusbserial", "p4-expected", "desktop-new".to_string(), 2, Some(&previous),
@@ -15836,8 +16056,8 @@ mod tests {
     fn usb_auto_connect_refreshes_binding_and_replays_bridge_state() {
         let source = include_str!("lib.rs");
         let auto_connect = &source[source
-            .find("fn start_usb_auto_connect(")
-            .expect("USB auto-connect")
+            .find("fn try_auto_connect_tcp(")
+            .expect("auto-connect helpers")
             ..source.find("pub fn run()").expect("Tauri run entry")];
 
         assert!(auto_connect.contains("persist_connected_usb_binding("));
@@ -15848,13 +16068,13 @@ mod tests {
     fn auto_reconnect_keeps_saved_tcp_identity_scoped() {
         let source = include_str!("lib.rs");
         let auto_connect = &source[source
-            .find("fn start_usb_auto_connect(")
-            .expect("auto-connect")
+            .find("fn try_auto_connect_tcp(")
+            .expect("TCP auto-connect helper")
             ..source.find("pub fn run()").expect("Tauri run entry")];
         assert!(auto_connect.contains("preferred_tcp_auto_binding()"));
         assert!(auto_connect.contains("connect_tcp_expected("));
         assert!(auto_connect.contains("Some(&expected_board_device_id)"));
-        assert!(auto_connect.contains("must not silently fall through"));
+        assert!(auto_connect.contains("connection_probe_order(preference"));
     }
 
     #[test]
