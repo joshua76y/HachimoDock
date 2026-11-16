@@ -668,59 +668,62 @@ fn npx_candidates() -> Vec<&'static str> {
     }
 }
 
+fn resolve_npx_executable_from<F>(mut lookup: F) -> Option<String>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    npx_candidates()
+        .into_iter()
+        .find_map(|candidate| lookup(candidate))
+}
+
+fn resolve_npx_executable() -> Option<String> {
+    resolve_npx_executable_from(|candidate| crate::find_executable(candidate, &[]))
+}
+
+fn npx_child_path(npx_path: &Path) -> Option<std::ffi::OsString> {
+    crate::merged_host_path(npx_path.parent())
+}
+
 pub fn install_codex_community_pet(pet_id: &str) -> Result<CodexCommunityInstallResult, String> {
     let pet_id = validate_community_pet_id(pet_id)?;
-    let mut not_found = true;
-    let mut last_error = String::new();
+    let npx = resolve_npx_executable()
+        .ok_or_else(|| "未找到 npx，请先安装 Node.js/npm 后重试。".to_string())?;
     let extra_ca = crate::llm_network::community_ca_file()?;
+    let mut command = crate::command_for_host(&npx);
+    if let Some(path) = npx_child_path(Path::new(&npx)) {
+        command.env("PATH", path);
+    }
+    if let Some(file) = &extra_ca {
+        command.env("NODE_EXTRA_CA_CERTS", file.path());
+    }
+    let output = command
+        .args(["--yes", "codex-pets", "add", &pet_id])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| error.to_string())?;
 
-    for npx in npx_candidates() {
-        let mut command = crate::command_for_host(npx);
-        if let Some(file) = &extra_ca { command.env("NODE_EXTRA_CA_CERTS", file.path()); }
-        let output = command
-            .args(["--yes", "codex-pets", "add", &pet_id])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output();
-
-        match output {
-            Ok(output) => {
-                not_found = false;
-                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                if output.status.success() {
-                    return Ok(CodexCommunityInstallResult {
-                        pet_id: pet_id.clone(),
-                        command: format!("npx --yes codex-pets add {}", pet_id),
-                        stdout,
-                        stderr,
-                    });
-                }
-                let detail = if stderr.is_empty() {
-                    stdout.clone()
-                } else {
-                    stderr.clone()
-                };
-                last_error = format!(
-                    "执行 npx codex-pets add {} 失败 (exit {:?}){}{}",
-                    pet_id,
-                    output.status.code(),
-                    if detail.is_empty() { "" } else { ": " },
-                    detail
-                );
-            }
-            Err(err) => {
-                last_error = err.to_string();
-            }
-        }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if output.status.success() {
+        return Ok(CodexCommunityInstallResult {
+            pet_id: pet_id.clone(),
+            command: format!("npx --yes codex-pets add {}", pet_id),
+            stdout,
+            stderr,
+        });
     }
 
-    if not_found {
-        Err("未找到 npx，请先安装 Node.js/npm 后重试。".to_string())
-    } else {
-        Err(last_error)
-    }
+    let detail = if stderr.is_empty() { stdout } else { stderr };
+    Err(format!(
+        "执行 npx codex-pets add {} 失败 (exit {:?}){}{}",
+        pet_id,
+        output.status.code(),
+        if detail.is_empty() { "" } else { ": " },
+        detail
+    ))
 }
 
 /// Port of the Python reference's `is_magenta_halo_pixel`: detects the
@@ -1124,6 +1127,23 @@ mod tests {
     #[test]
     fn validate_community_pet_id_rejects_shell_text() {
         assert!(validate_community_pet_id("sakura-jk;rm").is_err());
+    }
+
+    #[test]
+    fn npx_resolver_uses_host_lookup_when_the_gui_path_is_incomplete() {
+        let resolved = resolve_npx_executable_from(|candidate| {
+            (candidate == "npx").then(|| "/test-runtime/node-bin/npx".to_string())
+        });
+
+        assert_eq!(resolved.as_deref(), Some("/test-runtime/node-bin/npx"));
+    }
+
+    #[test]
+    fn npx_child_path_keeps_the_resolved_node_directory_first() {
+        let path = npx_child_path(Path::new("/test-runtime/node-bin/npx")).unwrap();
+        let mut entries = std::env::split_paths(&path);
+
+        assert_eq!(entries.next(), Some(PathBuf::from("/test-runtime/node-bin")));
     }
 
     #[test]
