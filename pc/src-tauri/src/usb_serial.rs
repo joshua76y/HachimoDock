@@ -3118,6 +3118,18 @@ impl UsbSerialManager {
         if board.is_empty() || generation == 0 || boot.is_empty() || !payload["active"].is_boolean() {
             return Err("voice draft requires a complete connection scope".into());
         }
+        // 草稿窗口只属于当前跟随的 Agent：跟随目标存在时必须匹配 agentId，
+        // 否则一条迟到的通知可能把草稿投到已切走的 Agent（隔离性）。
+        if payload["active"].as_bool() == Some(true) {
+            if let Ok(scope) = self.follow_scope.lock() {
+                if let Some(scope) = scope.as_ref() {
+                    let agent = payload["agentId"].as_str().unwrap_or_default();
+                    if agent.is_empty() || scope.agent != agent {
+                        return Err("voice draft target is not the followed agent".into());
+                    }
+                }
+            }
+        }
         self.send_inner_admitted_boot("voice/draft", payload, true, Some(board), Some(generation), None, None, Some(boot))
     }
 
