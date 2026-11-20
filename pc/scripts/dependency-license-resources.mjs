@@ -18,7 +18,7 @@ export const dependencyLicenseResources = Object.freeze([
   ['Node-26.7.0-LICENSE.txt', 'e991d81497a85bb24fc6bffae0a3637a6accd6c6bc5ce1f2c5698bd555cf9d49'],
   ['Node-26.7.0-darwin-arm64-LICENSE.txt', '5888dbb9a1d2b18f2c3e6c5f6af1b39de658372b402a0577b002777f14c62ace'],
   ['DESKTOP-RUNTIME-LICENSES.txt', '4517acfe5236eaad9469fcf8b607c200b88d4bc87973251229208efffdaf2d7f'],
-  ['DESKTOP-RUNTIME-DEPENDENCIES.json', '837a5ab8fd865cdcec8ae6fff01e4188cba69be0f33c6bfd7151c4dc61ce36f0'],
+  ['DESKTOP-RUNTIME-DEPENDENCIES.json', 'b60614c0aa3bebf0c5930febefa8949d7898536370c6860637cc022fc3165b58'],
 ].map(([name, sha256]) => Object.freeze({ name, sha256 })));
 
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
