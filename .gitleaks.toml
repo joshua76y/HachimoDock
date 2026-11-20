@@ -13,6 +13,13 @@ id = "generic-api-key"
   paths = ['''^pc/skills/petui/scripts/app_form_v3\.py$''']
   regexes = ['''^NUMERIC_KEYS='0123456789\.-'$''']
 
+  [[rules.allowlists]]
+  description = "Sequential 16-byte UDP crypto fixture in unit tests, not a credential; exact file and literal only"
+  condition = "AND"
+  regexTarget = "match"
+  paths = ['''^pc/src-tauri/src/xiaozhi_realtime\.rs$''']
+  regexes = ['''00112233445566778899aabbccddeeff''']
+
 [[rules]]
 id = "private-key"
 
