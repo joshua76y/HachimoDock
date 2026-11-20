@@ -948,6 +948,22 @@ PC to board:
 - `control/remote-cli-binding` with `targetSource`: immediately changes that
   follow target. The desktop also includes `followedSource` in replayed active
   state so the correct badge is restored after a board or transport reconnect.
+- `voice/draft`: opens or closes the on-device push-to-talk confirmation
+  window. `{"active":true,"text":"…","agentId":"…"}` pins the recognized
+  sentence in the bubble body so later `state/*` pushes cannot replace it,
+  suppresses every other local binding while the window is open (a fresh
+  `voice_ptt` hold is still accepted and replaces the draft), and draws a
+  green up-arrow plus check (send) next to a red down-arrow plus cross
+  (cancel) above that caption. The flag self-expires after 180 seconds so a
+  desktop that disappears cannot mute the joystick indefinitely.
+  `{"active":false}` closes the window immediately and clears the pinned
+  speech text, so the caption does not linger after a send or cancel.
+  While the window is open the board reports `input/event` with
+  `action:"voice_draft_send"` for `joystick.up` and
+  `action:"voice_draft_cancel"` for `joystick.down` (always
+  `handledLocally:false`); the desktop decides whether to submit or cancel.
+  The desktop only sends a draft whose `agentId` matches the currently
+  followed Agent, so a late notice cannot retarget a switched session.
 - `speech/text`: updates the speech bubble title, body, status, and status text.
   A terminal `done` lifecycle remains visible on the device for 60 seconds
   before the runtime returns it to `idle`, so completed replies stay readable.
