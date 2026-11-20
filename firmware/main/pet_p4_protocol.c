@@ -3524,15 +3524,27 @@ void pet_p4_send_hello(const pet_p4_runtime_state_t *state, pet_p4_send_line_fn 
   pet_p4_send_hello_for_board(state ? state->board_device_id : NULL, send_line, ctx);
 }
 
+static void handle_remote_cli_binding(pet_p4_runtime_state_t *state, const cJSON *payload) {
+  const char *target_source = json_string(payload, "targetSource");
+  if (!target_source[0]) return;
+  copy_text(state->followed_agent, sizeof(state->followed_agent), target_source);
+  state->last_update_ms += 1;
+}
+
 static void handle_state_topic(pet_p4_runtime_state_t *state, const char *topic, const cJSON *payload) {
   bool was_done = lifecycle_is(runtime_lifecycle(state), "done");
   const char *agent = "";
   const char *slash = strchr(topic, '/');
   if (slash && slash[1]) agent = slash + 1;
   /* Desktop emits state/active as the aggregate lifecycle update after the
-   * source-specific update.  Its source field is the followed Agent; using
-   * the topic suffix here would overwrite "codex" with the literal "active". */
+   * source-specific update.  `source` therefore names the Agent with the
+   * freshest activity, while `followedSource` preserves the user's explicit
+   * follow selection for the side rail. */
   if (strcmp(agent, "active") == 0) {
+    const char *followed_source = json_string(payload, "followedSource");
+    if (followed_source[0]) {
+      copy_text(state->followed_agent, sizeof(state->followed_agent), followed_source);
+    }
     const char *source = json_string(payload, "source");
     if (source[0]) agent = source;
     /* session/current is the user-visible foreground card.  A later
@@ -4145,6 +4157,9 @@ bool pet_p4_handle_line_with_reply(
       }
       state->last_update_ms += 1;
     }
+  } else if (strcmp(topic, "control/remote-cli-binding") == 0) {
+    handle_remote_cli_binding(state, payload);
+    send_protocol_ack_if_requested(send_line, ctx, topic, payload);
   } else if (strncmp(topic, "state/", 6) == 0) {
     handle_state_topic(state, topic, payload);
     send_protocol_ack_if_requested(send_line, ctx, topic, payload);

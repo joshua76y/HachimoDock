@@ -196,6 +196,11 @@ static uint16_t agent_accent(const char *agent) {
   return C_DIM;
 }
 
+static const char *followed_agent_for_badge(const pet_p4_runtime_state_t *state) {
+  if (!state) return "";
+  return state->followed_agent[0] ? state->followed_agent : state->active_agent;
+}
+
 /* A compact neutral robot mark makes the followed channel scannable without
  * pretending to reproduce third-party product logos. */
 static void draw_agent_badge(const char *agent) {
@@ -444,7 +449,7 @@ void pet_p4_panel_chrome_tick(const pet_p4_runtime_state_t *state, unsigned long
   const char *word = state_word(state, connected);
   if (!connected) word = wifi_up ? "等待" : "断开";
   const char *page = page_word(state);
-  const char *agent = state->active_agent;
+  const char *agent = followed_agent_for_badge(state);
   const int batt = battery_percent(pet_p4_battery_millivolts());
   const int host_online = connected ? 1 : 0;
 

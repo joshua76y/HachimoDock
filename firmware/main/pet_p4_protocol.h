@@ -81,6 +81,10 @@ typedef struct {
   char board_device_id[PET_P4_DEVICE_ID_MAX];
   char desktop_device_id[PET_P4_DEVICE_ID_MAX];
   char active_agent[PET_P4_AGENT_MAX];
+  /* Explicit desktop follow target.  It is intentionally independent from
+   * active_agent, which may temporarily belong to another Agent that has a
+   * message or a foreground project card. */
+  char followed_agent[PET_P4_AGENT_MAX];
   char current_state[PET_P4_STATE_MAX];
   char current_event[PET_P4_STATE_MAX];
   char current_title[PET_P4_TITLE_MAX];

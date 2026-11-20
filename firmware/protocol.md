@@ -1,5 +1,9 @@
 # ESP-P4 USB Protocol
 
+## 小智实时问答桥接边界
+
+小智 AI 不新增任何 ESP-P4 消息、能力位或固件网络连接。设备继续只向 PC 发送既有 16 kHz 单声道 PCM，并接收既有 `ui/conversation` 与 `audio/play_*` 消息；PC 在选中小智引擎时才在设备外部完成 MQTT/UDP/Opus 转换。固件不得保存小智绑定码、OTA/MQTT 凭据、UDP key/nonce 或服务端字幕，也不执行任何小智 MCP、工具或控制消息。
+
 ## Device approval modal
 
 The host may send a single pending approval request. Example (synthetic values):
@@ -936,6 +940,14 @@ PC to board:
 ## Supported Input Topics
 
 - `state/<agent>`: updates current lifecycle state, event, and status marker.
+- `state/active`: is the cross-Agent activity summary. Its `source` names the
+  Agent that most recently supplied that summary; optional `followedSource`
+  names the user-selected follow target and is the only source used for the
+  persistent side-rail Agent badge. `source` must never make that badge jump
+  to an unrelated busy Agent.
+- `control/remote-cli-binding` with `targetSource`: immediately changes that
+  follow target. The desktop also includes `followedSource` in replayed active
+  state so the correct badge is restored after a board or transport reconnect.
 - `speech/text`: updates the speech bubble title, body, status, and status text.
   A terminal `done` lifecycle remains visible on the device for 60 seconds
   before the runtime returns it to `idle`, so completed replies stay readable.

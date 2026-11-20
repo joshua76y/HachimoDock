@@ -26,6 +26,7 @@ def static_function(source: str, name: str) -> str:
 
 def test_side_rail_names_the_followed_agent_and_uses_the_agent_badge(tmp_path):
     source = (ROOT / "main/pet_p4_panel_chrome.c").read_text()
+    followed = static_function(source, "followed_agent_for_badge")
     helper = static_function(source, "agent_display_name")
     accent = static_function(source, "agent_accent")
     badge = static_function(source, "draw_agent_badge")
@@ -50,6 +51,7 @@ def test_side_rail_names_the_followed_agent_and_uses_the_agent_badge(tmp_path):
 #define C_KEY_BLUE 9
 #define C_KEY_GREEN 10
 #define C_KEY_NEUTRAL 11
+typedef struct {{ char active_agent[48], followed_agent[48]; }} pet_p4_runtime_state_t;
 static const char *drawn[16];
 static int drawn_x[16], drawn_y[16], drawn_count;
 static int framed_count;
@@ -61,6 +63,7 @@ static void draw_bars(int x,int y,int bars){{(void)x;(void)y;(void)bars;}}
 static void draw_battery(int x,int y,int pct){{(void)x;(void)y;(void)pct;}}
 static void draw_key_row(int x,int y,const char *label,const char *name,const char *gpio,unsigned short color,bool pressed){{(void)x;(void)y;(void)label;(void)name;(void)gpio;(void)color;(void)pressed;}}
 static bool pet_p4_input_action_for(const char *event,char *action,unsigned long size){{(void)event;(void)action;(void)size;return false;}}
+{followed}
 {helper}
 {accent}
 {badge}
@@ -68,6 +71,10 @@ static bool pet_p4_input_action_for(const char *event,char *action,unsigned long
 static void clear(void){{drawn_count=framed_count=0;}}
 static int contains(const char *value){{for(int i=0;i<drawn_count;i++)if(strcmp(drawn[i],value)==0)return i;return -1;}}
 int main(void) {{
+  pet_p4_runtime_state_t state={{0}};
+  strcpy(state.active_agent,"codex");strcpy(state.followed_agent,"claude-code");
+  assert(!strcmp(followed_agent_for_badge(&state),"claude-code"));
+  state.followed_agent[0]=0;assert(!strcmp(followed_agent_for_badge(&state),"codex"));
   clear();redraw("10:30","11/13","USB","空闲","主页",80,3,1,0,"codex");
   int label=contains("CODEX");assert(label>=0);assert(drawn_y[label]>=440);assert(framed_count>=1);
   clear();redraw("10:30","11/13","USB","空闲","主页",80,3,1,0,"claude-code");assert(contains("CLAUDE")>=0);
