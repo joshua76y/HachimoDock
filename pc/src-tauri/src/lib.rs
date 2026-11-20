@@ -12345,27 +12345,6 @@ pub fn run() {
                 url.scheme(), safe_host, port, safe_path);
         })
         .setup(move |app| {
-            // Provider routing must be initialized before any local-ASR warmup.
-            // Otherwise startup could inspect the old legacy file while later
-            // Tauri commands write the new authoritative configuration.
-            voice_service_settings::configure_storage_dir(app.path().app_data_dir()?)
-                .map_err(std::io::Error::other)?;
-            /* 本地 ASR：客户端启动即在后台拉起 sherpa-onnx 服务（幂等），
-             * 不依赖任何 IPC 命令，避免命令未注册时静默失败。 */
-            if volcengine_asr::local_provider_prefs().is_some() {
-                std::thread::spawn(|| {
-                    if let Err(error) = local_asr::ensure_service() {
-                        eprintln!("[local-asr] 启动失败：{error}");
-                    }
-                });
-            }
-            // 与本地 ASR 一样，已选中且已安装的 Kokoro 在桌面端启动时后台恢复。
-            // 首次安装仍须由设置页显式触发，避免启动过程下载模型或长时间阻塞。
-            std::thread::spawn(|| {
-                if let Err(error) = kokoro_tts::auto_start_if_configured() {
-                    eprintln!("[kokoro-tts] 启动失败：{error}");
-                }
-            });
             if cfg!(feature = "composer-diagnostic") {
                 app.manage(program_autostart::ProgramAutostartState::unavailable());
                 // No auto-connect, no credential reads/migrations, no audio,
@@ -12405,6 +12384,27 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             volcengine_asr::configure_storage_dir(app.path().app_data_dir()?)
                 .map_err(std::io::Error::other)?;
+            // Provider routing must be initialized before any local-ASR warmup:
+            // otherwise startup could inspect the old legacy file while later
+            // Tauri commands write the new authoritative configuration.
+            voice_service_settings::configure_storage_dir(app.path().app_data_dir()?)
+                .map_err(std::io::Error::other)?;
+            /* 本地 ASR：客户端启动即在后台拉起 sherpa-onnx 服务（幂等），
+             * 不依赖任何 IPC 命令，避免命令未注册时静默失败。 */
+            if volcengine_asr::local_provider_prefs().is_some() {
+                std::thread::spawn(|| {
+                    if let Err(error) = local_asr::ensure_service() {
+                        eprintln!("[local-asr] 启动失败：{error}");
+                    }
+                });
+            }
+            // 与本地 ASR 一样，已选中且已安装的 Kokoro 在桌面端启动时后台恢复。
+            // 首次安装仍须由设置页显式触发，避免启动过程下载模型或长时间阻塞。
+            std::thread::spawn(|| {
+                if let Err(error) = kokoro_tts::auto_start_if_configured() {
+                    eprintln!("[kokoro-tts] 启动失败：{error}");
+                }
+            });
             voice_chat_settings::configure_storage_dir(app.path().app_data_dir()?)
                 .map_err(std::io::Error::other)?;
             xiaozhi_settings::configure_storage_dir(app.path().app_data_dir()?)
