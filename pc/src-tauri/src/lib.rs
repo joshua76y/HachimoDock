@@ -153,10 +153,18 @@ mod device_voice_lifecycle;
 mod usb_serial;
 mod appearance_recovery_ipc;
 mod voice_chat_settings;
+mod xiaozhi_protocol;
+mod xiaozhi_audio;
+mod xiaozhi_settings;
+mod xiaozhi_realtime;
+mod xiaozhi_mcp;
+mod xiaozhi_desktop_mcp;
 mod llm_models;
 mod device_voice_bridge;
 mod local_asr;
 mod local_tts;
+mod kokoro_tts;
+mod voice_service_settings;
 mod prompt_sounds;
 #[cfg(test)]
 mod voice_wifi;
@@ -11573,6 +11581,7 @@ fn replay_usb_active_state(usb_manager: &usb_serial::UsbSerialManager) -> Result
     if !usb_manager.status().connected {
         return Ok(());
     }
+    let followed_agent = load_selected_agent_for_usb();
     let board_device_id = usb_manager.status().board_device_id;
     let cached = load_last_usb_active_state();
     let same_source_non_speaking = cached
@@ -11598,6 +11607,9 @@ fn replay_usb_active_state(usb_manager: &usb_serial::UsbSerialManager) -> Result
     if let Some(object) = active_payload.as_object_mut() {
         object.insert("activeTopic".to_string(), serde_json::json!(true));
         object.insert("source".to_string(), serde_json::json!(source.clone()));
+        if let Some(followed_agent) = followed_agent.as_deref() {
+            object.insert("followedSource".to_string(), serde_json::json!(followed_agent));
+        }
     }
     usb_manager.send_state("active", &active_payload)?;
     if let Some(restore_text) = build_usb_restore_speech_text(&source, &payload) {
@@ -11635,10 +11647,14 @@ fn forward_current_state_after_usb_connect(
     };
 
     usb_manager.send_state(&source, &payload)?;
+    let followed_agent = load_selected_agent_for_usb();
     let mut active_payload = payload.clone();
     if let Some(object) = active_payload.as_object_mut() {
         object.insert("activeTopic".to_string(), serde_json::json!(true));
         object.insert("source".to_string(), serde_json::json!(source.clone()));
+        if let Some(followed_agent) = followed_agent.as_deref() {
+            object.insert("followedSource".to_string(), serde_json::json!(followed_agent));
+        }
     }
     usb_manager.send_state("active", &active_payload)?;
     cache_last_usb_active_state(&source, &payload);
@@ -12056,9 +12072,17 @@ fn start_usb_state_forwarder(usb_manager: usb_serial::UsbSerialManager) {
             if let Some(object) = active_payload.as_object_mut() {
                 object.insert("activeTopic".to_string(), serde_json::json!(true));
                 object.insert("source".to_string(), serde_json::json!(best_source.clone()));
+                if let Some(followed_agent) = selected_agent.as_deref() {
+                    object.insert("followedSource".to_string(), serde_json::json!(followed_agent));
+                }
             }
 
-            let active_signature = format!("{}|{}", best_source, best_signature);
+            let active_signature = format!(
+                "{}|{}|{}",
+                best_source,
+                best_signature,
+                selected_agent.as_deref().unwrap_or("")
+            );
             if active_signature == last_active_signature {
                 continue;
             }
@@ -12321,6 +12345,11 @@ pub fn run() {
                 url.scheme(), safe_host, port, safe_path);
         })
         .setup(move |app| {
+            // Provider routing must be initialized before any local-ASR warmup.
+            // Otherwise startup could inspect the old legacy file while later
+            // Tauri commands write the new authoritative configuration.
+            voice_service_settings::configure_storage_dir(app.path().app_data_dir()?)
+                .map_err(std::io::Error::other)?;
             /* 本地 ASR：客户端启动即在后台拉起 sherpa-onnx 服务（幂等），
              * 不依赖任何 IPC 命令，避免命令未注册时静默失败。 */
             if volcengine_asr::local_provider_prefs().is_some() {
@@ -12330,6 +12359,13 @@ pub fn run() {
                     }
                 });
             }
+            // 与本地 ASR 一样，已选中且已安装的 Kokoro 在桌面端启动时后台恢复。
+            // 首次安装仍须由设置页显式触发，避免启动过程下载模型或长时间阻塞。
+            std::thread::spawn(|| {
+                if let Err(error) = kokoro_tts::auto_start_if_configured() {
+                    eprintln!("[kokoro-tts] 启动失败：{error}");
+                }
+            });
             if cfg!(feature = "composer-diagnostic") {
                 app.manage(program_autostart::ProgramAutostartState::unavailable());
                 // No auto-connect, no credential reads/migrations, no audio,
@@ -12348,13 +12384,6 @@ pub fn run() {
                 eprintln!("[desktop-tray] unavailable; keeping foreground close/exit behavior: {}",error);
             }
             desktop_window::fit(app.handle(),true);
-            // 辅助功能授权按 ad-hoc 签名的 cdhash 记录；每次重建/替换 App
-            // 二进制后旧授权会失效。启动时主动检查并弹系统授权对话框、
-            // 自动路由到辅助功能设置页，避免「发送时才发现权限问题」。
-            #[cfg(target_os = "macos")]
-            if !codex_composer::CodexComposerBridge::accessibility_permission_granted() {
-                let _ = codex_composer::CodexComposerBridge::request_accessibility_permission();
-            }
             let bundled=app.path().resource_dir()?.join("builtin-clawpkgs");
             #[cfg(debug_assertions)]
             let bundled=if bundled.is_dir(){bundled}else{PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../builtin-clawpkgs")};
@@ -12377,6 +12406,8 @@ pub fn run() {
             volcengine_asr::configure_storage_dir(app.path().app_data_dir()?)
                 .map_err(std::io::Error::other)?;
             voice_chat_settings::configure_storage_dir(app.path().app_data_dir()?)
+                .map_err(std::io::Error::other)?;
+            xiaozhi_settings::configure_storage_dir(app.path().app_data_dir()?)
                 .map_err(std::io::Error::other)?;
             llm_network::configure_storage_dir(app.path().app_data_dir()?)
                 .map_err(std::io::Error::other)?;
@@ -12440,9 +12471,16 @@ pub fn run() {
             appearance_recovery_ipc::usb_reconcile_appearance_unknown,
             local_asr::local_asr_health,
             local_asr::local_asr_save_prefs,
+            voice_service_settings::voice_service_preferences,
+            voice_service_settings::save_voice_service_preferences,
             local_tts::local_tts_voices,
             local_tts::local_tts_preview,
             local_tts::local_tts_save_prefs,
+            kokoro_tts::kokoro_tts_status,
+            kokoro_tts::kokoro_tts_install,
+            kokoro_tts::kokoro_tts_start,
+            kokoro_tts::kokoro_tts_stop,
+            kokoro_tts::kokoro_tts_preview,
             llm_models::list_openai_models,
             prompt_sounds::prompt_sound_upload,
             prompt_sounds::prompt_sound_preview,
@@ -12485,9 +12523,14 @@ pub fn run() {
             realtime_chat::load_realtime_voice_volume,
             realtime_chat::save_realtime_voice_volume,
             realtime_chat::load_voice_chat_settings,
+            realtime_chat::probe_voice_chat_llm,
             realtime_chat::list_voice_chat_models,
             realtime_chat::save_voice_chat_settings,
             realtime_chat::clear_voice_chat_secret,
+            xiaozhi_settings::load_xiaozhi_settings,
+            xiaozhi_settings::save_xiaozhi_settings,
+            xiaozhi_settings::activate_xiaozhi,
+            xiaozhi_settings::test_xiaozhi_connection,
             llm_network::load_llm_network_settings,
             llm_network::save_llm_network_settings,
             llm_network::test_llm_network_settings,
@@ -16744,6 +16787,15 @@ mod tests {
 
         assert_eq!(read_live_managed_pid(&pid_path), None);
         assert!(!pid_path.exists());
+    }
+
+    #[test]
+    fn desktop_startup_never_requests_accessibility_consent() {
+        let source = include_str!("lib.rs");
+        let setup = &source[source.find(".setup(move |app| {").unwrap()
+            ..source.find("let bundled=app.path().resource_dir()?").unwrap()];
+        assert!(!setup.contains("request_accessibility_permission()"));
+        assert!(source.contains("fn request_codex_accessibility_permission()"));
     }
 }
 

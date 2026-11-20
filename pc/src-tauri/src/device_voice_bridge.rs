@@ -661,19 +661,55 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
-/// 按用户当前选择的识别来源转写。设备 PTT 只认本地链路：
-/// 火山云端走的是流式会话，这里不重复实现。
-fn transcribe(wav: &[u8]) -> Result<String, String> {
-    if let Some((endpoint, engine)) = crate::volcengine_asr::local_provider_prefs() {
-        // The actual request loads the selected engine lazily.  Avoid a
-        // separate silent transcription, which can consume another 30 seconds
-        // before the real request even starts.
-        let _ = crate::local_asr::ensure_ready(&endpoint);
-        let transcript =
-            crate::local_asr::transcribe_wav(&endpoint, &engine, wav, ASR_TIMEOUT)?;
-        return Ok(transcript.text);
+/// 固件录音格式：PCM S16LE、16 kHz、单声道的标准 44-byte WAV。拒绝其他
+/// 格式而不是把字节误送给流式识别器，以免造成“录完一直 listening”的假象。
+fn decode_board_pcm_wav(wav: &[u8]) -> Result<&[u8], String> {
+    if wav.len() <= 44 || &wav[0..4] != b"RIFF" || &wav[8..12] != b"WAVE"
+        || &wav[12..16] != b"fmt " || &wav[36..40] != b"data" {
+        return Err("设备录音不是有效 WAV".into());
     }
-    Err("语音识别来源未选择本地引擎，设备按键识别不可用；请在 API 设置把语音识别切到本地".into())
+    let read_u16 = |offset: usize| u16::from_le_bytes([wav[offset], wav[offset + 1]]);
+    let read_u32 = |offset: usize| u32::from_le_bytes([wav[offset], wav[offset + 1], wav[offset + 2], wav[offset + 3]]);
+    if read_u16(20) != 1 || read_u16(22) != 1 || read_u32(24) != 16_000 || read_u16(34) != 16 {
+        return Err("设备录音格式应为 16 kHz 单声道 16-bit PCM".into());
+    }
+    let declared = read_u32(40) as usize;
+    let end = 44usize.checked_add(declared).ok_or("设备录音长度无效")?;
+    if end > wav.len() || declared == 0 || declared % 2 != 0 {
+        return Err("设备录音数据长度无效".into());
+    }
+    Ok(&wav[44..end])
+}
+
+/// 按用户当前选择的识别来源转写。整段 Wi-Fi WAV 被解成 PCM 后交给与 USB
+/// 完全相同的 StreamingSpeechRecognizer；local/cloud 的 provider 分流和
+/// 密钥处理只存在这一处，设备端永远不接触云端凭据。
+fn transcribe(wav: &[u8]) -> Result<String, String> {
+    let pcm = decode_board_pcm_wav(wav)?;
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let recognizer = crate::volcengine_asr::StreamingSpeechRecognizer::start(move |event| {
+        match event {
+            crate::volcengine_asr::StreamingSpeechEvent::Final { text, .. } => {
+                let _ = sender.send(Ok(text));
+            }
+            crate::volcengine_asr::StreamingSpeechEvent::Error(error) => {
+                let _ = sender.send(Err(error));
+            }
+            _ => {}
+        }
+    })?;
+    for chunk in pcm.chunks(640) {
+        recognizer.push_pcm(chunk)?;
+    }
+    recognizer.finish()?;
+    let timeout = recognizer.finish_wait_timeout().max(ASR_TIMEOUT);
+    match receiver.recv_timeout(timeout) {
+        Ok(Ok(text)) if !text.trim().is_empty() => Ok(text),
+        Ok(Ok(_)) => Err("语音识别没有返回文字".into()),
+        Ok(Err(error)) => Err(error),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err("语音识别超时，请缩短录音后重试".into()),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err("语音识别连接意外结束".into()),
+    }
 }
 
 fn respond(stream: &mut TcpStream, status: u16, body: &serde_json::Value) {
@@ -697,6 +733,13 @@ fn respond(stream: &mut TcpStream, status: u16, body: &serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decodes_the_board_pcm_wav_for_the_shared_recognizer() {
+        let wav = crate::local_asr::pcm_to_wav(&[1, 0, 2, 0], 16_000, 1);
+
+        assert_eq!(decode_board_pcm_wav(&wav).unwrap(), &[1, 0, 2, 0]);
+    }
 
     #[test]
     fn connection_limit_releases_on_drop_and_rejects_excess() {

@@ -23,32 +23,6 @@ import {
 import PageShell from "./shell/PageShell.jsx";
 import Card from "./shell/Card.jsx";
 
-/* 构造一段 16k/单声道/16bit 的静音 WAV，用于把本地 ASR 引擎预热进内存。
- * 服务端懒加载 + 引擎互踢：预热必须用当前所选引擎的请求才能"证明"它已加载。 */
-function buildSilenceWav(seconds = 0.5) {
-  const sampleRate = 16000;
-  const silence = new Int16Array(Math.round(sampleRate * seconds));
-  const buffer = new ArrayBuffer(44 + silence.length * 2);
-  const view = new DataView(buffer);
-  const writeStr = (offset, text) => {
-    for (let i = 0; i < text.length; i += 1) view.setUint8(offset + i, text.charCodeAt(i));
-  };
-  writeStr(0, "RIFF");
-  view.setUint32(4, 36 + silence.length * 2, true);
-  writeStr(8, "WAVEfmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
-  writeStr(36, "data");
-  view.setUint32(40, silence.length * 2, true);
-  for (let i = 0; i < silence.length; i += 1) view.setInt16(44 + i * 2, 0, true);
-  return buffer;
-}
-
 /* 后端 local_tts_voices 返回 [{name, available}]（available=false = 探测时无声）。
  * 下拉里只显示可发声的音色；但当前已保存的音色即使不可用也保留，
  * 否则 select 的 value 会落空、用户选择被悄悄改写。 */
@@ -138,28 +112,19 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
   const [providerPending, setProviderPending] = useState({});
   const [savedLlm, setSavedLlm] = useState(null);
   const [asrApiKey, setAsrApiKey] = useState("");
-  /* 本地 ASR（sherpa-onnx）与火山引擎并列，偏好存本机 localStorage，
-   * 不写进加密凭据文件——它不需要 Key。 */
-  const [asrProvider, setAsrProvider] = useState(
-    () => window.localStorage.getItem("hachimo.asrProvider") || "volcengine",
-  );
-  const [localAsrEndpoint, setLocalAsrEndpoint] = useState(
-    () => window.localStorage.getItem("hachimo.localAsrEndpoint") || "http://127.0.0.1:8900",
-  );
-  const [localAsrEngine, setLocalAsrEngine] = useState(
-    () => window.localStorage.getItem("hachimo.localAsrEngine") || "sensevoice",
-  );
+  /* 本地 ASR 与火山引擎并列。初始值只用于首帧，随后由后端统一配置覆盖。 */
+  const [asrProvider, setAsrProvider] = useState("volcengine");
+  const [localAsrEndpoint, setLocalAsrEndpoint] = useState("http://127.0.0.1:8900");
+  const [localAsrEngine, setLocalAsrEngine] = useState("sensevoice");
   const [localAsrProbe, setLocalAsrProbe] = useState({ pending: false, message: "" });
   /* 语音合成来源：火山云端 / 本地 macOS 语音（say），与 ASR 解耦，各配各的。 */
-  const [ttsProvider, setTtsProvider] = useState(
-    () => window.localStorage.getItem("hachimo.ttsProvider") || "volcengine",
-  );
-  const [ttsVoice, setTtsVoice] = useState(
-    () => window.localStorage.getItem("hachimo.ttsVoice") || "Tingting",
-  );
+  const [ttsProvider, setTtsProvider] = useState("volcengine");
+  const [ttsVoice, setTtsVoice] = useState("Tingting");
   const [ttsVoices, setTtsVoices] = useState([]);
   const [ttsVoicesPending, setTtsVoicesPending] = useState(true);
   const [ttsProbe, setTtsProbe] = useState({ pending: false, message: "" });
+  const [kokoroState, setKokoroState] = useState({ pending: false, message: "" });
+  const [kokoroVoice, setKokoroVoice] = useState("zf_001");
 
   useEffect(() => {
     let alive = true;
@@ -177,9 +142,58 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
     };
   }, []);
 
+  /* 运行期 provider 只以 Tauri 后端为准。localStorage 仅保留为旧版迁移来源，
+   * 不能再在重启后把界面切回与实际识别链路不同的状态。 */
   useEffect(() => {
-    invoke("local_tts_save_prefs", { provider: ttsProvider, voice: ttsVoice }).catch(() => {});
-  }, [ttsProvider, ttsVoice]);
+    let alive = true;
+    invoke("voice_service_preferences").then((preferences) => {
+      if (!alive || !preferences) return;
+      const asr = preferences.asr || {};
+      const tts = preferences.tts || {};
+      setAsrProvider(asr.provider === "local" ? "local" : "volcengine");
+      setLocalAsrEndpoint(asr.endpoint || "http://127.0.0.1:8900");
+      setLocalAsrEngine(asr.engine || "sensevoice");
+      setTtsProvider(tts.provider === "macos" ? "local" : (tts.provider || "volcengine"));
+      setTtsVoice(tts.macosVoice || "Tingting");
+      setKokoroVoice(tts.kokoroVoice || "zf_001");
+    }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
+
+  const saveTtsPreferences = async (provider, nextMacosVoice = ttsVoice, nextKokoroVoice = kokoroVoice) => {
+    return invoke("save_voice_service_preferences", {
+      input: {
+        asrProvider: null,
+        localAsrEndpoint: null,
+        localAsrEngine: null,
+        ttsProvider: provider === "local" ? "macos" : provider,
+        macosTtsVoice: nextMacosVoice,
+        kokoroEndpoint: null,
+        kokoroVoice: nextKokoroVoice,
+      },
+    });
+  };
+
+  const chooseTtsProvider = (provider) => {
+    setTtsProvider(provider);
+    saveTtsPreferences(provider).catch((error) => {
+      setTtsProbe({ pending: false, message: "保存语音合成来源失败：" + String(error) });
+    });
+  };
+
+  useEffect(() => {
+    if (ttsProvider !== "kokoro") return undefined;
+    let alive = true;
+    invoke("kokoro_tts_status")
+      .then((status) => {
+        if (alive) setKokoroState({ pending: false, message: status?.message || "Kokoro 状态未知" });
+      })
+      .catch((error) => {
+        if (alive) setKokoroState({ pending: false, message: "读取 Kokoro 状态失败：" + String(error) });
+      });
+    return () => { alive = false; };
+  }, [ttsProvider]);
+
   const [asrState, setAsrState] = useState({
     loading: true,
     pending: false,
@@ -191,6 +205,7 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
   const [voiceChat, setVoiceChat] = useState({
     loading: true,
     llmPending: false,
+    realtimeEngine: "llm_pipeline",
     llmConfigured: false,
     llmProvider: DEFAULT_LLM_PROVIDER,
     llmBaseUrl: "",
@@ -203,12 +218,24 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
     llmTone: "muted",
     llmMessage: "正在读取对话大模型配置…",
   });
+  const [xiaozhi, setXiaozhi] = useState({
+    loading: true,
+    pending: false,
+    otaUrl: "https://api.tenclass.net/xiaozhi/ota/",
+    configured: false,
+    activationState: "unconfigured",
+    activationCode: null,
+    deviceIdMasked: "",
+    mcpEnabled: false,
+    tone: "muted",
+    message: "正在读取小智连接配置…",
+  });
   const llmDraft = JSON.stringify([voiceChat.llmProvider, voiceChat.llmBaseUrl, voiceChat.llmModel,
     voiceChat.llmWebSearch, voiceChat.llmApiKey]);
   useEffect(() => { if (!voiceChat.loading && savedLlm === null) setSavedLlm(llmDraft); }, [voiceChat.loading, savedLlm, llmDraft]);
   const dirty = JSON.stringify(videoConfigs) !== JSON.stringify(savedVideoConfigs)
     || !!asrApiKey || (savedLlm !== null && savedLlm !== llmDraft);
-  const saving = voiceChat.llmPending || asrState.pending || Object.values(providerPending).some(Boolean);
+  const saving = voiceChat.llmPending || xiaozhi.pending || asrState.pending || Object.values(providerPending).some(Boolean);
   useExitProtection(saving ? "API 配置正在保存或测试" : dirty ? "API 配置有未保存的修改" : "");
 
   const applyVoiceChatStatus = (status, patch = {}) => {
@@ -216,6 +243,7 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
       ...current,
       ...patch,
       loading: false,
+      realtimeEngine: status?.realtimeEngine || current.realtimeEngine,
       llmConfigured: status?.llmConfigured === true,
       llmWebSearch: status?.llmWebSearch !== false,
       llmProvider: status?.llmProvider || current.llmProvider,
@@ -227,12 +255,71 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
     }));
   };
 
+  const applyXiaozhiStatus = (status, patch = {}) => {
+    setXiaozhi((current) => ({
+      ...current, ...patch, loading: false,
+      otaUrl: status?.otaUrl || current.otaUrl,
+      configured: status?.configured === true,
+      activationState: status?.activationState || "unconfigured",
+      activationCode: status?.activationCode || null,
+      deviceIdMasked: status?.deviceIdMasked || "",
+      mcpEnabled: status?.mcpEnabled === true,
+    }));
+  };
+
+  const selectRealtimeEngine = async (realtimeEngine) => {
+    if (voiceChat.realtimeEngine === realtimeEngine || voiceChat.llmPending) return;
+    setVoiceChat((current) => ({ ...current, llmPending: true }));
+    try {
+      const status = await invoke("save_voice_chat_settings", { input: { realtimeEngine } });
+      applyVoiceChatStatus(status, { llmPending: false });
+    } catch (error) {
+      setVoiceChat((current) => ({ ...current, llmPending: false, llmTone: "error", llmMessage: `切换实时引擎失败：${String(error)}` }));
+    }
+  };
+
+  const activateXiaozhi = async () => {
+    setXiaozhi((current) => ({ ...current, pending: true, tone: "muted", message: "正在获取小智绑定状态…" }));
+    try {
+      await invoke("save_xiaozhi_settings", { input: { otaUrl: xiaozhi.otaUrl, mcpEnabled: xiaozhi.mcpEnabled } });
+      const status = await invoke("activate_xiaozhi");
+      applyXiaozhiStatus(status, {
+        pending: false,
+        tone: status?.configured ? "success" : "warning",
+        message: status?.configured ? "小智已绑定，可进行 MQTT 连接测试。" : "请按绑定码完成小智绑定后，再点击重新获取状态。",
+      });
+    } catch (error) {
+      setXiaozhi((current) => ({ ...current, pending: false, tone: "error", message: `获取小智状态失败：${String(error)}` }));
+    }
+  };
+
+  const toggleXiaozhiMcp = async (mcpEnabled) => {
+    setXiaozhi((current) => ({ ...current, pending: true, tone: "muted", message: "正在保存小智桌面任务权限…" }));
+    try {
+      const status = await invoke("save_xiaozhi_settings", { input: { otaUrl: null, mcpEnabled } });
+      applyXiaozhiStatus(status, { pending: false, tone: "success", message: "设置已保存；重新进入小智实时对话后生效。" });
+    } catch (error) {
+      setXiaozhi((current) => ({ ...current, pending: false, tone: "error", message: `保存小智桌面任务权限失败：${String(error)}` }));
+    }
+  };
+
+  const testXiaozhiConnection = async () => {
+    setXiaozhi((current) => ({ ...current, pending: true, tone: "muted", message: "正在认证小智 MQTT 连接…" }));
+    try {
+      const result = await invoke("test_xiaozhi_connection");
+      setXiaozhi((current) => ({ ...current, pending: false, tone: "success", message: `MQTT 认证成功 · ${result?.elapsedMs ?? 0}ms` }));
+    } catch (error) {
+      setXiaozhi((current) => ({ ...current, pending: false, tone: "error", message: `MQTT 连接失败：${String(error)}` }));
+    }
+  };
+
   const saveLlm = async () => {
     setVoiceChat((current) => ({ ...current, llmPending: true, llmTone: "muted", llmMessage: "正在保存对话大模型配置…" }));
     try {
       const custom = voiceChat.llmProvider === "custom";
       const status = await invoke("save_voice_chat_settings", {
         input: {
+          realtimeEngine: "llm_pipeline",
           llmProvider: voiceChat.llmProvider,
           llmWebSearch: voiceChat.llmWebSearch,
           llmBaseUrl: custom ? voiceChat.llmBaseUrl : null,
@@ -241,13 +328,32 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
         },
       });
       emitApiConfigurationUpdated({ providerId: "voice-chat-llm", configured: status?.llmConfigured === true });
+      setSavedLlm(null);
+      if (status?.llmProvider === "omlx") {
+        try {
+          const result = await invoke("probe_voice_chat_llm");
+          applyVoiceChatStatus(status, {
+            llmPending: false,
+            llmApiKey: "",
+            llmTone: "success",
+            llmMessage: `本地 OMLX 已就绪 · ${result.models?.length || 0} 个模型（${result.ms}ms）`,
+          });
+        } catch (error) {
+          applyVoiceChatStatus(status, {
+            llmPending: false,
+            llmApiKey: "",
+            llmTone: "warning",
+            llmMessage: `配置已保存，但本地 OMLX 未就绪：${String(error)}`,
+          });
+        }
+        return;
+      }
       applyVoiceChatStatus(status, {
         llmPending: false,
         llmApiKey: "",
         llmTone: status?.llmConfigured ? "success" : "warning",
         llmMessage: status?.llmConfigured ? "配置已保存，开始聊天时将使用所选模型。" : "已保存，但还没有 API Key",
       });
-      setSavedLlm(null);
     } catch (error) {
       setVoiceChat((current) => ({ ...current, llmPending: false, llmTone: "error", llmMessage: `保存失败：${error}` }));
     }
@@ -261,10 +367,25 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
           llmTone: status?.llmConfigured ? "success" : "muted",
           llmMessage: status?.llmConfigured ? "对话大模型已配置" : "选一家大模型，填入 API Key 即可",
         });
+        if (status?.llmProvider === "omlx") {
+          invoke("probe_voice_chat_llm")
+            .then((result) => { if (!cancelled) setVoiceChat((current) => ({ ...current, llmTone: "success", llmMessage: `本地 OMLX 已就绪 · ${result.models?.length || 0} 个模型` })); })
+            .catch((error) => { if (!cancelled) setVoiceChat((current) => ({ ...current, llmTone: "warning", llmMessage: `本地 OMLX 未就绪：${String(error)}` })); });
+        }
       })
       .catch((error) => {
         if (!cancelled) setVoiceChat((current) => ({ ...current, loading: false,
           llmTone: "error", llmMessage: `读取对话模型配置失败：${error}` }));
+      });
+    invoke("load_xiaozhi_settings")
+      .then((status) => {
+        if (!cancelled) applyXiaozhiStatus(status, {
+          tone: status?.configured ? "success" : "muted",
+          message: status?.configured ? "小智 MQTT 配置已就绪" : "获取绑定状态后，按页面提示完成绑定。",
+        });
+      })
+      .catch((error) => {
+        if (!cancelled) setXiaozhi((current) => ({ ...current, loading: false, tone: "error", message: `读取小智配置失败：${String(error)}` }));
       });
     // Independent services: a failed LLM read must not suppress the ASR read.
     invoke("load_device_asr_settings")
@@ -372,24 +493,13 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
           endpoint: localAsrEndpoint,
           engine,
         });
-        const base = String(localAsrEndpoint).replace(/\/+$/, "");
-        const response = await fetch(`${base}/health`, { cache: "no-store" });
-        let health = await response.json();
-        if (!health.loaded || health.engineLoaded !== engine) {
-          /* 预热/切换到所选引擎（qwen3 冷加载约 7-19s，属正常）。 */
-          await fetch(`${base}/stt?engine=${encodeURIComponent(engine)}`, {
-            method: "POST",
-            headers: { "Content-Type": "audio/wav" },
-            body: buildSilenceWav(0.5),
-          }).catch(() => null);
-          health = await fetch(`${base}/health`, { cache: "no-store" }).then((r) => r.json());
-        }
+        const health = await invoke("local_asr_health", { endpoint: localAsrEndpoint, engine });
         setAsrState((current) => ({
           ...current,
           configured: true,
           pending: false,
           tone: "success",
-          message: `已保存并就绪：${health.engineLoaded || health.engine || engine}${
+          message: `已保存并就绪：${health.engine || engine}${
             health.loaded ? "（已加载）" : "（未加载）"} · ${Math.round(performance.now() - started)}ms`,
         }));
       } catch (error) {
@@ -525,10 +635,7 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
                 type="radio"
                 name="tts-provider"
                 checked={ttsProvider === "volcengine"}
-                onChange={() => {
-                  setTtsProvider("volcengine");
-                  window.localStorage.setItem("hachimo.ttsProvider", "volcengine");
-                }}
+                onChange={() => chooseTtsProvider("volcengine")}
               />
               <span>火山引擎（与识别共用 Key）</span>
             </label>
@@ -537,14 +644,76 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
                 type="radio"
                 name="tts-provider"
                 checked={ttsProvider === "local"}
-                onChange={() => {
-                  setTtsProvider("local");
-                  window.localStorage.setItem("hachimo.ttsProvider", "local");
-                }}
+                onChange={() => chooseTtsProvider("local")}
               />
               <span>本地 macOS 语音（免 Key，离线）</span>
             </label>
+            <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input type="radio" name="tts-provider" checked={ttsProvider === "kokoro"} onChange={() => chooseTtsProvider("kokoro")} />
+              <span>Kokoro 中文轻量模型（本地原生，免 Key）</span>
+            </label>
           </div>
+          {ttsProvider === "kokoro" && (
+            <div className="usage-help">
+              <p>首次下载会安装原生运行时和模型；不需要 Docker。模型加载较慢时，请保持本页打开等待完成。</p>
+              <button type="button" className="ui-button" disabled={kokoroState.pending} onClick={async () => {
+                setKokoroState({ pending: true, message: "正在下载并安装本地模型，首次可能需要数分钟…" });
+                try { const result = await invoke("kokoro_tts_install"); setKokoroState({ pending: false, message: result.message || "Kokoro 模型已安装" }); }
+                catch (error) { setKokoroState({ pending: false, message: "安装失败：" + String(error) }); }
+              }}>下载并安装模型</button>
+              <button type="button" className="ui-button" disabled={kokoroState.pending} onClick={async () => {
+                setKokoroState({ pending: true, message: "正在启动 Kokoro 原生模型…" });
+                try { const result = await invoke("kokoro_tts_start"); setKokoroState({ pending: false, message: result.message || "Kokoro 已就绪" }); }
+                catch (error) { setKokoroState({ pending: false, message: `启动失败：${String(error)}` }); }
+              }}>{kokoroState.pending ? "启动中…" : "启动 Kokoro"}</button>
+              <button type="button" className="btn-secondary" disabled={kokoroState.pending} onClick={async () => {
+                try { const result = await invoke("kokoro_tts_stop"); setKokoroState({ pending: false, message: result.message || "Kokoro 已停止" }); }
+                catch (error) { setKokoroState({ pending: false, message: `停止失败：${String(error)}` }); }
+              }}>停止</button>
+              <label className="ui-field" htmlFor="api-settings-kokoro-voice">
+                <span className="ui-field__label">Kokoro 中文音色</span>
+                <select
+                  id="api-settings-kokoro-voice"
+                  className="ui-control"
+                  value={kokoroVoice}
+                  onChange={(event) => {
+                    const next = event.target.value;
+                    setKokoroVoice(next);
+                    saveTtsPreferences("kokoro", ttsVoice, next).catch((error) => {
+                      setKokoroState({ pending: false, message: "保存音色失败：" + String(error) });
+                    });
+                  }}
+                >
+                  <option value="zf_001">中文女声 01</option>
+                  <option value="zf_002">中文女声 02</option>
+                  <option value="zf_003">中文女声 03</option>
+                  <option value="zm_009">中文男声 01</option>
+                  <option value="zm_010">中文男声 02</option>
+                </select>
+              </label>
+              <button
+                type="button"
+                className="ui-button"
+                disabled={kokoroState.pending}
+                onClick={async () => {
+                  setKokoroState({ pending: true, message: "正在合成并试听…" });
+                  try {
+                    const result = await invoke("kokoro_tts_preview", {
+                      text: "你好，我是 Kokoro 本地语音合成测试。",
+                      voice: kokoroVoice,
+                    });
+                    await playTtsPreviewWav(result.wavBase64);
+                    setKokoroState({ pending: false, message: "Kokoro 试听播放完成" });
+                  } catch (error) {
+                    setKokoroState({ pending: false, message: "试听失败：" + String(error) });
+                  }
+                }}
+              >
+                试听 Kokoro
+              </button>
+              {kokoroState.message && <p className="usage-help__notice">{kokoroState.message}</p>}
+            </div>
+          )}
           {ttsProvider === "local" && (
             <>
               <label className="ui-field" htmlFor="api-settings-tts-voice">
@@ -554,8 +723,11 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
                   className="ui-control"
                   value={ttsVoice}
                   onChange={(event) => {
-                    setTtsVoice(event.target.value);
-                    window.localStorage.setItem("hachimo.ttsVoice", event.target.value);
+                    const next = event.target.value;
+                    setTtsVoice(next);
+                    saveTtsPreferences("local", next).catch((error) => {
+                      setTtsProbe({ pending: false, message: "保存系统音色失败：" + String(error) });
+                    });
                   }}
                 >
                   {(ttsVoices.length ? usableTtsVoices(ttsVoices, ttsVoice) : ["Tingting"]).map((voice) => (
@@ -615,7 +787,7 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
                 checked={asrProvider === "volcengine"}
                 onChange={() => {
                   setAsrProvider("volcengine");
-                  window.localStorage.setItem("hachimo.asrProvider", "volcengine");
+                  invoke("local_asr_save_prefs", { provider: "volcengine", endpoint: localAsrEndpoint, engine: localAsrEngine }).catch(() => {});
                 }}
               />
               <span>火山引擎（云端，需要 Key）</span>
@@ -628,7 +800,7 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
                 checked={asrProvider === "local"}
                 onChange={() => {
                   setAsrProvider("local");
-                  window.localStorage.setItem("hachimo.asrProvider", "local");
+                  invoke("local_asr_save_prefs", { provider: "local", endpoint: localAsrEndpoint, engine: localAsrEngine }).catch(() => {});
                 }}
               />
               <span>本地 ASR（sherpa-onnx，免 Key，离线）</span>
@@ -643,8 +815,11 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
                   className="ui-control"
                   value={localAsrEndpoint}
                   onChange={(event) => {
-                    setLocalAsrEndpoint(event.target.value);
-                    window.localStorage.setItem("hachimo.localAsrEndpoint", event.target.value);
+                    const endpoint = event.target.value;
+                    setLocalAsrEndpoint(endpoint);
+                    invoke("local_asr_save_prefs", { provider: asrProvider, endpoint, engine: localAsrEngine }).catch((error) => {
+                      setLocalAsrProbe({ pending: false, message: `保存服务地址失败：${String(error)}` });
+                    });
                   }}
                   placeholder="http://127.0.0.1:8900"
                 />
@@ -658,10 +833,7 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
                   onChange={(event) => {
                     const engine = event.target.value;
                     setLocalAsrEngine(engine);
-                    window.localStorage.setItem("hachimo.localAsrEngine", engine);
-                    /* 关键：引擎必须立刻落盘到 ~/.hachimo-local-asr.json——
-                     * 所有真实识别链路（设备 PTT / 流式识别）读的是这份文件，
-                     * 只写 localStorage 的话选了也等于没选。 */
+                    /* 引擎必须立即写入后端统一配置；真实识别链路不读取浏览器缓存。 */
                     invoke("local_asr_save_prefs", {
                       provider: "local",
                       endpoint: localAsrEndpoint,
@@ -688,22 +860,10 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
                       endpoint: localAsrEndpoint,
                       engine: localAsrEngine || "sensevoice",
                     });
-                    const base = String(localAsrEndpoint).replace(/\/+$/, "");
-                    /* 用 fetch 直连，避免 Tauri 命令注册在不同构建里不一致 */
-                    const response = await fetch(base + "/health", { cache: "no-store" });
-                    let raw = await response.json();
-                    /* 服务端是懒加载 + 引擎切换（qwen3/sensevoice 共存会互踢）：
-                     * 未加载或加载的不是所选引擎时，发 0.5s 静音把所选引擎
-                     * 拉进内存再报状态，别把正常懒加载/引擎切换显示成故障。 */
-                    if (!raw.loaded || raw.engineLoaded !== (localAsrEngine || "sensevoice")) {
-                      await fetch(`${base}/stt?engine=${encodeURIComponent(localAsrEngine || "sensevoice")}`, {
-                        method: "POST",
-                        headers: { "Content-Type": "audio/wav" },
-                        body: buildSilenceWav(0.5),
-                      }).catch(() => null);
-                      raw = await fetch(base + "/health", { cache: "no-store" }).then((r) => r.json());
-                    }
-                    const health = { engine: raw.engineLoaded || raw.engine || "sensevoice", loaded: !!raw.loaded, latencyMs: 0 };
+                    const health = await invoke("local_asr_health", {
+                      endpoint: localAsrEndpoint,
+                      engine: localAsrEngine || "sensevoice",
+                    });
                     setLocalAsrProbe({
                       pending: false,
                       message: `本地 ASR 已连通：${health.engine}${health.loaded ? "（已加载）" : "（未加载）"} · ${health.latencyMs}ms`,
@@ -755,6 +915,60 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
 
       <Card title="对话大模型" subtitle="决定宠物在「实时对话」中如何理解和回答。选择一家服务并填写 API Key 即可。此配置用于和宠物聊天，不影响 ChatGPT、Claude 等 Agent 的语音输入。">
         <UsageHelp />
+        <div className="api-settings__presets" role="radiogroup" aria-label="实时对话引擎">
+          <button type="button" role="radio" aria-checked={voiceChat.realtimeEngine !== "xiaozhi"}
+            className={"btn-ghost btn-sm api-settings__preset" + (voiceChat.realtimeEngine !== "xiaozhi" ? " is-active" : "")}
+            onClick={() => selectRealtimeEngine("llm_pipeline")} disabled={voiceChat.llmPending || voiceChat.loading}>
+            模型链路
+          </button>
+          <button type="button" role="radio" aria-checked={voiceChat.realtimeEngine === "xiaozhi"}
+            className={"btn-ghost btn-sm api-settings__preset" + (voiceChat.realtimeEngine === "xiaozhi" ? " is-active" : "")}
+            onClick={() => selectRealtimeEngine("xiaozhi")} disabled={voiceChat.llmPending || voiceChat.loading}>
+            小智 AI
+          </button>
+        </div>
+        {voiceChat.realtimeEngine === "xiaozhi" ? (
+          <div className="api-settings__form api-settings__form--llm">
+            <p className="muted small">小智用于实时问答；启用下方选项后，可将明确的电脑任务派发给当前跟随的 Agent，不影响其他实时对话引擎。</p>
+            <label className="ui-field" htmlFor="api-settings-xiaozhi-ota-url">
+              <span className="ui-field__label">小智 OTA 地址</span>
+              <input id="api-settings-xiaozhi-ota-url" className="ui-control" value={xiaozhi.otaUrl}
+                onChange={(event) => setXiaozhi((current) => ({ ...current, otaUrl: event.target.value }))}
+                disabled={xiaozhi.pending || xiaozhi.loading} />
+            </label>
+            <label className="ui-field" htmlFor="api-settings-xiaozhi-mcp-enabled">
+              <span className="ui-field__label">允许小智派发桌面任务</span>
+              <input id="api-settings-xiaozhi-mcp-enabled" type="checkbox" checked={xiaozhi.mcpEnabled}
+                onChange={(event) => toggleXiaozhiMcp(event.target.checked)}
+                disabled={xiaozhi.pending || xiaozhi.loading} />
+              <span className="muted small">派发目标为当前跟随的 Codex 或 WorkBuddy；设置后重新进入实时对话生效。</span>
+            </label>
+            <div className="api-settings__preset-summary muted small">
+              {xiaozhi.activationState === "ready" ? "已绑定" : xiaozhi.activationState === "pending" ? "等待绑定" : "尚未获取绑定状态"}
+              {xiaozhi.deviceIdMasked ? ` · 设备 ${xiaozhi.deviceIdMasked}` : ""}
+            </div>
+            {xiaozhi.activationCode ? <div className="api-settings__preset-summary">
+              绑定码：<strong>{xiaozhi.activationCode}</strong>
+              <a className="api-settings__credential-link" href="https://xiaozhi.me" target="_blank" rel="noreferrer">
+                打开小智绑定页
+                <ExternalLink size={11} aria-hidden="true" />
+              </a>
+            </div> : null}
+            <div className="api-settings__actions">
+              <button type="button" className="btn-primary btn-sm api-settings__save" onClick={activateXiaozhi} disabled={xiaozhi.pending || xiaozhi.loading}>
+                {xiaozhi.pending ? <Loader2 size={14} className="spin" /> : <CheckCircle2 size={14} />}
+                获取绑定状态
+              </button>
+              <button type="button" className="btn-ghost btn-sm" onClick={testXiaozhiConnection} disabled={xiaozhi.pending || xiaozhi.loading || !xiaozhi.configured}>
+                测试 MQTT 连接
+              </button>
+            </div>
+            <div className={`api-settings__result${resultToneClass(xiaozhi.tone)}`} role="status">
+              {xiaozhi.tone === "error" || xiaozhi.tone === "warning" ? <AlertCircle size={13} /> : <CheckCircle2 size={13} />}
+              {xiaozhi.message}
+            </div>
+          </div>
+        ) : <>
         <div className="api-settings__presets" role="radiogroup" aria-label="对话大模型">
           {[...LLM_PRESETS, { id: "custom", label: "自定义" }].map((preset) => (
             <button
@@ -862,6 +1076,7 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
           <span className="muted small">询问最新消息时查询，闲聊和家居控制不查询。使用当前服务商的 Key；模型需支持原生搜索，账号可能需开通权限并产生额外费用。查询后由宠物直接回答。修改后点击保存，下次开始聊天生效。</span>
         </label>
         <LlmNetworkSettings />
+        </>}
       </Card>
 
       <Card title="形象生成" subtitle="用于新形象生成与单状态视频替换">

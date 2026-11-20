@@ -135,8 +135,49 @@ test("API settings owns voice and generation credential inputs", () => {
   assert.match(source, /https:\/\/ark\.volcengine\.com\/model\/detail\?name=doubao-seedance-2-0-mini/);
   assert.match(source, /provider\.id === "volcengine"/);
   assert.equal((source.match(/Key 获取方式/g) || []).length, 2);
-  assert.equal((source.match(/target="_blank"/g) || []).length, 2);
-  assert.equal((source.match(/rel="noreferrer"/g) || []).length, 2);
+  assert.match(source, /href="https:\/\/xiaozhi\.me" target="_blank" rel="noreferrer"/);
+  assert.ok((source.match(/target="_blank"/g) || []).length >= 2);
+  assert.ok((source.match(/rel="noreferrer"/g) || []).length >= 2);
+});
+
+test("local Kokoro TTS is installed and controlled without Docker", () => {
+  const page = readSource("ApiSettings.jsx");
+  assert.match(page, /Kokoro 中文轻量模型（本地原生，免 Key）/);
+  assert.match(page, /invoke\("kokoro_tts_status"\)/);
+  assert.match(page, /invoke\("kokoro_tts_install"\)/);
+  assert.match(page, /下载并安装模型/);
+  assert.match(page, /invoke\("kokoro_tts_start"\)/);
+  assert.match(page, /invoke\("kokoro_tts_stop"\)/);
+  assert.match(page, /invoke\("kokoro_tts_preview"/);
+  assert.doesNotMatch(page, /本地 Docker|Docker 下载|Docker Desktop/);
+});
+
+test("saving OMLX immediately reports whether the local model service is ready", () => {
+  const page = readSource("ApiSettings.jsx");
+  const saveLlm = page.match(/const saveLlm = async \(\) => \{[\s\S]*?\n  \};/);
+  assert.ok(saveLlm, "expected saveLlm");
+  assert.match(saveLlm[0], /status\?\.llmProvider === "omlx"/);
+  assert.match(saveLlm[0], /invoke\("probe_voice_chat_llm"\)/);
+  assert.match(saveLlm[0], /本地 OMLX 已就绪/);
+  assert.match(saveLlm[0], /本地 OMLX 未就绪/);
+});
+
+test("xiaozhi is an isolated realtime engine, not an OpenAI provider", () => {
+  assert.ok(!LLM_PRESETS.some((preset) => preset.id === "xiaozhi"));
+  const page = readSource("ApiSettings.jsx");
+  assert.match(page, /模型链路/);
+  assert.match(page, /小智 AI/);
+  assert.match(page, /invoke\("load_xiaozhi_settings"\)/);
+  assert.match(page, /invoke\("activate_xiaozhi"\)/);
+  assert.match(page, /invoke\("test_xiaozhi_connection"\)/);
+  assert.match(page, /selectRealtimeEngine\("xiaozhi"\)/);
+  assert.doesNotMatch(page, /\{ id: "xiaozhi", label: .*LLM_PRESETS/);
+});
+
+test("the saved-credential OMLX probe is allowed for the local settings UI", () => {
+  const acl = JSON.parse(readFileSync(join(srcDir, "../src-tauri/permissions/local-app-commands.json"), "utf8"));
+  const commands = acl.permission[0].commands.allow;
+  assert.ok(commands.includes("probe_voice_chat_llm"));
 });
 
 test("saved ASR credentials are broadcast before the optional cloud probe", () => {
@@ -182,4 +223,13 @@ test("API settings uses a responsive provider grid", () => {
   assert.match(css, /\.api-settings__provider-grid\s*\{/);
   assert.match(css, /@media \(max-width: 900px\)[\s\S]*\.api-settings__provider-grid/);
   assert.match(css, /@media \(max-width: 620px\)[\s\S]*\.api-settings__form--asr/);
+});
+
+test("Xiaozhi desktop dispatch permission is saved separately and announces reconnect", () => {
+  const page = readSource("ApiSettings.jsx");
+  assert.match(page, /mcpEnabled: false/);
+  assert.match(page, /status\?\.mcpEnabled === true/);
+  assert.match(page, /api-settings-xiaozhi-mcp-enabled/);
+  assert.match(page, /save_xiaozhi_settings/, "permission must use the encrypted native settings command");
+  assert.match(page, /重新进入小智实时对话后生效/);
 });

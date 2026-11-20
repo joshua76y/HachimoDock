@@ -46,13 +46,13 @@ export default function LlmNetworkSettings() {
   };
   return (
     <details className="llm-network-settings">
-      <summary>云服务网络（内网 / 代理 / 企业证书）</summary>
-      <p className="muted small">设置只保存在当前电脑，适用于模型列表、图片与视频生成、素材下载、语音识别与合成、实时对话。不会内置或扫描任何代理地址，不影响设备与本机 Agent 通信。</p>
+      <summary>PC 网络与代理（云服务网络 / 社区宠物）</summary>
+      <p className="muted small">设置只保存在当前电脑，适用于模型列表、图片与视频生成、素材下载、语音识别与合成、实时对话和社区宠物安装。不会内置或扫描任何代理地址，不影响设备与本机 Agent 通信。</p>
       <div className="api-settings__form">
         <label className="ui-field" htmlFor="llm-network-mode">
-          <span className="ui-field__label">连接方式</span>
+          <span className="ui-field__label">代理开关与连接方式</span>
           <select id="llm-network-mode" className="ui-control" value={settings.mode} disabled={busy} onChange={(e) => change({ mode: e.target.value })}>
-            <option value="system">跟随系统（推荐）</option>
+            <option value="system">开启：跟随系统网络与代理（推荐）</option>
             <option value="direct">直接连接（不使用代理）</option>
             <option value="manual">手动配置这台电脑的代理</option>
           </select>
@@ -62,7 +62,7 @@ export default function LlmNetworkSettings() {
           <input id="llm-network-proxy" className="ui-control" autoComplete="off" value={settings.proxyUrl} disabled={busy}
             placeholder="填写网络管理员提供的地址与端口" onChange={(e) => change({ proxyUrl: e.target.value })} />
         </label>}
-        <p className="muted small">跟随系统会读取当前进程的代理环境变量或系统 HTTP/HTTPS 代理。若公司只提供 PAC 自动配置或需要特殊认证，请向 IT 确认可用代理设置，不会自动绕过公司网络策略。</p>
+        <p className="muted small">选择“开启：跟随系统”会使用 macOS/Windows 的 HTTP/HTTPS 系统代理；选择“直接连接”则关闭代理；手动模式覆盖系统设置。社区宠物安装也遵守此选择。若公司只提供 PAC 自动配置或需要特殊认证，请向 IT 确认可用代理设置，不会自动绕过公司网络策略。</p>
         <div className="llm-network-settings__actions">
           <button type="button" className="btn-ghost btn-sm" disabled={busy} onClick={chooseCertificate}>导入企业 CA 证书</button>
           <button type="button" className="btn-ghost btn-sm" disabled={busy || (!caFile && !settings.certificateConfigured)} onClick={() => { setCaFile(null); setClearCertificate(true); setDirty(true); setResults([]); }}>移除导入的证书</button>

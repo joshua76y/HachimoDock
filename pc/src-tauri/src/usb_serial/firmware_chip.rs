@@ -82,11 +82,12 @@ pub(crate) fn bundled_resource_for_chip(target: P4ChipTarget) -> &'static str {
     }
 }
 
-// Bundled images are built for the original 480 x 640 panel. An absent or
-// different panel description cannot establish compatibility.
+// Bundled images in this ESP32P4-Touch43 branch target the Waveshare 4.3
+// 480 x 800 panel. An absent or different panel description cannot establish
+// compatibility.
 pub(crate) fn validate_original_bundled_panel(capabilities: &Value) -> Result<(), String> {
     if capabilities.pointer("/display/physicalWidth").and_then(Value::as_u64) == Some(480)
-        && capabilities.pointer("/display/physicalHeight").and_then(Value::as_u64) == Some(640)
+        && capabilities.pointer("/display/physicalHeight").and_then(Value::as_u64) == Some(800)
     {
         Ok(())
     } else {
@@ -122,9 +123,9 @@ mod tests {
         image
     }
     #[test]
-    fn original_bundled_firmware_is_not_offered_to_waveshare_43_panel() {
-        assert!(validate_original_bundled_panel(&json!({"display":{"physicalWidth":480,"physicalHeight":800}})).is_err());
-        assert!(validate_original_bundled_panel(&json!({"display":{"physicalWidth":480,"physicalHeight":640}})).is_ok());
+    fn bundled_touch43_firmware_is_offered_only_to_the_waveshare_43_panel() {
+        assert!(validate_original_bundled_panel(&json!({"display":{"physicalWidth":480,"physicalHeight":800}})).is_ok());
+        assert!(validate_original_bundled_panel(&json!({"display":{"physicalWidth":480,"physicalHeight":640}})).is_err());
         assert!(validate_original_bundled_panel(&json!({})).is_err());
         assert!(validate_original_bundled_panel(&json!({"display":{"physicalWidth":"480","physicalHeight":640}})).is_err());
     }

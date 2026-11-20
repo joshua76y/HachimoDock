@@ -30,6 +30,7 @@ use crate::doubao_tts::{scale_pcm16, DoubaoTtsClient};
 use crate::persona_llm::{self, ChatTurn, SentenceSplitter};
 use crate::usb_serial::UsbSerialManager;
 use crate::voice_chat_settings;
+use crate::voice_chat_settings::RealtimeEngine;
 use crate::realtime_chat_log as diagnostics;
 use crate::volcengine_asr::{StreamingSpeechEvent, StreamingSpeechRecognizer};
 
@@ -623,24 +624,43 @@ fn start_guard() -> &'static Mutex<()> {
     START_GUARD.get_or_init(|| Mutex::new(()))
 }
 
+/// 小智的 UDP 语音通道是按轮次收音的；即使板端具备 AEC，也不能让通用
+/// 全双工入口要求带 AEC/VAD 标记的帧。否则小智的首帧原始 PCM 会被本地
+/// ASR 管线的保护门拒绝。保留原 LLM 管线的能力协商，不混用两套策略。
+fn capture_uses_full_duplex(engine: RealtimeEngine, capabilities: &Value) -> bool {
+    engine != RealtimeEngine::Xiaozhi
+        && (capabilities["features"]["audioAecRecovery"] == true
+            || ["audioAec", "audioVad", "audioFullDuplex"]
+                .iter()
+                .all(|key| capabilities["features"][*key] == true))
+}
+
+/// `preparing` 写入的连接说明会被板端作为当前字幕保留；小智通道就绪后必须
+/// 用非空文本覆盖它，才能让用户看到已经可说话而不是误以为仍在连接。
+fn xiaozhi_ready_hud_text() -> &'static str { "我在听，请说话" }
+
 pub fn start(app: &AppHandle, mut input: RealtimeChatStartInput) -> Result<RealtimeChatStatus, String> {
     let _guard = start_guard().lock().map_err(|_| "实时对话启动锁异常")?;
     let board = input.board_device_id.trim().to_string();
     if board.is_empty() {
         return Err("缺少设备 id".to_string());
     }
-    if input.system_prompt.trim().is_empty() {
+    let settings = voice_chat_settings::status()?;
+    let xiaozhi = settings.realtime_engine == RealtimeEngine::Xiaozhi;
+    if !xiaozhi && input.system_prompt.trim().is_empty() {
         return Err("这个形象还没有人设，先在画廊里点「人设与声音」设置".to_string());
     }
-    let settings = voice_chat_settings::status()?;
-    if !settings.llm_configured {
+    if !xiaozhi && !settings.llm_configured {
         return Err("对话大模型未配置，请在「API 配置」填写大模型 API Key".to_string());
     }
-    if !settings.tts_configured {
+    if !xiaozhi && !settings.tts_configured {
         return Err("豆包 TTS 未配置，请在「API 配置」填写语音合成 API Key".to_string());
     }
-    if !crate::volcengine_asr::settings_status()?.configured {
+    if !xiaozhi && !crate::volcengine_asr::settings_status()?.configured {
         return Err("语音识别未配置，请先在 API 配置填写 ASR Key".into());
+    }
+    if xiaozhi && !crate::xiaozhi_settings::load_xiaozhi_settings()?.configured {
+        return Err("小智尚未完成绑定，请在「API 配置」→「小智 AI」获取绑定状态后完成绑定".into());
     }
     let usb = app.state::<UsbSerialManager>().inner().clone();
     let usb_status = usb.status();
@@ -668,8 +688,7 @@ pub fn start(app: &AppHandle, mut input: RealtimeChatStartInput) -> Result<Realt
         audio_egress: Mutex::new(()),
         audio_requests: Arc::new(Mutex::new(Default::default())),
         cancelled: AtomicBool::new(false),
-        duplex: AtomicBool::new(usb_status.capabilities["features"]["audioAecRecovery"] == true
-            || ["audioAec","audioVad","audioFullDuplex"].iter().all(|key| usb_status.capabilities["features"][*key] == true)),
+        duplex: AtomicBool::new(capture_uses_full_duplex(settings.realtime_engine, &usb_status.capabilities)),
         capture_armed: AtomicBool::new(false),
         capture_ready: AtomicBool::new(false),
         stop_notify: tokio::sync::Notify::new(),
@@ -712,10 +731,187 @@ pub fn start(app: &AppHandle, mut input: RealtimeChatStartInput) -> Result<Realt
                 request_failure(&session, "capture_connection_changed", Some("设备连接已变化，实时对话已停止，请重新进入"));
                 finish(&app_clone, &usb, &session, "capture_connection_changed", "").await;
             }
-            _ = run_session(app_clone.clone(), usb.clone(), session.clone(), input, rx) => {}
+            _ = async {
+                if xiaozhi {
+                    run_xiaozhi_session(app_clone.clone(), usb.clone(), session.clone(), input, rx).await;
+                } else {
+                    run_session(app_clone.clone(), usb.clone(), session.clone(), input, rx).await;
+                }
+            } => {}
         }
     });
     Ok(snapshot)
+}
+
+/// 小智通道完全绕开现有 ASR → LLM → TTS / Agent 路径。它只复用已经验证的
+/// P4 采集、字幕和 PCM 播放边界，所有网络协议工作留在 `xiaozhi_realtime`。
+async fn run_xiaozhi_session(
+    app: AppHandle,
+    usb: UsbSerialManager,
+    session: Arc<Session>,
+    input: RealtimeChatStartInput,
+    mut rx: mpsc::Receiver<Input>,
+) {
+    let board = session.board_device_id.clone();
+    let name = if input.display_name.trim().is_empty() { "小智 AI".to_string() } else { input.display_name };
+    publish(&app, &session, |status| { status.display_name = name.clone(); status.state = "preparing".into(); });
+    hud(&usb, &board, &session.id, "preparing", &name, "正在连接小智");
+    let provisioning = match crate::xiaozhi_settings::resolved_mqtt_provisioning() {
+        Ok(provisioning) => provisioning,
+        Err(error) => { finish(&app, &usb, &session, "xiaozhi_config", &error).await; return; }
+    };
+    let mcp_enabled = match crate::xiaozhi_settings::mcp_enabled() {
+        Ok(enabled) => enabled,
+        Err(error) => { finish(&app, &usb, &session, "xiaozhi_config", &error).await; return; }
+    };
+    let connected_at = Instant::now();
+    diagnostics::record(&session.id, "xiaozhi_mqtt", json!({"stage":"connect_start"}));
+    let mut realtime = match crate::xiaozhi_realtime::XiaozhiRealtime::connect(provisioning, mcp_enabled).await {
+        Ok(realtime) => realtime,
+        Err(error) => {
+            diagnostics::record(&session.id, "xiaozhi_mqtt", json!({"stage":"connect_failed","elapsedMs":connected_at.elapsed().as_millis(),"ok":false,"errorKind":diagnostics::error_kind(&error)}));
+            finish(&app, &usb, &session, "xiaozhi_mqtt", &error).await;
+            return;
+        }
+    };
+    diagnostics::record(&session.id, "xiaozhi_mqtt", json!({"stage":"hello_pending","elapsedMs":connected_at.elapsed().as_millis(),"ok":true}));
+    let player = spawn_player(usb.clone(), board.clone(), session.clone());
+    // The bridge exists only inside this live Xiaozhi session. API and local
+    // OMLX realtime paths neither construct it nor receive MCP traffic.
+    let mcp_bridge = mcp_enabled.then(|| Arc::new(crate::xiaozhi_desktop_mcp::XiaozhiDesktopMcp::new(
+        session.id.clone(), board.clone(),
+    )));
+    let mut started = false;
+    let mut speaking = false;
+    let mut turns = 0_u32;
+    let mut last_activity = Instant::now();
+    let mut first_uplink = true;
+    let mut first_downlink = true;
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(last_activity + IDLE_TIMEOUT)) => break,
+            input = rx.recv() => match input {
+                Some(Input::Pcm(pcm, _)) if started => {
+                    if let Err(error) = realtime.push_pcm_16k(pcm) {
+                        finish(&app, &usb, &session, "xiaozhi_udp", &error).await;
+                        return;
+                    }
+                    if first_uplink {
+                        first_uplink = false;
+                        diagnostics::record(&session.id, "xiaozhi_audio", json!({"stage":"uplink_first","ok":true}));
+                    }
+                }
+                Some(_) => {},
+                None => break,
+            },
+            event = realtime.next_event() => match event {
+                Some(crate::xiaozhi_realtime::XiaozhiEvent::Ready) => {
+                    diagnostics::record(&session.id, "xiaozhi_mqtt", json!({"stage":"channel_ready","elapsedMs":connected_at.elapsed().as_millis(),"ok":true}));
+                    if realtime.start_listening().await.is_err() {
+                        finish(&app, &usb, &session, "xiaozhi_mqtt", "小智开始监听失败").await;
+                        return;
+                    }
+                    if let Err(error) = begin_capture(&usb, &session, false).await {
+                        finish(&app, &usb, &session, "audio", &error).await;
+                        return;
+                    }
+                    started = true;
+                    last_activity = Instant::now();
+                    diagnostics::record(&session.id, "xiaozhi_audio", json!({"stage":"capture_ready","ok":true}));
+                    publish(&app, &session, |status| { status.state = "listening".into(); status.error.clear(); status.reason.clear(); });
+                    hud(&usb, &board, &session.id, "listening", &name, xiaozhi_ready_hud_text());
+                }
+                Some(crate::xiaozhi_realtime::XiaozhiEvent::UserText(text)) => {
+                    last_activity = Instant::now();
+                    turns = turns.saturating_add(1);
+                    if let Some(bridge) = &mcp_bridge { bridge.record_final_user_text(turns, &text); }
+                    user_caption(&usb, &board, &session.id, &name, &text, true);
+                    publish(&app, &session, |status| { status.transcript = text; status.turns = turns; status.state = "thinking".into(); });
+                    hud(&usb, &board, &session.id, "thinking", &name, "正在处理");
+                }
+                Some(crate::xiaozhi_realtime::XiaozhiEvent::McpRequest(request)) => {
+                    use crate::xiaozhi_mcp::Method;
+                    let reply_handle = realtime.mcp_reply_handle();
+                    match request.method.clone() {
+                        Method::Discover => {
+                            let _ = reply_handle.send(crate::xiaozhi_mcp::success_reply(
+                                &request, crate::xiaozhi_mcp::discovery_result(),
+                            ));
+                        }
+                        Method::Initialize => {
+                            let _ = reply_handle.send(crate::xiaozhi_mcp::success_reply(
+                                &request, crate::xiaozhi_mcp::initialize_result(),
+                            ));
+                        }
+                        Method::ToolsList => {
+                            let _ = reply_handle.send(crate::xiaozhi_mcp::success_reply(
+                                &request, crate::xiaozhi_mcp::tool_catalog(),
+                            ));
+                        }
+                        Method::ToolCall(call) => {
+                            let Some(bridge) = mcp_bridge.clone() else {
+                                let _ = reply_handle.send(crate::xiaozhi_mcp::tool_error_reply(
+                                    &request, "小智桌面任务未启用，请重新进入已开启 MCP 的会话",
+                                ));
+                                continue;
+                            };
+                            let session_id = session.id.clone();
+                            let operation = call.tool.as_str();
+                            tokio::spawn(async move {
+                                let started = Instant::now();
+                                let result = bridge.handle_call(call).await;
+                                let ok = result.get("isError").and_then(Value::as_bool) != Some(true);
+                                diagnostics::record(&session_id, "xiaozhi_mcp", json!({
+                                    "stage":"tool_complete", "tool":"desktop_agent", "operation":operation,
+                                    "ok":ok, "elapsedMs":started.elapsed().as_millis(),
+                                }));
+                                let _ = reply_handle.send(crate::xiaozhi_mcp::success_reply(&request, result));
+                            });
+                        }
+                    }
+                }
+                Some(crate::xiaozhi_realtime::XiaozhiEvent::Speaking) => {
+                    last_activity = Instant::now();
+                    speaking = true;
+                    let _ = player.send(PlayerCmd::Begin(format!("{}-xiaozhi-{turns}", session.id)));
+                    publish(&app, &session, |status| status.state = "speaking".into());
+                    hud(&usb, &board, &session.id, "speaking", &name, "");
+                }
+                Some(crate::xiaozhi_realtime::XiaozhiEvent::ReplyText(text)) => {
+                    last_activity = Instant::now();
+                    if speaking { let _ = player.send(PlayerCmd::Subtitle(text.clone())); }
+                    publish(&app, &session, |status| status.reply = text);
+                }
+                Some(crate::xiaozhi_realtime::XiaozhiEvent::Pcm(pcm)) => {
+                    if first_downlink {
+                        first_downlink = false;
+                        diagnostics::record(&session.id, "xiaozhi_audio", json!({"stage":"downlink_first","ok":true}));
+                    }
+                    if speaking { let _ = player.send(PlayerCmd::Pcm(pcm)); }
+                }
+                Some(crate::xiaozhi_realtime::XiaozhiEvent::Listening) => {
+                    last_activity = Instant::now();
+                    if speaking {
+                        let (done_tx, _) = std_mpsc::channel();
+                        let _ = player.send(PlayerCmd::End(done_tx));
+                    }
+                    speaking = false;
+                    publish(&app, &session, |status| status.state = "listening".into());
+                    hud(&usb, &board, &session.id, "listening", &name, "");
+                }
+                Some(crate::xiaozhi_realtime::XiaozhiEvent::Ended) => break,
+                Some(crate::xiaozhi_realtime::XiaozhiEvent::Failed(error)) => {
+                    finish(&app, &usb, &session, "xiaozhi", &error).await;
+                    return;
+                }
+                None => break,
+            }
+        }
+    }
+    let _ = realtime.stop_listening().await;
+    let _ = player.send(PlayerCmd::Flush);
+    realtime.close().await;
+    finish(&app, &usb, &session, if started { "ended" } else { "xiaozhi_timeout" }, "").await;
 }
 
 // ---- energy VAD ---------------------------------------------------------------------------
@@ -1091,10 +1287,11 @@ async fn run_session(
     crate::smart_home::prepare_agent_capabilities();
 
     let llm_cfg = voice_chat_settings::llm_config();
+    let reply_policy = voice_chat_settings::realtime_reply_policy();
     let tts_cfg = voice_chat_settings::tts_config(&voice.speaker, &voice.clone_speaker_id, voice.speed());
-    let (llm_cfg, tts_cfg) = match (llm_cfg, tts_cfg) {
-        (Ok(l), Ok(t)) => (l, t),
-        (Err(error), _) | (_, Err(error)) => {
+    let (llm_cfg, reply_policy, tts_cfg) = match (llm_cfg, reply_policy, tts_cfg) {
+        (Ok(l), Ok(policy), Ok(t)) => (l, policy, t),
+        (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
             finish(&app, &usb, &session, "config", &error).await;
             return;
         }
@@ -1107,7 +1304,10 @@ async fn run_session(
     vad.session = Some(session.clone());
     let mut pending_speech = None;
     let mut deferred_audio = VecDeque::new();
-    diagnostics::record(&session.id, "audio_mode", json!({"state":if duplex {"full_duplex"} else {"half_duplex"}}));
+    diagnostics::record(&session.id, "audio_mode", json!({
+        "state":if duplex {"full_duplex"} else {"half_duplex"},
+        "replyPolicy":if matches!(reply_policy, voice_chat_settings::RealtimeReplyPolicy::LocalTurnTaking) {"local_turn_taking"} else {"upstream_duplex"}
+    }));
 
     hud(&usb, &board, &session.id, "preparing", &name, "准备中");
 
@@ -1130,7 +1330,7 @@ async fn run_session(
         let _ = player.send(PlayerCmd::Begin(format!("{}-greeting", session.id)));
         let _ = player.send(PlayerCmd::Subtitle(greeting.clone()));
         let _ = player.send(PlayerCmd::Pcm(greeting_pcm));
-        match listen_with_verified_barge_in(async {wait_playback(&player).await; Ok(())}, &mut rx, &mut deferred_audio, &mut vad, duplex).await {
+        match listen_with_reply_policy(async {wait_playback(&player).await; Ok(())}, &mut rx, &mut deferred_audio, &mut vad, duplex, reply_policy).await {
             Ok(frames) => pending_speech = frames,
             Err(error) => {finish(&app, &usb, &session, "audio", &error).await; return;}
         }
@@ -1230,7 +1430,7 @@ async fn run_session(
                     speak_one_logged(&mut tts,&player,&message,&session.id).await?;
                     wait_playback(&player).await;Ok(())
                 };
-                match listen_with_verified_barge_in(announcement,&mut rx,&mut deferred_audio,&mut vad,duplex).await {
+                match listen_with_reply_policy(announcement,&mut rx,&mut deferred_audio,&mut vad,duplex,reply_policy).await {
                     Ok(speech)=>{
                         diagnostics::record(&session.id,"desktop_receipt",json!({"stage":"playback_finished", "ok":speech.as_ref().is_none_or(|s|s.reply_completed), "reason":if speech.as_ref().is_some_and(|s|!s.reply_completed) {"interrupted"} else {"completed"}}));
                         if speech.as_ref().is_some_and(|s|!s.reply_completed) {let _=player.send(PlayerCmd::Flush);tts.interrupt();}
@@ -1409,7 +1609,7 @@ async fn run_session(
                             vad.reset();
                             vad.previous_user = user_text.clone();
                             vad.turn_started = Some(Instant::now());
-                            match listen_with_verified_barge_in(answer_turn(&app, &usb, &session, &llm_cfg, &input.system_prompt, &mut history, &mut desktop_conversation, &user_text, &mut tts, &player, &name), &mut rx, &mut deferred_audio, &mut vad, duplex).await {
+                            match listen_with_reply_policy(answer_turn(&app, &usb, &session, &llm_cfg, &input.system_prompt, &mut history, &mut desktop_conversation, &user_text, &mut tts, &player, &name), &mut rx, &mut deferred_audio, &mut vad, duplex, reply_policy).await {
                                 Ok(Some(speech)) => {
                                     if !speech.reply_completed {
                                         // The reply future is now dropped: aborts LLM and TTS callbacks.
@@ -1491,6 +1691,75 @@ fn start_barge_probe(frames: Vec<Vec<u8>>) -> Result<VerifiedSpeech, String> {
         stats.observe(&frame);
     }
     Ok(VerifiedSpeech { recognizer, events, stats, text: String::new(), reply_completed: false, terminal: false })
+}
+
+/// Keep the upstream duplex path intact. The locally hosted OMLX path uses
+/// strict turns because the P4 microphone can still contain residual playback
+/// even after AEC: treating that residual as a barge-in adds fake user turns
+/// to the local model's history.
+async fn listen_with_reply_policy<F>(
+    reply: F,
+    rx: &mut mpsc::Receiver<Input>,
+    deferred: &mut VecDeque<Input>,
+    vad: &mut Vad,
+    duplex: bool,
+    policy: voice_chat_settings::RealtimeReplyPolicy,
+) -> Result<Option<VerifiedSpeech>, String>
+where
+    F: std::future::Future<Output = Result<(), String>>,
+{
+    match policy {
+        voice_chat_settings::RealtimeReplyPolicy::UpstreamDuplex => {
+            listen_with_verified_barge_in(reply, rx, deferred, vad, duplex).await
+        }
+        voice_chat_settings::RealtimeReplyPolicy::LocalTurnTaking => {
+            wait_reply_without_barge_in(reply, rx, deferred, vad, duplex).await
+        }
+    }
+}
+
+async fn wait_reply_without_barge_in<F>(
+    reply: F,
+    rx: &mut mpsc::Receiver<Input>,
+    deferred: &mut VecDeque<Input>,
+    vad: &mut Vad,
+    duplex: bool,
+) -> Result<Option<VerifiedSpeech>, String>
+where
+    F: std::future::Future<Output = Result<(), String>>,
+{
+    if !duplex {
+        reply.await?;
+        return Ok(None);
+    }
+
+    // Frames preserved during ASR finalization may already include the first
+    // samples of our own response. A local strict turn deliberately drops
+    // them, rather than reinterpreting them as the next user utterance.
+    deferred.clear();
+    tokio::pin!(reply);
+    let mut discarded = 0usize;
+    loop {
+        tokio::select! {
+            result = &mut reply => {
+                result?;
+                // Device playback and the microphone DMA both have a short
+                // tail. Drain it before re-enabling listening for a new turn.
+                tokio::time::sleep(POST_SPEAK_GUARD).await;
+                while rx.try_recv().is_ok() { discarded += 1; }
+                vad.await_new_utterance();
+                vad.reply_tail_until = Some(Instant::now() + POST_SPEAK_GUARD);
+                diagnostics::record(&vad.diagnostic_session, "local_reply_audio_discarded", json!({"frames":discarded}));
+                return Ok(None);
+            }
+            incoming = rx.recv() => {
+                let Some(Input::Pcm(_, _)) = incoming else {
+                    return Err("设备收音通道关闭".into());
+                };
+                discarded += 1;
+            }
+        }
+    }
 }
 
 async fn listen_with_verified_barge_in<F>(reply: F, rx: &mut mpsc::Receiver<Input>, deferred: &mut VecDeque<Input>, vad: &mut Vad, duplex: bool)
@@ -1892,7 +2161,7 @@ async fn answer_turn(
             }
         }, |event| {let _ = search_tx.send(ReplyEvent::Search(event));})
         .await;
-        if let Some(rest) = splitter.flush() {
+        if let Some(rest) = completed_reply_tail(&result, &mut splitter) {
             if first_sentence {
                 diagnostics::record(&log_session, "llm_first_sentence", json!({"elapsedMs":turn_started.elapsed().as_millis()}));
             }
@@ -1979,6 +2248,11 @@ async fn answer_turn(
     history.push(ChatTurn { role: "assistant".into(), content: final_reply });
     persona_llm::trim_history(history);
     Ok(())
+}
+
+fn completed_reply_tail(result: &Result<String, String>, splitter: &mut SentenceSplitter) -> Option<String> {
+    result.as_ref().ok()?;
+    splitter.flush()
 }
 
 async fn speak_one(tts: &mut DoubaoTtsClient, player: &Player, text: &str) -> Result<(), String> {
@@ -2138,6 +2412,11 @@ pub async fn load_voice_chat_settings() -> Result<voice_chat_settings::VoiceChat
 }
 
 #[tauri::command]
+pub async fn probe_voice_chat_llm() -> Result<crate::llm_models::ModelList, String> {
+    voice_chat_settings::probe_llm()
+}
+
+#[tauri::command]
 pub async fn list_voice_chat_models(input: voice_chat_settings::VoiceChatSettingsInput) -> Result<Vec<String>, String> {
     voice_chat_settings::list_models(input).await
 }
@@ -2157,6 +2436,34 @@ pub async fn clear_voice_chat_secret(which: String) -> Result<voice_chat_setting
 #[cfg(test)]
 mod tests {
     include!("realtime_aec_ingress_tests.rs");
+
+    #[test]
+    fn xiaozhi_forces_half_duplex_capture_even_on_aec_capable_boards() {
+        use super::*;
+        let capabilities = json!({"features": {
+            "audioAecRecovery": true,
+            "audioAec": true,
+            "audioVad": true,
+            "audioFullDuplex": true,
+        }});
+
+        assert!(!capture_uses_full_duplex(RealtimeEngine::Xiaozhi, &capabilities));
+        assert!(capture_uses_full_duplex(RealtimeEngine::LlmPipeline, &capabilities));
+    }
+
+    #[test]
+    fn xiaozhi_ready_hud_replaces_the_connecting_message() {
+        assert_eq!(xiaozhi_ready_hud_text(), "我在听，请说话");
+    }
+    #[test]
+    fn failed_model_result_does_not_flush_a_partial_subtitle() {
+        use super::*;
+        let mut splitter = SentenceSplitter::default();
+        assert!(splitter.push("未完成的字幕").is_empty());
+        let failed: Result<String, String> = Err("length".into());
+        assert_eq!(completed_reply_tail(&failed, &mut splitter), None);
+        assert_eq!(splitter.flush().as_deref(), Some("未完成的字幕"));
+    }
     #[test]
     fn interruption_keeps_displayed_question_without_claiming_it_was_completed() {
         let mut history=Vec::new();
@@ -2460,6 +2767,42 @@ mod tests {
         for text in ["停", " 停！ ", "停下", "等 一 下！", "你好", "OK", "换歌"] { assert!(has_barge_in_text(text), "{text}"); }
         for text in ["停", " 停！ "] { assert!(is_explicit_stop(text)); }
         for text in ["", "停下", "停止音乐", "等一下", "不停", "嗯"] { assert!(!is_explicit_stop(text)); }
+    }
+
+    #[test]
+    fn local_turn_taking_discards_audio_captured_while_replying() {
+        tauri::async_runtime::block_on(async {
+            let (tx, mut rx) = mpsc::channel(16);
+            for _ in 0..4 {
+                tx.send(Input::Pcm(frame(800), Some(true))).await.unwrap();
+            }
+            let mut deferred = VecDeque::from([Input::Pcm(frame(800), Some(true))]);
+            let mut vad = Vad::new();
+            let completed = Arc::new(AtomicBool::new(false));
+            let completed_reply = completed.clone();
+            let reply = async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                completed_reply.store(true, Ordering::SeqCst);
+                Ok(())
+            };
+
+            let interruption = listen_with_reply_policy(
+                reply,
+                &mut rx,
+                &mut deferred,
+                &mut vad,
+                true,
+                voice_chat_settings::RealtimeReplyPolicy::LocalTurnTaking,
+            )
+            .await
+            .unwrap();
+
+            assert!(completed.load(Ordering::SeqCst));
+            assert!(interruption.is_none());
+            assert!(deferred.is_empty());
+            assert!(rx.try_recv().is_err());
+            assert!(vad.reply_tail_until.is_some());
+        });
     }
 
     #[test]

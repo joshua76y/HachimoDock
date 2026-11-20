@@ -47,7 +47,7 @@ test("all product cloud routes share trust while LAN stays direct", () => {
 test("cloud UI and diagnostics describe shared networking without signed URL logs", () => {
   const ui = read("./LlmNetworkSettings.jsx");
   assert.match(ui, /云服务网络/);
-  for (const label of ["模型列表", "图片与视频生成", "素材下载", "语音识别与合成"]) assert.ok(ui.includes(label));
+  for (const label of ["模型列表", "图片与视频生成", "素材下载", "语音识别与合成", "社区宠物安装"]) assert.ok(ui.includes(label));
   const http = read("./lib/avatar-pipeline/http.js");
   assert.doesNotMatch(http, /console\.error\([^\n]*\$\{url\}/);
   assert.match(http, /safeError.message/);
