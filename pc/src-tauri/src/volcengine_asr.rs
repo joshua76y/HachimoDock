@@ -436,30 +436,10 @@ impl Drop for SpeechWorkerExit {
     fn drop(&mut self) { self.complete(Ok(())); }
 }
 
-/// 本地 ASR 偏好：`~/.hachimo-local-asr.json`，由设置页通过
-/// `local_asr_save_prefs` 写入。缺文件或 provider 不是 local 时返回 None，
-/// 保持原来的火山引擎路径不变。
+/// 本地 ASR 偏好来自后端唯一的服务配置。缺配置或 provider 不是 local
+/// 时返回 None，保持原来的火山引擎路径不变。
 pub(crate) fn local_provider_prefs() -> Option<(String, String)> {
-    let home = std::env::var("HOME").ok()?;
-    let path = std::path::Path::new(&home).join(".hachimo-local-asr.json");
-    let raw = std::fs::read_to_string(path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    if value.get("provider")?.as_str()? != "local" {
-        return None;
-    }
-    let endpoint = value
-        .get("endpoint")
-        .and_then(|item| item.as_str())
-        .filter(|item| !item.trim().is_empty())
-        .unwrap_or(crate::local_asr::DEFAULT_ENDPOINT)
-        .to_string();
-    let engine = value
-        .get("engine")
-        .and_then(|item| item.as_str())
-        .filter(|item| !item.trim().is_empty())
-        .unwrap_or(crate::local_asr::DEFAULT_ENGINE)
-        .to_string();
-    Some((endpoint, engine))
+    crate::voice_service_settings::local_asr()
 }
 
 impl StreamingSpeechRecognizer {
@@ -534,7 +514,7 @@ impl StreamingSpeechRecognizer {
         });
         // Service startup may take 20 s and the transcription request another
         // 20 s. Leave room for health probes and scheduling as well.
-        Ok(Self { sender, cancelled, round, finish_wait_timeout: Duration::from_secs(50) })
+        Ok(Self { sender, cancelled, round, finish_wait_timeout: Duration::from_secs(120) })
     }
 
     #[cfg(test)]

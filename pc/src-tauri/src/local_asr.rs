@@ -20,6 +20,7 @@ pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8900";
 pub const DEFAULT_ENGINE: &str = "sensevoice";
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Health {
     pub ok: bool,
     pub engine: String,
@@ -212,53 +213,50 @@ mod tests {
         let err = transcribe_wav(DEFAULT_ENDPOINT, "  ", &[], Duration::from_millis(50));
         assert!(err.is_err());
     }
+
+    #[test]
+    fn health_for_one_engine_does_not_satisfy_another_selected_engine() {
+        let health = Health { ok: true, engine: "sensevoice".into(), loaded: true, load_sec: 0.8, latency_ms: 4 };
+        assert!(health_is_loaded_for(&health, "sensevoice"));
+        assert!(!health_is_loaded_for(&health, "qwen3"));
+        assert!(!health_is_loaded_for(&Health { loaded: false, ..health }, "sensevoice"));
+    }
+
+    #[test]
+    fn health_uses_camel_case_field_names_for_the_settings_ui() {
+        let health = Health { ok: true, engine: "sensevoice".into(), loaded: true, load_sec: 0.8, latency_ms: 4 };
+        let value = serde_json::to_value(health).unwrap();
+        assert_eq!(value["latencyMs"], 4);
+        assert_eq!(value["loadSec"], 0.8);
+        assert!(value.get("latency_ms").is_none());
+    }
 }
 
 /// 设置页「测试连接」用：探测本地服务是否在跑、模型是否已加载。
 /// 引擎闲置约 10 分钟会被服务端自动卸载（省内存），这里顺手预热，
 /// 让界面显示「已加载」而不是让用户把正常的懒加载当成故障。
 #[tauri::command]
-pub fn local_asr_health(endpoint: Option<String>) -> Result<Health, String> {
+pub fn local_asr_health(endpoint: Option<String>, engine: Option<String>) -> Result<Health, String> {
     let base = endpoint.unwrap_or_else(|| DEFAULT_ENDPOINT.to_string());
+    let selected_engine = engine.filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| saved_prefs().1);
     let health = ensure_ready(&base)?;
-    if health.loaded {
+    if health_is_loaded_for(&health, &selected_engine) {
         return Ok(health);
     }
-    /* 预热必须用用户实际选择的引擎：固定用 DEFAULT_ENGINE 会把
-     * qwen3 选择"证明"成 sensevoice，设置页于是永远显示错的引擎。 */
-    let (_, engine) = saved_prefs();
-    ensure_loaded(&base, &engine)
+    ensure_loaded(&base, &selected_engine)
+}
+
+fn health_is_loaded_for(health: &Health, engine: &str) -> bool {
+    health.loaded && health.engine == engine.trim()
 }
 
 /// 读取已保存的识别偏好（endpoint + engine）。文件缺失或字段为空时
 /// 回落到默认值——与 local_provider_prefs 的语义保持一致。
 pub fn saved_prefs() -> (String, String) {
-    let home = match std::env::var("HOME") {
-        Ok(home) => home,
-        Err(_) => return (DEFAULT_ENDPOINT.to_string(), DEFAULT_ENGINE.to_string()),
-    };
-    let path = std::path::Path::new(&home).join(".hachimo-local-asr.json");
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return (DEFAULT_ENDPOINT.to_string(), DEFAULT_ENGINE.to_string());
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return (DEFAULT_ENDPOINT.to_string(), DEFAULT_ENGINE.to_string());
-    };
-    let endpoint = value
-        .get("endpoint")
-        .and_then(|item| item.as_str())
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-        .unwrap_or(DEFAULT_ENDPOINT)
-        .to_string();
-    let engine = value
-        .get("engine")
-        .and_then(|item| item.as_str())
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-        .unwrap_or(DEFAULT_ENGINE)
-        .to_string();
-    (endpoint, engine)
+    crate::voice_service_settings::load()
+        .map(|preferences| (preferences.asr.endpoint, preferences.asr.engine))
+        .unwrap_or_else(|_| (DEFAULT_ENDPOINT.to_string(), DEFAULT_ENGINE.to_string()))
 }
 
 /// 设置页保存语音识别来源。写 `~/.hachimo-local-asr.json`，识别器每次开麦
@@ -272,25 +270,15 @@ pub fn local_asr_save_prefs(
     endpoint: Option<String>,
     engine: Option<String>,
 ) -> Result<(), String> {
-    let home = std::env::var("HOME").map_err(|_| "无法定位 HOME 目录".to_string())?;
-    let path = std::path::Path::new(&home).join(".hachimo-local-asr.json");
-    let mut value: serde_json::Value = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-    if let Some(map) = value.as_object_mut() {
-        map.insert("provider".into(), serde_json::json!(provider));
-        map.insert(
-            "endpoint".into(),
-            serde_json::json!(endpoint.unwrap_or_else(|| DEFAULT_ENDPOINT.to_string())),
-        );
-        map.insert(
-            "engine".into(),
-            serde_json::json!(engine.unwrap_or_else(|| DEFAULT_ENGINE.to_string())),
-        );
-    }
-    std::fs::write(&path, value.to_string())
-        .map_err(|e| format!("保存语音识别偏好失败：{e}"))
+    crate::voice_service_settings::update(crate::voice_service_settings::VoiceServicePreferencesInput {
+        asr_provider: Some(provider),
+        local_asr_endpoint: endpoint,
+        local_asr_engine: engine,
+        tts_provider: None,
+        macos_tts_voice: None,
+        kokoro_endpoint: None,
+        kokoro_voice: None,
+    }).map(|_| ())
 }
 
 /* 本地 ASR 服务的部署位置。放在 ~/.hachimo 下，避免 macOS TCC 对
@@ -299,6 +287,7 @@ const SERVICE_PYTHON: &str = "/opt/homebrew/opt/python@3.14/bin/python3.14";
 const SERVICE_DIR: &str = ".hachimo";
 const SERVICE_SCRIPT_NAME: &str = "stt_server.py";
 const SERVICE_MODEL_NAME: &str = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17";
+const SERVICE_SCRIPT: &str = include_str!("../../../../tools/voice/stt_server.py");
 
 fn home_dir() -> Result<std::path::PathBuf, String> {
     std::env::var("HOME")
@@ -308,6 +297,23 @@ fn home_dir() -> Result<std::path::PathBuf, String> {
 
 fn service_script() -> Result<std::path::PathBuf, String> {
     Ok(home_dir()?.join(SERVICE_DIR).join(SERVICE_SCRIPT_NAME))
+}
+
+/// 工作脚本随桌面端更新同步到 app 使用的私有目录。历史版本把脚本留在
+/// `~/.hachimo`，导致应用升级后仍持续运行旧的 ASR 状态机。
+fn sync_service_script() -> Result<std::path::PathBuf, String> {
+    let script = service_script()?;
+    let parent = script.parent().ok_or("本地 ASR 工作目录无效")?;
+    std::fs::create_dir_all(parent).map_err(|error| format!("创建本地 ASR 工作目录失败：{error}"))?;
+    if std::fs::read_to_string(&script).ok().as_deref() != Some(SERVICE_SCRIPT) {
+        let temp = tempfile::NamedTempFile::new_in(parent)
+            .map_err(|error| format!("创建本地 ASR 脚本临时文件失败：{error}"))?;
+        std::fs::write(temp.path(), SERVICE_SCRIPT)
+            .map_err(|error| format!("写入本地 ASR 脚本失败：{error}"))?;
+        temp.persist(&script)
+            .map_err(|error| format!("保存本地 ASR 脚本失败：{}", error.error))?;
+    }
+    Ok(script)
 }
 
 fn service_model_dir() -> Result<std::path::PathBuf, String> {
@@ -328,10 +334,10 @@ fn qwen_model_dir(home: &std::path::Path) -> Option<std::path::PathBuf> {
 /// 确保本地 ASR 服务在跑：已经在跑就复用，否则自己拉起来（不占终端、
 /// 不依赖 launchd）。返回 true 表示本次是新启动的。
 pub fn ensure_service() -> Result<bool, String> {
+    let script = sync_service_script()?;
     if health(DEFAULT_ENDPOINT, Duration::from_millis(900)).is_ok() {
         return Ok(false);
     }
-    let script = service_script()?;
     let model_dir = service_model_dir()?;
     let mut command = std::process::Command::new(SERVICE_PYTHON);
     command.arg(&script)
@@ -356,7 +362,8 @@ pub fn ensure_ready(endpoint: &str) -> Result<Health, String> {
         return Ok(health);
     }
     ensure_service()?;
-    let deadline = Instant::now() + Duration::from_secs(20);
+    // Python runtime、模型映射和首次 Qwen3 加载在低配机器上可远超 20 秒。
+    let deadline = Instant::now() + Duration::from_secs(90);
     let mut last = String::from("本地 ASR 服务无响应");
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(400));
@@ -378,6 +385,6 @@ pub fn ensure_loaded(endpoint: &str, engine: &str) -> Result<Health, String> {
         return Ok(health);
     }
     let silence = pcm_to_wav(&vec![0u8; 8000], 16000, 1); // 0.5s @16k
-    let _ = transcribe_wav(endpoint, engine, &silence, Duration::from_secs(30));
+    let _ = transcribe_wav(endpoint, engine, &silence, Duration::from_secs(90));
     ensure_ready(endpoint)
 }

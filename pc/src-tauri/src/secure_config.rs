@@ -77,6 +77,7 @@ fn encrypted_configs(dir: &Path) -> Result<Vec<(serde_json::Value, &'static str)
     let mut encrypted = Vec::new();
     for (name, purpose) in [
         ("voice-chat-settings.json", "voice-chat"),
+        ("xiaozhi-settings.json", "xiaozhi-realtime"),
         ("volcengine-device-asr.json", "speech-asr"),
         ("generation-providers.secure.json", "generation-providers"),
     ] {

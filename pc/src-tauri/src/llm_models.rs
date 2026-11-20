@@ -24,6 +24,12 @@ fn endpoint(base: &str) -> String {
     }
 }
 
+fn timeout_for(base: &str) -> Duration {
+    let local = reqwest::Url::parse(base).ok().and_then(|url| url.host_str().map(str::to_owned))
+        .is_some_and(|host| matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1"));
+    if local { Duration::from_secs(300) } else { Duration::from_secs(6) }
+}
+
 #[tauri::command]
 pub fn list_openai_models(base_url: String, api_key: Option<String>) -> Result<ModelList, String> {
     let url = endpoint(&base_url);
@@ -31,7 +37,7 @@ pub fn list_openai_models(base_url: String, api_key: Option<String>) -> Result<M
         return Err("请填写完整的服务地址，例如 http://127.0.0.1:9876/v1".into());
     }
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_millis(6000))
+        .timeout(timeout_for(&base_url))
         .build()
         .map_err(|e| format!("创建请求失败：{e}"))?;
     let started = std::time::Instant::now();
@@ -72,12 +78,19 @@ pub fn list_openai_models(base_url: String, api_key: Option<String>) -> Result<M
 
 #[cfg(test)]
 mod tests {
-    use super::endpoint;
+    use super::{endpoint, timeout_for};
+    use std::time::Duration;
 
     #[test]
     fn appends_models_once() {
         assert_eq!(endpoint("http://127.0.0.1:9876/v1"), "http://127.0.0.1:9876/v1/models");
         assert_eq!(endpoint("http://127.0.0.1:9876/v1/"), "http://127.0.0.1:9876/v1/models");
         assert_eq!(endpoint("http://127.0.0.1:9876/v1/models"), "http://127.0.0.1:9876/v1/models");
+    }
+
+    #[test]
+    fn local_models_receive_a_cold_start_timeout() {
+        assert!(timeout_for("http://127.0.0.1:9876/v1") >= Duration::from_secs(300));
+        assert_eq!(timeout_for("https://api.example.com/v1"), Duration::from_secs(6));
     }
 }

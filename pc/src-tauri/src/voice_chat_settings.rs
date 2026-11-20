@@ -114,9 +114,40 @@ fn normalize_provider(value: &str) -> String {
     }
 }
 
+/// 实时语音回复的轮次策略。
+///
+/// API 服务维持上游的全双工/可打断语义；只有显式选择的本地
+/// OMLX 服务使用本地收音链路的严格轮次，避免设备扬声器回声污染历史。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RealtimeReplyPolicy {
+    UpstreamDuplex,
+    LocalTurnTaking,
+}
+
+/// The voice conversation transport is chosen independently from the LLM/TTS
+/// provider. Existing settings deserialize to the original pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RealtimeEngine {
+    LlmPipeline,
+    Xiaozhi,
+}
+
+impl Default for RealtimeEngine {
+    fn default() -> Self { Self::LlmPipeline }
+}
+
+fn realtime_reply_policy_for(provider: &str) -> RealtimeReplyPolicy {
+    match normalize_provider(provider).as_str() {
+        "omlx" => RealtimeReplyPolicy::LocalTurnTaking,
+        _ => RealtimeReplyPolicy::UpstreamDuplex,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct VoiceChatSettings {
+    pub realtime_engine: RealtimeEngine,
     /// "deepseek" | "doubao" | "mimo" | "custom" — presets supply defaults, not a model whitelist.
     pub llm_provider: String,
     pub llm_base_url: String,
@@ -133,6 +164,7 @@ pub struct VoiceChatSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct VoiceChatSettingsInput {
+    pub realtime_engine: Option<RealtimeEngine>,
     pub llm_provider: Option<String>,
     pub llm_base_url: Option<String>,
     pub llm_model: Option<String>,
@@ -145,6 +177,7 @@ pub struct VoiceChatSettingsInput {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VoiceChatSettingsStatus {
+    pub realtime_engine: RealtimeEngine,
     pub llm_web_search: bool,
     pub llm_configured: bool,
     pub tts_configured: bool,
@@ -296,12 +329,17 @@ pub fn status() -> Result<VoiceChatSettingsStatus, String> {
     migrate_shared_speech_key()?;
     let (settings, source) = load()?;
     let (tts_key, tts_uses_asr_key) = resolve_tts_key(&settings);
+    let tts_provider = crate::voice_service_settings::tts_provider();
+    let kokoro_ready = (tts_provider == "kokoro")
+        .then(|| crate::kokoro_tts::status().ready)
+        .unwrap_or(false);
     Ok(VoiceChatSettingsStatus {
+        realtime_engine: settings.realtime_engine,
         llm_web_search: settings.llm_web_search.unwrap_or(true),
         /* 本地 OMLX 不需要云端凭据（空 Key 时已兜底出厂令牌）。 */
         llm_configured: !settings.llm_api_key.trim().is_empty() || settings.llm_provider == "omlx",
-        /* 本地 TTS（macOS say）不需要火山 Key，不能按云端凭据判定。 */
-        tts_configured: !tts_key.is_empty() || crate::local_tts::provider_is_local(),
+        /* 本地 TTS 不需要火山 Key；Kokoro 必须额外确认 worker 已启动。 */
+        tts_configured: tts_is_configured(&tts_provider, &tts_key, kokoro_ready),
         llm_provider: settings.llm_provider.clone(),
         tts_uses_asr_key,
         llm_base_url: settings.llm_base_url.clone(),
@@ -313,6 +351,14 @@ pub fn status() -> Result<VoiceChatSettingsStatus, String> {
         tts_resource_id: settings.tts_resource_id.clone(),
         credential_source: source,
     })
+}
+
+fn tts_is_configured(provider: &str, cloud_key: &str, kokoro_ready: bool) -> bool {
+    match provider {
+        "macos" => true,
+        "kokoro" => kokoro_ready,
+        _ => !cloud_key.trim().is_empty(),
+    }
 }
 
 fn credential_scope(settings: &VoiceChatSettings) -> String {
@@ -353,6 +399,7 @@ pub fn save(input: VoiceChatSettingsInput) -> Result<VoiceChatSettingsStatus, St
 }
 
 fn merge_settings(mut settings: VoiceChatSettings, input: VoiceChatSettingsInput) -> VoiceChatSettings {
+    if let Some(engine) = input.realtime_engine { settings.realtime_engine = engine; }
     if let Some(enabled) = input.llm_web_search { settings.llm_web_search = Some(enabled); }
     remember_active_key(&mut settings);
     let previous_scope = credential_scope(&settings);
@@ -421,6 +468,18 @@ pub fn llm_config() -> Result<LlmConfig, String> {
     })
 }
 
+pub fn realtime_reply_policy() -> Result<RealtimeReplyPolicy, String> {
+    let (settings, _) = load()?;
+    Ok(realtime_reply_policy_for(&settings.llm_provider))
+}
+
+/// 用已保存的凭据探测当前聊天模型服务。调用方只能拿到模型目录与耗时，
+/// 不会把存储的 API Key 交给 WebView；尤其适合 OMLX 的保存后健康检查。
+pub fn probe_llm() -> Result<crate::llm_models::ModelList, String> {
+    let config = llm_config()?;
+    crate::llm_models::list_openai_models(config.base_url, Some(config.api_key))
+}
+
 fn catalog_settings(settings: VoiceChatSettings, input: VoiceChatSettingsInput) -> Result<VoiceChatSettings, String> {
     let mut settings = merge_settings(settings, input);
     if settings.llm_provider == "custom" && settings.llm_base_url.trim().is_empty() {
@@ -483,6 +542,37 @@ pub async fn list_models(input: VoiceChatSettingsInput) -> Result<Vec<String>, S
 /// provider switch or reuse another provider's (or speech) credential.
 pub fn news_search_config() -> Result<LlmConfig, String> {
     news_search_config_from(&load()?.0)
+}
+
+/// 本地对话模型不能代替云端搜索服务。它仅借用已保存的豆包凭据执行
+/// 一次只读公开检索，绝不改变当前对话模型或将 OMLX 的令牌外发。
+pub fn local_chat_search_config() -> Result<LlmConfig, String> {
+    local_chat_search_config_from(&load()?.0)
+}
+
+fn local_chat_search_config_from(settings: &VoiceChatSettings) -> Result<LlmConfig, String> {
+    if settings.llm_web_search == Some(false) {
+        return Err("请在 API 配置启用联网检索".into());
+    }
+    let preset = llm_preset("doubao").expect("built-in Doubao preset");
+    let active = settings.llm_provider == "doubao";
+    let key = if active && !settings.llm_api_key.trim().is_empty() {
+        Some(&settings.llm_api_key)
+    } else {
+        settings.llm_api_keys.get("doubao")
+    }
+    .filter(|value| !value.trim().is_empty())
+    .ok_or("本地对话的联网检索需要已保存的豆包 API Key；请在 API 配置中保存后再切回本地 OMLX")?;
+    Ok(LlmConfig {
+        web_search: true,
+        base_url: preset.base_url.into(),
+        api_key: key.trim().into(),
+        model: if active && !settings.llm_model.trim().is_empty() {
+            settings.llm_model.trim().into()
+        } else {
+            preset.model.into()
+        },
+    })
 }
 
 fn news_search_config_from(settings:&VoiceChatSettings)->Result<LlmConfig,String>{
@@ -558,6 +648,25 @@ mod tests {
         assert_eq!(news_search_config_from(&settings).unwrap().model,"my-doubao-endpoint");
         assert_eq!(news_search_config_from(&settings).unwrap().api_key,"active-doubao-key");
         settings.llm_web_search=Some(false);assert!(news_search_config_from(&settings).is_err());
+    }
+
+    #[test]
+    fn local_chat_search_reuses_saved_doubao_credential_without_switching_chat_provider() {
+        let mut settings = VoiceChatSettings {
+            llm_provider: "omlx".into(),
+            llm_model: "gemma-local".into(),
+            llm_api_key: "1234".into(),
+            llm_web_search: Some(true),
+            ..Default::default()
+        };
+        settings.llm_api_keys.insert("doubao".into(), "doubao-search-key".into());
+        let search = local_chat_search_config_from(&settings).unwrap();
+        assert_eq!(search.base_url, llm_preset("doubao").unwrap().base_url);
+        assert_eq!(search.api_key, "doubao-search-key");
+        assert_eq!(settings.llm_provider, "omlx");
+        assert_eq!(settings.llm_model, "gemma-local");
+        settings.llm_web_search = Some(false);
+        assert!(local_chat_search_config_from(&settings).is_err());
     }
     #[test]
     fn global_volume_migrates_once_and_ignores_future_pet_changes() {
@@ -738,6 +847,21 @@ mod tests {
     }
 
     #[test]
+    fn realtime_reply_policy_is_isolated_by_saved_provider() {
+        assert_eq!(
+            realtime_reply_policy_for("omlx"),
+            RealtimeReplyPolicy::LocalTurnTaking
+        );
+        for provider in ["deepseek", "doubao", "mimo", "custom", "unknown"] {
+            assert_eq!(
+                realtime_reply_policy_for(provider),
+                RealtimeReplyPolicy::UpstreamDuplex,
+                "{provider} must retain the upstream/API reply policy"
+            );
+        }
+    }
+
+    #[test]
     fn local_omlx_catalog_passes_loopback_http_and_defaults_token() {
         // 本地 OMLX 是 http://127.0.0.1:9876/v1：环回 http 必须放行，
         // 且没存 Key 时兜底 OMLX 出厂令牌，否则模型目录永远 401。
@@ -758,6 +882,15 @@ mod tests {
             },
         ).expect_err("remote http must be rejected");
         assert!(error.contains("HTTPS"));
+    }
+
+    #[test]
+    fn local_tts_providers_do_not_require_a_volcengine_key() {
+        assert!(super::tts_is_configured("macos", "", false));
+        assert!(super::tts_is_configured("kokoro", "", true));
+        assert!(!super::tts_is_configured("kokoro", "", false));
+        assert!(!super::tts_is_configured("volcengine", "", false));
+        assert!(super::tts_is_configured("volcengine", "key", false));
     }
 
     #[test]
@@ -839,5 +972,27 @@ mod tests {
         let masked = mask_secret(&stored.llm_api_key);
         stored = merge_settings(stored, VoiceChatSettingsInput {llm_api_key:Some(masked),..Default::default()});
         assert_eq!(stored.llm_api_key, "sk-realkey123456");
+    }
+
+    #[test]
+    fn realtime_engine_defaults_to_the_existing_pipeline_and_switching_it_keeps_llm_tts() {
+        let original = VoiceChatSettings {
+            llm_provider: "omlx".into(),
+            llm_api_key: "local-key".into(),
+            tts_api_key: "speech-key".into(),
+            ..Default::default()
+        };
+        let legacy: VoiceChatSettings = serde_json::from_value(serde_json::json!({
+            "llmProvider": "omlx", "llmApiKey": "local-key", "ttsApiKey": "speech-key"
+        })).unwrap();
+        assert_eq!(legacy.realtime_engine, RealtimeEngine::LlmPipeline);
+        let switched = merge_settings(original.clone(), VoiceChatSettingsInput {
+            realtime_engine: Some(RealtimeEngine::Xiaozhi),
+            ..Default::default()
+        });
+        assert_eq!(switched.realtime_engine, RealtimeEngine::Xiaozhi);
+        assert_eq!(switched.llm_provider, original.llm_provider);
+        assert_eq!(switched.llm_api_key, original.llm_api_key);
+        assert_eq!(switched.tts_api_key, original.tts_api_key);
     }
 }

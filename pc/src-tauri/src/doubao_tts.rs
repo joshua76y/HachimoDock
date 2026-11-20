@@ -24,7 +24,10 @@ mod http_stream;
 
 fn voice_catalog() -> &'static serde_json::Value {
     static CATALOG: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
-    CATALOG.get_or_init(|| serde_json::from_str(include_str!("../../src/lib/tts-voices.json")).expect("bundled voice catalog"))
+    CATALOG.get_or_init(|| {
+        serde_json::from_str(include_str!("../../src/lib/tts-voices.json"))
+            .expect("bundled voice catalog")
+    })
 }
 
 pub const DEFAULT_WS_URL: &str = "wss://openspeech.bytedance.com/api/v3/tts/bidirection";
@@ -37,9 +40,25 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const SESSION_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_PCM_BYTES: usize = 32 * 1024 * 1024;
 
+/// 本地 TTS 会执行同步 HTTP 或启动系统进程。实时对话仍需持续取走设备的
+/// 20ms PCM 帧，因此这些工作绝不能占住异步收音任务。
+async fn run_local_synthesis<T, F>(work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|error| format!("本地语音合成任务异常：{error}"))?
+}
+
 fn retry_safe(emitted: usize, error: &str) -> bool {
-    let kind=crate::realtime_chat_log::error_kind(error);
-    emitted == 0 && !matches!(kind,"authentication"|"resource_permission"|"tts_resource_mismatch")
+    let kind = crate::realtime_chat_log::error_kind(error);
+    emitted == 0
+        && !matches!(
+            kind,
+            "authentication" | "resource_permission" | "tts_resource_mismatch"
+        )
         && (kind != "tts_session_rejected" || error.contains("speech_rate"))
 }
 
@@ -77,23 +96,54 @@ pub struct DoubaoTtsConfig {
 }
 
 impl DoubaoTtsConfig {
-    pub fn new(api_key: &str, speaker: &str, clone_speaker_id: &str, speed: f32, resource_id: &str) -> Self {
+    pub fn new(
+        api_key: &str,
+        speaker: &str,
+        clone_speaker_id: &str,
+        speed: f32,
+        resource_id: &str,
+    ) -> Self {
         let cloned = !clone_speaker_id.trim().is_empty();
         let catalog = voice_catalog();
-        let legacy = catalog["legacySpeakerIds"].as_array().unwrap().iter().any(|v| v.as_str() == Some(speaker.trim()));
-        let speaker = if legacy { catalog["defaultSpeaker"].as_str().unwrap() } else { speaker.trim() };
+        let legacy = catalog["legacySpeakerIds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str() == Some(speaker.trim()));
+        let speaker = if legacy {
+            catalog["defaultSpeaker"].as_str().unwrap()
+        } else {
+            speaker.trim()
+        };
         Self {
             api_key: api_key.trim().to_string(),
             resource_id: if cloned {
                 VOICE_CLONE_RESOURCE_ID.to_string()
-            } else if legacy || ["speakers", "compatibilitySpeakers"].iter().any(|key| catalog[key].as_array().unwrap().iter().any(|v| v["id"].as_str() == Some(speaker))) || resource_id.trim().is_empty() {
+            } else if legacy
+                || ["speakers", "compatibilitySpeakers"].iter().any(|key| {
+                    catalog[key]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|v| v["id"].as_str() == Some(speaker))
+                })
+                || resource_id.trim().is_empty()
+            {
                 DEFAULT_RESOURCE_ID.to_string()
             } else {
                 resource_id.trim().to_string()
             },
             model: DEFAULT_MODEL.to_string(),
-            speaker: if cloned { clone_speaker_id.trim().to_string() } else { speaker.trim().to_string() },
-            speed: if speed.is_finite() && speed > 0.0 { speed } else { 1.0 },
+            speaker: if cloned {
+                clone_speaker_id.trim().to_string()
+            } else {
+                speaker.trim().to_string()
+            },
+            speed: if speed.is_finite() && speed > 0.0 {
+                speed
+            } else {
+                1.0
+            },
             ws_url: DEFAULT_WS_URL.to_string(),
         }
     }
@@ -108,8 +158,13 @@ impl DoubaoTtsConfig {
     }
 
     fn uses_http_stream(&self) -> bool {
-        voice_catalog()["speakers"].as_array().unwrap().iter().any(|voice|
-            voice["id"].as_str() == Some(self.speaker.as_str()) && voice["transport"] == "http")
+        voice_catalog()["speakers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|voice| {
+                voice["id"].as_str() == Some(self.speaker.as_str()) && voice["transport"] == "http"
+            })
     }
 }
 
@@ -156,9 +211,17 @@ fn decode_frame(data: &[u8]) -> Result<Frame, String> {
     let msg_type = data[1] >> 4;
     let flag = data[1] & 0x0f;
     let mut pos = header_size.max(4);
-    let mut frame = Frame { msg_type, flag, ..Frame::default() };
+    let mut frame = Frame {
+        msg_type,
+        flag,
+        ..Frame::default()
+    };
     match msg_type {
-        MSG_FULL_SERVER_RESPONSE | MSG_AUDIO_ONLY_SERVER | 0b1100 | MSG_FULL_CLIENT_REQUEST | 0b0010 => {
+        MSG_FULL_SERVER_RESPONSE
+        | MSG_AUDIO_ONLY_SERVER
+        | 0b1100
+        | MSG_FULL_CLIENT_REQUEST
+        | 0b0010 => {
             if flag == FLAG_POSITIVE_SEQ || flag == FLAG_NEGATIVE_SEQ {
                 read_u32(data, &mut pos)?; // sequence
             }
@@ -187,7 +250,10 @@ fn decode_frame(data: &[u8]) -> Result<Frame, String> {
                 pos += size;
             }
         }
-        if matches!(frame.event, EVENT_CONNECTION_STARTED | EVENT_CONNECTION_FAILED | EVENT_CONNECTION_FINISHED) {
+        if matches!(
+            frame.event,
+            EVENT_CONNECTION_STARTED | EVENT_CONNECTION_FAILED | EVENT_CONNECTION_FINISHED
+        ) {
             let size = read_u32(data, &mut pos)? as usize;
             pos += size.min(data.len().saturating_sub(pos)); // connect id, ignored
         }
@@ -222,7 +288,11 @@ pub struct DoubaoTtsClient {
 
 impl DoubaoTtsClient {
     pub fn new(cfg: DoubaoTtsConfig) -> Self {
-        Self { cfg, socket: None, rate_hint_rejected: false }
+        Self {
+            cfg,
+            socket: None,
+            rate_hint_rejected: false,
+        }
     }
 
     pub fn config(&self) -> &DoubaoTtsConfig {
@@ -246,32 +316,50 @@ impl DoubaoTtsClient {
             .into_client_request()
             .map_err(|error| format!("TTS 地址无效: {error}"))?;
         let headers = request.headers_mut();
-        headers.insert("X-Api-Key", HeaderValue::from_str(&self.cfg.api_key).map_err(|e| e.to_string())?);
-        headers.insert("X-Api-Resource-Id", HeaderValue::from_str(&self.cfg.resource_id).map_err(|e| e.to_string())?);
+        headers.insert(
+            "X-Api-Key",
+            HeaderValue::from_str(&self.cfg.api_key).map_err(|e| e.to_string())?,
+        );
+        headers.insert(
+            "X-Api-Resource-Id",
+            HeaderValue::from_str(&self.cfg.resource_id).map_err(|e| e.to_string())?,
+        );
         headers.insert(
             "X-Api-Connect-Id",
-            HeaderValue::from_str(&Uuid::new_v4().simple().to_string()).map_err(|e| e.to_string())?,
+            HeaderValue::from_str(&Uuid::new_v4().simple().to_string())
+                .map_err(|e| e.to_string())?,
         );
-        let (mut socket, _) = timeout(CONNECT_TIMEOUT, crate::llm_network::connect_websocket(request))
-            .await
-            .map_err(|_| "豆包 TTS 连接超时".to_string())?
-            .map_err(|error| {
-                let text = redact(&error.to_string(), &self.cfg.api_key);
-                if text.contains("401") {
-                    format!("豆包 TTS 鉴权失败（请核对 TTS API Key）: {text}")
-                } else if text.contains("403") {
-                    format!("豆包 TTS 资源未授权（请在火山控制台开通 {}）: {text}", self.cfg.resource_id)
-                } else {
-                    format!("豆包 TTS 连接失败: {text}")
-                }
-            })?;
+        let (mut socket, _) = timeout(
+            CONNECT_TIMEOUT,
+            crate::llm_network::connect_websocket(request),
+        )
+        .await
+        .map_err(|_| "豆包 TTS 连接超时".to_string())?
+        .map_err(|error| {
+            let text = redact(&error.to_string(), &self.cfg.api_key);
+            if text.contains("401") {
+                format!("豆包 TTS 鉴权失败（请核对 TTS API Key）: {text}")
+            } else if text.contains("403") {
+                format!(
+                    "豆包 TTS 资源未授权（请在火山控制台开通 {}）: {text}",
+                    self.cfg.resource_id
+                )
+            } else {
+                format!("豆包 TTS 连接失败: {text}")
+            }
+        })?;
         socket
-            .send(WsMessage::Binary(encode_client_event(EVENT_START_CONNECTION, "", b"{}").into()))
+            .send(WsMessage::Binary(
+                encode_client_event(EVENT_START_CONNECTION, "", b"{}").into(),
+            ))
             .await
             .map_err(|error| format!("豆包 TTS StartConnection 发送失败: {error}"))?;
-        let started = timeout(CONNECT_TIMEOUT, Self::wait_for_event(&mut socket, EVENT_CONNECTION_STARTED))
-            .await
-            .map_err(|_| "豆包 TTS 等待 ConnectionStarted 超时".to_string())?;
+        let started = timeout(
+            CONNECT_TIMEOUT,
+            Self::wait_for_event(&mut socket, EVENT_CONNECTION_STARTED),
+        )
+        .await
+        .map_err(|_| "豆包 TTS 等待 ConnectionStarted 超时".to_string())?;
         if let Err(error) = started {
             let _ = socket.close(None).await;
             return Err(error);
@@ -291,7 +379,10 @@ impl DoubaoTtsClient {
                 ));
             }
             if frame.event == EVENT_CONNECTION_FAILED {
-                return Err(format!("豆包 TTS ConnectionFailed: {}", String::from_utf8_lossy(&frame.payload)));
+                return Err(format!(
+                    "豆包 TTS ConnectionFailed: {}",
+                    String::from_utf8_lossy(&frame.payload)
+                ));
             }
             if frame.msg_type == MSG_FULL_SERVER_RESPONSE && frame.event == event {
                 return Ok(frame);
@@ -304,9 +395,14 @@ impl DoubaoTtsClient {
             match socket.next().await {
                 Some(Ok(WsMessage::Binary(data))) => return decode_frame(&data),
                 Some(Ok(WsMessage::Ping(_))) | Some(Ok(WsMessage::Pong(_))) => continue,
-                Some(Ok(WsMessage::Text(text))) => return Err(format!("豆包 TTS 返回了意外的文本帧: {text}")),
+                Some(Ok(WsMessage::Text(text))) => {
+                    return Err(format!("豆包 TTS 返回了意外的文本帧: {text}"))
+                }
                 Some(Ok(WsMessage::Close(frame))) => {
-                    return Err(format!("豆包 TTS 连接被关闭: {:?}", frame.map(|f| f.reason.to_string())))
+                    return Err(format!(
+                        "豆包 TTS 连接被关闭: {:?}",
+                        frame.map(|f| f.reason.to_string())
+                    ))
                 }
                 Some(Ok(_)) => continue,
                 Some(Err(error)) => return Err(format!("豆包 TTS 接收失败: {error}")),
@@ -317,13 +413,17 @@ impl DoubaoTtsClient {
 
     /// Barge-in must not wait for the provider's close handshake. Dropping the
     /// stream fences all old response frames; the next sentence reconnects.
-    pub fn interrupt(&mut self) { self.socket.take(); }
+    pub fn interrupt(&mut self) {
+        self.socket.take();
+    }
 
     pub async fn reset(&mut self) {
         if let Some(mut socket) = self.socket.take() {
             let _ = timeout(
                 Duration::from_secs(2),
-                socket.send(WsMessage::Binary(encode_client_event(EVENT_FINISH_CONNECTION, "", b"{}").into())),
+                socket.send(WsMessage::Binary(
+                    encode_client_event(EVENT_FINISH_CONNECTION, "", b"{}").into(),
+                )),
             )
             .await;
             let _ = timeout(Duration::from_secs(2), socket.close(None)).await;
@@ -362,12 +462,27 @@ impl DoubaoTtsClient {
         }
         /* 选了本地 TTS 就不走云端：用 macOS say 合成，直接喂 PCM。
          * 与火山共用同一入口，调用方零改动。 */
+        if crate::voice_service_settings::tts_provider() == "kokoro" {
+            let prefs = crate::voice_service_settings::load()?;
+            let text = clean.to_owned();
+            let voice = prefs.tts.kokoro_voice;
+            let speed = self.cfg.speed;
+            let result =
+                run_local_synthesis(move || crate::kokoro_tts::synthesize(&text, &voice, speed))
+                    .await?;
+            let pcm = &result.wav[44..];
+            for chunk in pcm.chunks(1920) {
+                on_pcm(chunk);
+            }
+            return Ok(pcm.len());
+        }
         if crate::local_tts::provider_is_local() {
-            let result = crate::local_tts::synthesize(
-                clean,
-                Some(crate::local_tts::preferred_voice().as_str()),
-                None,
-            )?;
+            let text = clean.to_owned();
+            let voice = crate::local_tts::preferred_voice();
+            let result = run_local_synthesis(move || {
+                crate::local_tts::synthesize(&text, Some(&voice), None)
+            })
+            .await?;
             let pcm = &result.wav[44..];
             for chunk in pcm.chunks(1920) {
                 on_pcm(chunk);
@@ -377,8 +492,12 @@ impl DoubaoTtsClient {
         if self.cfg.uses_http_stream() {
             // Context voices explicitly reject the bidirectional protocol. Never retry
             // after audio has been emitted: that would repeat speech on the device.
-            return timeout(SESSION_TIMEOUT, http_stream::synthesize(&self.cfg, clean, &mut on_pcm))
-                .await.map_err(|_| "豆包 TTS 会话超时".to_string())?;
+            return timeout(
+                SESSION_TIMEOUT,
+                http_stream::synthesize(&self.cfg, clean, &mut on_pcm),
+            )
+            .await
+            .map_err(|_| "豆包 TTS 会话超时".to_string())?;
         }
         let mut last_error = String::new();
         for _attempt in 0..3 {
@@ -388,9 +507,14 @@ impl DoubaoTtsClient {
             }
             let with_rate_hint = !self.rate_hint_rejected;
             let mut emitted = 0;
-            let result = timeout(SESSION_TIMEOUT, self.synthesize_once(clean, with_rate_hint, &mut |pcm| {
-                emitted += pcm.len(); on_pcm(pcm);
-            })).await;
+            let result = timeout(
+                SESSION_TIMEOUT,
+                self.synthesize_once(clean, with_rate_hint, &mut |pcm| {
+                    emitted += pcm.len();
+                    on_pcm(pcm);
+                }),
+            )
+            .await;
             match result {
                 Ok(Ok(total)) => return Ok(total),
                 Ok(Err(error)) => {
@@ -398,55 +522,89 @@ impl DoubaoTtsClient {
                     if with_rate_hint && lowered.contains("speech_rate") {
                         self.rate_hint_rejected = true;
                     }
-                    crate::realtime_chat_log::record("", "tts_failed", json!({"errorKind":crate::realtime_chat_log::error_kind(&error),"bytes":emitted}));
+                    crate::realtime_chat_log::record(
+                        "",
+                        "tts_failed",
+                        json!({"errorKind":crate::realtime_chat_log::error_kind(&error),"bytes":emitted}),
+                    );
                     last_error = error;
                     self.reset().await;
                     // Configuration/permission errors cannot be fixed by repeating the same request.
                     if last_error.contains("mismatched") {
-                        return Err("音色与语音资源不匹配，请在人设与声音中选择 TTS 2.0 音色（55000000）".into());
+                        return Err(
+                            "音色与语音资源不匹配，请在人设与声音中选择 TTS 2.0 音色（55000000）"
+                                .into(),
+                        );
                     }
-                    if !retry_safe(emitted,&last_error) { return Err(last_error); }
+                    if !retry_safe(emitted, &last_error) {
+                        return Err(last_error);
+                    }
                 }
                 Err(_) => {
                     last_error = "豆包 TTS 会话超时".to_string();
                     self.reset().await;
-                    if !retry_safe(emitted,&last_error) { return Err(last_error); }
+                    if !retry_safe(emitted, &last_error) {
+                        return Err(last_error);
+                    }
                 }
             }
         }
         Err(last_error)
     }
 
-    async fn synthesize_once<F>(&mut self, text: &str, with_rate_hint: bool, on_pcm: &mut F) -> Result<usize, String>
+    async fn synthesize_once<F>(
+        &mut self,
+        text: &str,
+        with_rate_hint: bool,
+        on_pcm: &mut F,
+    ) -> Result<usize, String>
     where
         F: FnMut(&[u8]),
     {
         let payload = self.start_session_payload(with_rate_hint);
         let api_key = self.cfg.api_key.clone();
-        let socket = self.socket.as_mut().ok_or_else(|| "豆包 TTS 未连接".to_string())?;
+        let socket = self
+            .socket
+            .as_mut()
+            .ok_or_else(|| "豆包 TTS 未连接".to_string())?;
         let session_id = Uuid::new_v4().simple().to_string();
         socket
-            .send(WsMessage::Binary(encode_client_event(EVENT_START_SESSION, &session_id, &payload).into()))
+            .send(WsMessage::Binary(
+                encode_client_event(EVENT_START_SESSION, &session_id, &payload).into(),
+            ))
             .await
             .map_err(|error| format!("StartSession 发送失败: {error}"))?;
         let started = Self::receive(socket).await?;
         if started.msg_type == MSG_ERROR {
-            return Err(format!("协议错误 ({}): {}", started.error_code, redact(&String::from_utf8_lossy(&started.payload), &api_key)));
+            return Err(format!(
+                "协议错误 ({}): {}",
+                started.error_code,
+                redact(&String::from_utf8_lossy(&started.payload), &api_key)
+            ));
         }
         if started.event == EVENT_SESSION_FAILED {
-            return Err(format!("SessionFailed: {}", redact(&String::from_utf8_lossy(&started.payload), &api_key)));
+            return Err(format!(
+                "SessionFailed: {}",
+                redact(&String::from_utf8_lossy(&started.payload), &api_key)
+            ));
         }
         if started.event != EVENT_SESSION_STARTED {
             return Err(format!("期望 SessionStarted，收到 event={}", started.event));
         }
-        let task = serde_json::to_vec(&json!({ "event": EVENT_TASK_REQUEST, "req_params": { "text": text } }))
-            .unwrap_or_default();
+        let task = serde_json::to_vec(
+            &json!({ "event": EVENT_TASK_REQUEST, "req_params": { "text": text } }),
+        )
+        .unwrap_or_default();
         socket
-            .send(WsMessage::Binary(encode_client_event(EVENT_TASK_REQUEST, &session_id, &task).into()))
+            .send(WsMessage::Binary(
+                encode_client_event(EVENT_TASK_REQUEST, &session_id, &task).into(),
+            ))
             .await
             .map_err(|error| format!("TaskRequest 发送失败: {error}"))?;
         socket
-            .send(WsMessage::Binary(encode_client_event(EVENT_FINISH_SESSION, &session_id, b"{}").into()))
+            .send(WsMessage::Binary(
+                encode_client_event(EVENT_FINISH_SESSION, &session_id, b"{}").into(),
+            ))
             .await
             .map_err(|error| format!("FinishSession 发送失败: {error}"))?;
         let mut total = 0usize;
@@ -473,7 +631,10 @@ impl DoubaoTtsClient {
                 break;
             }
             if frame.event == EVENT_SESSION_FAILED {
-                return Err(format!("SessionFailed: {}", redact(&String::from_utf8_lossy(&frame.payload), &api_key)));
+                return Err(format!(
+                    "SessionFailed: {}",
+                    redact(&String::from_utf8_lossy(&frame.payload), &api_key)
+                ));
             }
         }
         if total == 0 {
@@ -501,11 +662,11 @@ mod tests {
 
     #[test]
     fn failed_tts_never_repeats_already_emitted_audio() {
-        assert!(retry_safe(0,"connection closed"));
-        assert!(!retry_safe(640,"connection closed"));
-        assert!(!retry_safe(640,"timeout"));
-        assert!(!retry_safe(0,"SessionFailed: invalid text"));
-        assert!(!retry_safe(0,"401 authentication"));
+        assert!(retry_safe(0, "connection closed"));
+        assert!(!retry_safe(640, "connection closed"));
+        assert!(!retry_safe(640, "timeout"));
+        assert!(!retry_safe(0, "SessionFailed: invalid text"));
+        assert!(!retry_safe(0, "401 authentication"));
     }
 
     #[test]
@@ -532,18 +693,32 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[ignore = "requires PET_REALTIME_SETTINGS_DIR and uses the configured cloud service"]
     fn live_seed_tts_2_catalog() {
-        let dir = std::path::PathBuf::from(std::env::var("PET_REALTIME_SETTINGS_DIR").expect("settings directory"));
+        let dir = std::path::PathBuf::from(
+            std::env::var("PET_REALTIME_SETTINGS_DIR").expect("settings directory"),
+        );
         crate::voice_chat_settings::configure_storage_dir(dir.clone()).unwrap();
         crate::volcengine_asr::configure_storage_dir(dir).unwrap();
         tauri::async_runtime::block_on(async {
-            for speaker in ["zh_female_vv_uranus_bigtts", "zh_male_shaonianzixin_uranus_bigtts", "zh_male_ruyayichen_uranus_bigtts", "ICL_uranus_en_female_charlie_tob", "en_male_bill_jones_corey_uranus_bigtts"] {
+            for speaker in [
+                "zh_female_vv_uranus_bigtts",
+                "zh_male_shaonianzixin_uranus_bigtts",
+                "zh_male_ruyayichen_uranus_bigtts",
+                "ICL_uranus_en_female_charlie_tob",
+                "en_male_bill_jones_corey_uranus_bigtts",
+            ] {
                 if let Ok(filter) = std::env::var("PET_TTS_TEST_SPEAKER") {
-                    if speaker != filter { continue; }
+                    if speaker != filter {
+                        continue;
+                    }
                 }
                 let cfg = crate::voice_chat_settings::tts_config(speaker, "", 1.0).unwrap();
                 let mut client = DoubaoTtsClient::new(cfg);
                 let mut bytes = 0;
-                let text = if speaker.contains("en_") { "Hello, it is nice to meet you." } else { "你好，我们来聊聊天吧。" };
+                let text = if speaker.contains("en_") {
+                    "Hello, it is nice to meet you."
+                } else {
+                    "你好，我们来聊聊天吧。"
+                };
                 let result = client.synthesize(text, |pcm| bytes += pcm.len()).await;
                 client.reset().await;
                 assert!(result.is_ok(), "speaker={speaker}: {result:?}");
@@ -570,7 +745,12 @@ mod tests {
 
     #[test]
     fn audio_server_frames_carry_raw_pcm() {
-        let mut data = vec![0x11, (MSG_AUDIO_ONLY_SERVER << 4) | FLAG_WITH_EVENT, 0x10, 0x00];
+        let mut data = vec![
+            0x11,
+            (MSG_AUDIO_ONLY_SERVER << 4) | FLAG_WITH_EVENT,
+            0x10,
+            0x00,
+        ];
         data.extend_from_slice(&EVENT_TTS_RESPONSE.to_be_bytes());
         data.extend_from_slice(&2u32.to_be_bytes());
         data.extend_from_slice(b"id");
@@ -591,7 +771,10 @@ mod tests {
         assert_eq!(cloned.speaker, "S_abc");
         assert_eq!(cloned.resource_id, VOICE_CLONE_RESOURCE_ID);
         assert_eq!(cloned.speech_rate(), Some(-50));
-        assert_eq!(DoubaoTtsConfig::new("k", "spk", "", 1.0, "").speech_rate(), None);
+        assert_eq!(
+            DoubaoTtsConfig::new("k", "spk", "", 1.0, "").speech_rate(),
+            None
+        );
     }
 
     #[test]
@@ -603,7 +786,13 @@ mod tests {
 
     #[test]
     fn legacy_default_migrates_and_utf8_error_redaction_is_safe() {
-        let cfg = DoubaoTtsConfig::new("k", "zh_male_naiqimengwa_mars_bigtts", "", 1.0, "seed-tts-1.0");
+        let cfg = DoubaoTtsConfig::new(
+            "k",
+            "zh_male_naiqimengwa_mars_bigtts",
+            "",
+            1.0,
+            "seed-tts-1.0",
+        );
         assert_eq!(cfg.speaker, "zh_female_vv_uranus_bigtts");
         assert_eq!(cfg.resource_id, "seed-tts-2.0");
         assert_eq!(redact(&"中文".repeat(500), "").chars().count(), 400);
@@ -614,13 +803,33 @@ mod tests {
 mod local_tts_bridge_tests {
     use super::*;
 
+    #[test]
+    fn local_synthesis_yields_to_realtime_capture() {
+        tauri::async_runtime::block_on(async {
+            let work = run_local_synthesis(|| {
+                std::thread::sleep(std::time::Duration::from_millis(80));
+                Ok::<_, String>(())
+            });
+            tokio::pin!(work);
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+                result = &mut work => panic!("本地合成不应在 20ms 内阻塞并完成：{result:?}"),
+            }
+            assert!(work.await.is_ok());
+        });
+    }
+
     /// 把偏好切成本地 TTS，验证 synthesize 真的产出 PCM（不走网络）。
     #[test]
     fn local_provider_emits_pcm_without_network() {
         let home = std::env::var("HOME").expect("home");
         let path = std::path::Path::new(&home).join(".hachimo-local-asr.json");
         let backup = std::fs::read_to_string(&path).ok();
-        std::fs::write(&path, r#"{"ttsProvider":"local","localTtsVoice":"Tingting"}"#).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"ttsProvider":"local","localTtsVoice":"Tingting"}"#,
+        )
+        .unwrap();
 
         let mut client = DoubaoTtsClient::new(DoubaoTtsConfig::new("", "x", "", 1.0, ""));
         let mut total = 0usize;

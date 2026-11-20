@@ -173,6 +173,117 @@ pub fn download_client(timeout: Duration) -> Result<reqwest::Client, String> {
     build_cloud_client(&load()?, Some(timeout), CloudTransport::Download)
 }
 
+const PROXY_ENVIRONMENT_KEYS: &[&str] = &[
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+];
+
+fn has_inherited_proxy_environment() -> bool {
+    PROXY_ENVIRONMENT_KEYS
+        .iter()
+        .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
+}
+
+fn set_node_proxy_environment(command: &mut std::process::Command, proxy: &str) {
+    command
+        .env("NODE_USE_ENV_PROXY", "1")
+        .env("HTTP_PROXY", proxy)
+        .env("HTTPS_PROXY", proxy)
+        .env("http_proxy", proxy)
+        .env("https_proxy", proxy);
+}
+
+fn clear_node_proxy_environment(command: &mut std::process::Command) {
+    command.env_remove("NODE_USE_ENV_PROXY");
+    for key in PROXY_ENVIRONMENT_KEYS {
+        command.env_remove(key);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_system_proxy_from_scutil(output: &str) -> Option<String> {
+    let value = |key: &str| {
+        output.lines().find_map(|line| {
+            let (found, value) = line.trim().split_once(" : ")?;
+            (found == key).then(|| value.trim())
+        })
+    };
+    let enabled = |prefix: &str| value(&format!("{prefix}Enable")) == Some("1");
+    let (prefix, host) = if enabled("HTTPS") {
+        ("HTTPS", value("HTTPSProxy")?)
+    } else if enabled("HTTP") {
+        ("HTTP", value("HTTPProxy")?)
+    } else {
+        return None;
+    };
+    let port = value(&format!("{prefix}Port"))?.parse::<u16>().ok()?;
+    if port == 0
+        || host.is_empty()
+        || !host
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | ':'))
+    {
+        return None;
+    }
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    Some(format!("http://{host}:{port}"))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_system_proxy() -> Option<String> {
+    let output = crate::command_for_host("scutil")
+        .arg("--proxy")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+        .and_then(|output| macos_system_proxy_from_scutil(&output))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_system_proxy() -> Option<String> { None }
+
+fn configure_community_installer_network(
+    command: &mut std::process::Command,
+    settings: &Settings,
+    system_proxy: Option<&str>,
+) {
+    match settings.mode {
+        ProxyMode::Direct => clear_node_proxy_environment(command),
+        ProxyMode::Manual => set_node_proxy_environment(command, &settings.proxy_url),
+        ProxyMode::System => {
+            command.env("NODE_USE_ENV_PROXY", "1");
+            if !has_inherited_proxy_environment() {
+                if let Some(proxy) = system_proxy {
+                    set_node_proxy_environment(command, proxy);
+                }
+            }
+        }
+    }
+}
+
+/// Applies the saved PC networking policy to the community `npx` installer.
+/// Device LAN traffic never uses this path.
+pub fn configure_community_installer_command(
+    command: &mut std::process::Command,
+) -> Result<(), String> {
+    let settings = load()?;
+    let system_proxy = macos_system_proxy();
+    configure_community_installer_network(command, &settings, system_proxy.as_deref());
+    Ok(())
+}
+
 /// 本机端点（127.0.0.1/localhost/*.local）专用：强制直连。
 /// reqwest 的 macOS 系统代理发现不遵循"例外列表"，本机流量会被推进
 /// 系统代理（实测 127.0.0.1:9876 建立了到 7897 端口代理的连接）；
@@ -325,6 +436,58 @@ pub async fn test_llm_network_settings() -> Result<Vec<ProbeResult>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn community_installer_uses_the_saved_manual_proxy() {
+        let settings = Settings {
+            mode: ProxyMode::Manual,
+            proxy_url: "http://proxy.example:7897".into(),
+            ..Default::default()
+        };
+        let mut command = std::process::Command::new("npx");
+
+        configure_community_installer_network(&mut command, &settings, None);
+
+        let proxy = command.get_envs().find_map(|(key, value)| {
+            (key.to_string_lossy() == "HTTPS_PROXY")
+                .then(|| value.as_ref().map(|value| value.to_string_lossy().into_owned()))
+                .flatten()
+        });
+        assert_eq!(proxy.as_deref(), Some("http://proxy.example:7897"));
+    }
+
+    #[test]
+    fn community_installer_removes_inherited_proxy_when_direct() {
+        let mut command = std::process::Command::new("npx");
+
+        configure_community_installer_network(&mut command, &Settings { mode: ProxyMode::Direct, ..Default::default() }, None);
+
+        let https_proxy = command.get_envs().find_map(|(key, value)| {
+            (key.to_string_lossy() == "HTTPS_PROXY").then_some(value)
+        });
+        assert!(matches!(https_proxy, Some(None)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_system_proxy_is_converted_for_node_fetch() {
+        let scutil = r#"
+<dictionary> {
+  HTTPEnable : 1
+  HTTPPort : 7897
+  HTTPProxy : 127.0.0.1
+  HTTPSEnable : 1
+  HTTPSPort : 7897
+  HTTPSProxy : 127.0.0.1
+}
+"#;
+
+        assert_eq!(
+            macos_system_proxy_from_scutil(scutil),
+            Some("http://127.0.0.1:7897".to_string())
+        );
+    }
+
     #[test]
     fn fresh_machine_has_no_proxy_or_certificate() {
         let dir = tempfile::tempdir().unwrap();

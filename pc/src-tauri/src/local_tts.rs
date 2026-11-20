@@ -323,48 +323,27 @@ mod tests {
     }
 }
 
-fn prefs_path() -> Result<std::path::PathBuf, String> {
-    let home = std::env::var("HOME").map_err(|_| "无法定位 HOME 目录".to_string())?;
-    Ok(std::path::Path::new(&home).join(".hachimo-local-asr.json"))
-}
-
-/// 是否选用本地 TTS（与 ASR 共用一份偏好文件，字段 ttsProvider）。
+/// 是否选用 macOS 系统 TTS。Kokoro 是另一条本地模型路径，不能被此判断吞掉。
 pub fn provider_is_local() -> bool {
-    let Ok(path) = prefs_path() else { return false };
-    let Ok(raw) = std::fs::read_to_string(path) else { return false };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else { return false };
-    value.get("ttsProvider").and_then(|item| item.as_str()) == Some("local")
+    crate::voice_service_settings::tts_provider() == "macos"
 }
 
 /// 本地 TTS 使用的系统音色（缺省 Tingting）。
 pub fn preferred_voice() -> String {
-    let Ok(path) = prefs_path() else { return DEFAULT_VOICE.to_string() };
-    let Ok(raw) = std::fs::read_to_string(path) else { return DEFAULT_VOICE.to_string() };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return DEFAULT_VOICE.to_string();
-    };
-    value
-        .get("localTtsVoice")
-        .and_then(|item| item.as_str())
-        .filter(|item| !item.trim().is_empty())
-        .unwrap_or(DEFAULT_VOICE)
-        .to_string()
+    crate::voice_service_settings::macos_voice()
 }
 
 /// 设置页保存 TTS 引擎选择（volcano / local）与音色。
 #[tauri::command]
 pub fn local_tts_save_prefs(provider: String, voice: Option<String>) -> Result<(), String> {
-    let path = prefs_path()?;
-    let mut value: serde_json::Value = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-    if let Some(map) = value.as_object_mut() {
-        map.insert("ttsProvider".into(), serde_json::json!(provider));
-        if let Some(voice) = voice {
-            map.insert("localTtsVoice".into(), serde_json::json!(voice));
-        }
-    }
-    std::fs::write(&path, value.to_string())
-        .map_err(|e| format!("保存 TTS 偏好失败：{e}"))
+    let provider = if provider == "local" { "macos".into() } else { provider };
+    crate::voice_service_settings::update(crate::voice_service_settings::VoiceServicePreferencesInput {
+        asr_provider: None,
+        local_asr_endpoint: None,
+        local_asr_engine: None,
+        tts_provider: Some(provider),
+        macos_tts_voice: voice,
+        kokoro_endpoint: None,
+        kokoro_voice: None,
+    }).map(|_| ())
 }
