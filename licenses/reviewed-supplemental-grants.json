@@ -2,6 +2,36 @@
   "schema": 1,
   "kind": "REVIEWED_VERSION_AND_ARCHIVE_BOUND_UPSTREAM_SUPPLEMENTAL_LICENSES",
   "entries": {
+    "cargo:rumqttc@0.25.1": {
+      "crateArchiveSha256": "0feff8d882bff0b2fddaf99355a10336d43dd3ed44204f85ece28cf9626ab519",
+      "metadataLicenseExpression": "Apache-2.0",
+      "publishedVcs": {
+        "git": {
+          "sha1": "f1e9e8d558783f942993046679cdf3c8c3a3d36b"
+        },
+        "path_in_vcs": "rumqttc"
+      },
+      "repository": "https://github.com/bytebeamio/rumqtt",
+      "grantContextKind": "pinned-workspace-grant",
+      "texts": [
+        {
+          "file": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30.txt",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "bytes": 11358,
+          "upstreamURL": "https://raw.githubusercontent.com/bytebeamio/rumqtt/f1e9e8d558783f942993046679cdf3c8c3a3d36b/LICENSE",
+          "upstreamPath": "LICENSE",
+          "role": "upstream-license-or-notice"
+        }
+      ],
+      "evidence": [
+        {
+          "repository": "https://github.com/bytebeamio/rumqtt",
+          "commit": "f1e9e8d558783f942993046679cdf3c8c3a3d36b"
+        }
+      ],
+      "copyrightPolicy": "Upstream copyright/declarations preserved verbatim; no owner/year invented or substituted.",
+      "rightsReviewNotes": []
+    },
     "cargo:accessibility-sys@0.2.0": {
       "crateArchiveSha256": "46a6a8e90a1d8b96a48249e7c8f5b4058447bea8847280db7bfccb6dcab6b8e1",
       "metadataLicenseExpression": "MIT / Apache-2.0",

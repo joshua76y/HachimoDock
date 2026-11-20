@@ -1,6 +1,6 @@
 [package]
 name = "pet-manager-tauri"
-version = "0.1.199"
+version = "0.1.211"
 description = "pet-manager Tauri client"
 authors = ["pet-manager contributors"]
 license-file = "../../LICENSE"
@@ -41,7 +41,7 @@ uuid = { version = "1", features = ["v4"] }
 flate2 = "1"
 futures-util = "0.3"
 # Keep this compatible branch above the AsyncFd I/O-safety fix.
-tokio = { version = "~1.51.6", features = ["sync", "time"] }
+tokio = { version = "~1.51.6", features = ["sync", "time", "net"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 # Security floors for the TLS runtime shared by WebSocket/HTTP clients. No new
 # default features: do not enable HTTP/3, a new crypto provider or cert compression.
@@ -58,6 +58,11 @@ sha2 = "0.10"
 sha1 = "0.10"
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
+# 小智官方实时服务：TLS MQTT 控制面、AES-CTR UDP 数据面和随桌面端静态构建的 Opus。
+rumqttc = { version = "0.25.1", default-features = false, features = ["use-rustls"] }
+# 0.9.x shares the existing aes 0.8/cipher 0.4 ABI; 0.10 is cipher 0.5.
+ctr = "0.9.2"
+opus = "0.4.0"
 # MIoCo needs only fixed public-key RSAES-PKCS1-v1_5 encryption. Avoid the
 # unpatched rsa private-operation implementation (CVE-2023-49092).
 num-bigint-dig = { version = "0.8.6", default-features = false, features = ["std", "u64_digit", "zeroize"] }
